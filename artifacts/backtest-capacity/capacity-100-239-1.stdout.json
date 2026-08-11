@@ -1,0 +1,1 @@
+{"barsPerSecond":159333.33333333334,"barsPerSymbol":239,"completed":100,"concurrency":1,"dataSource":"raw_tick_cache_v1 template","elapsedMs":150,"failed":0,"heartbeatMaxMs":16,"heartbeatP95Ms":16,"logicalProcessors":20,"peakActiveEngines":1,"resultChecksum":10000000,"symbols":100,"symbolsPerSecond":666.6666666666666,"taskP50Ms":1,"taskP95Ms":2,"totalBars":23900}

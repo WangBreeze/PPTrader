@@ -1,0 +1,40 @@
+{
+    "date": "2026-08-07",
+    "endpoint": "loopback-tunnel",
+    "results": [
+        {
+            "availableSymbols": 1,
+            "candleBarsWritten": 240,
+            "candleDatabaseMilliseconds": 24,
+            "databaseBytes": 1511856,
+            "elapsedMilliseconds": 1830,
+            "failedFiles": 0,
+            "files": 1,
+            "manifestMilliseconds": 12,
+            "missingSymbols": 0,
+            "parseMilliseconds": 1388,
+            "rawDatabaseMilliseconds": 364,
+            "rawTicksWritten": 4554,
+            "requestedSymbols": 1,
+            "sourceBytes": 164357,
+            "transferMilliseconds": 21
+        },
+        {
+            "availableSymbols": 7,
+            "candleBarsWritten": 1645,
+            "candleDatabaseMilliseconds": 171,
+            "databaseBytes": 8615672,
+            "elapsedMilliseconds": 7953,
+            "failedFiles": 0,
+            "files": 7,
+            "manifestMilliseconds": 16,
+            "missingSymbols": 3,
+            "parseMilliseconds": 6039,
+            "rawDatabaseMilliseconds": 1587,
+            "rawTicksWritten": 19759,
+            "requestedSymbols": 10,
+            "sourceBytes": 686993,
+            "transferMilliseconds": 118
+        }
+    ]
+}

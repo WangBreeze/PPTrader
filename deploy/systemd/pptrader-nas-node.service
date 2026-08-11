@@ -1,0 +1,22 @@
+[Unit]
+Description=PPTrader read-only TickData node
+After=network.target
+
+[Service]
+Type=simple
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=%h/.config/pptrader/nas-node.env
+ExecStart=/usr/bin/python3 %h/.local/share/pptrader/nas_data_node.py --root ${PPTRADER_NAS_ROOT} --bind 127.0.0.1 --port ${PPTRADER_NAS_PORT}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

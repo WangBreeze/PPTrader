@@ -1,0 +1,44 @@
+#include "services/BacktestDataVersion.h"
+
+#include <QCryptographicHash>
+
+#include <algorithm>
+
+namespace pp {
+
+QString computeBacktestDataVersion(const QVector<Candle> &candles,
+                                   const QString &symbol,
+                                   int periodSeconds)
+{
+    QVector<Candle> canonical = candles;
+    canonical.erase(std::remove_if(canonical.begin(), canonical.end(), [&](const Candle &candle) {
+        return candle.instrument.symbol != symbol || !candle.startTime.isValid()
+            || candle.close <= 0.0;
+    }), canonical.end());
+    std::sort(canonical.begin(), canonical.end(), [](const Candle &left, const Candle &right) {
+        return left.startTime < right.startTime;
+    });
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(symbol.toUtf8());
+    hash.addData("\n");
+    hash.addData(QByteArray::number(periodSeconds));
+    hash.addData("\n");
+    for (const Candle &candle : canonical) {
+        hash.addData(QByteArray::number(candle.startTime.toUTC().toMSecsSinceEpoch()));
+        hash.addData(",");
+        hash.addData(QByteArray::number(candle.open, 'g', 17));
+        hash.addData(",");
+        hash.addData(QByteArray::number(candle.high, 'g', 17));
+        hash.addData(",");
+        hash.addData(QByteArray::number(candle.low, 'g', 17));
+        hash.addData(",");
+        hash.addData(QByteArray::number(candle.close, 'g', 17));
+        hash.addData(",");
+        hash.addData(QByteArray::number(candle.volume, 'g', 17));
+        hash.addData("\n");
+    }
+    return QStringLiteral("sha256:%1").arg(QString::fromLatin1(hash.result().toHex()));
+}
+
+} // namespace pp

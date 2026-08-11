@@ -1,0 +1,51 @@
+{
+    "date": "2026-08-07",
+    "endpoint": "loopback-tunnel",
+    "scope": "application-valid-shanghai-shenzhen-a-shares",
+    "maximumCompletedTier": 100,
+    "results": [
+        {
+            "availableSymbols": 1,
+            "candleBarsWritten": 240,
+            "candleDatabaseMilliseconds": 21,
+            "databaseBytes": 1511856,
+            "elapsedMilliseconds": 1612,
+            "failedFiles": 0,
+            "files": 1,
+            "parseMilliseconds": 1239,
+            "rawDatabaseMilliseconds": 307,
+            "rawTicksWritten": 4554,
+            "sourceBytes": 164357,
+            "transferMilliseconds": 18
+        },
+        {
+            "availableSymbols": 10,
+            "candleBarsWritten": 2363,
+            "candleDatabaseMilliseconds": 211,
+            "databaseBytes": 12162808,
+            "elapsedMilliseconds": 9903,
+            "failedFiles": 0,
+            "files": 10,
+            "parseMilliseconds": 7569,
+            "rawDatabaseMilliseconds": 1937,
+            "rawTicksWritten": 27715,
+            "sourceBytes": 954322,
+            "transferMilliseconds": 147
+        },
+        {
+            "availableSymbols": 100,
+            "candleBarsWritten": 23821,
+            "candleDatabaseMilliseconds": 2201,
+            "databaseBytes": 83297376,
+            "elapsedMilliseconds": 108467,
+            "failedFiles": 0,
+            "files": 100,
+            "parseMilliseconds": 82991,
+            "rawDatabaseMilliseconds": 21387,
+            "rawTicksWritten": 300988,
+            "sourceBytes": 10488041,
+            "transferMilliseconds": 1739
+        }
+    ],
+    "deferredTiers": [500, 5207]
+}

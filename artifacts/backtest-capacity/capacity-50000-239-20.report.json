@@ -1,0 +1,21 @@
+﻿{
+    "configuration":  "Release",
+    "symbols":  50000,
+    "barsPerSymbol":  239,
+    "totalBars":  11950000,
+    "concurrency":  20,
+    "completed":  50000,
+    "failed":  0,
+    "elapsedMs":  25236,
+    "symbolsPerSecond":  1981.296560469171,
+    "barsPerSecond":  473529.87795213185,
+    "taskP50Ms":  6,
+    "taskP95Ms":  10,
+    "heartbeatP95Ms":  21,
+    "heartbeatMaxMs":  22,
+    "peakWorkingSetMiB":  16.88,
+    "peakPrivateMemoryMiB":  7.98,
+    "logicalProcessors":  20,
+    "dataSource":  "raw_tick_cache_v1 template",
+    "sampleCount":  232
+}

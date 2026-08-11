@@ -1,0 +1,23 @@
+{
+    "date": "2026-08-07",
+    "endpoint": "loopback-tunnel",
+    "results": [
+        {
+            "availableSymbols": 1,
+            "candleBarsWritten": 240,
+            "candleDatabaseMilliseconds": 25,
+            "databaseBytes": 4096,
+            "elapsedMilliseconds": 1800,
+            "failedFiles": 0,
+            "files": 1,
+            "manifestMilliseconds": 16,
+            "missingSymbols": 0,
+            "parseMilliseconds": 1365,
+            "rawDatabaseMilliseconds": 354,
+            "rawTicksWritten": 4554,
+            "requestedSymbols": 1,
+            "sourceBytes": 164357,
+            "transferMilliseconds": 7
+        }
+    ]
+}

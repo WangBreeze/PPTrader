@@ -1,0 +1,57 @@
+{
+  "date": "2026-08-07",
+  "universeSymbols": 5207,
+  "endpoint": "loopback-tunnel",
+  "results": [
+    {
+      "requestedSymbols": 1,
+      "availableSymbols": 1,
+      "missingSymbols": 0,
+      "entries": 1,
+      "sourceBytes": 164357,
+      "responseBytes": 376,
+      "elapsedMilliseconds": 40.482,
+      "httpStatus": 200
+    },
+    {
+      "requestedSymbols": 10,
+      "availableSymbols": 10,
+      "missingSymbols": 0,
+      "entries": 10,
+      "sourceBytes": 954322,
+      "responseBytes": 2928,
+      "elapsedMilliseconds": 2.746,
+      "httpStatus": 200
+    },
+    {
+      "requestedSymbols": 100,
+      "availableSymbols": 100,
+      "missingSymbols": 0,
+      "entries": 100,
+      "sourceBytes": 10488041,
+      "responseBytes": 28449,
+      "elapsedMilliseconds": 18.006,
+      "httpStatus": 200
+    },
+    {
+      "requestedSymbols": 500,
+      "availableSymbols": 498,
+      "missingSymbols": 2,
+      "entries": 498,
+      "sourceBytes": 49475269,
+      "responseBytes": 141268,
+      "elapsedMilliseconds": 79.025,
+      "httpStatus": 200
+    },
+    {
+      "requestedSymbols": 5207,
+      "availableSymbols": 5186,
+      "missingSymbols": 21,
+      "entries": 5186,
+      "sourceBytes": 513750405,
+      "responseBytes": 1470219,
+      "elapsedMilliseconds": 3325.988,
+      "httpStatus": 200
+    }
+  ]
+}

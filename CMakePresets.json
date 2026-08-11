@@ -1,0 +1,66 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vs2022-x64",
+      "displayName": "Visual Studio 2022 x64 + Qt 6.4.3",
+      "description": "Configure PPTrader with the installed VS2022 toolchain and Qt 6.4.3.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "D:/ProgramData/Qt/6.4.3/msvc2019_64",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "BUILD_TESTING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2022-debug",
+      "displayName": "Build Debug",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs2022-release",
+      "displayName": "Build Release",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vs2022-debug",
+      "displayName": "Test Debug",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "vs2022-release",
+      "displayName": "Test Release",
+      "configurePreset": "vs2022-x64",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+.venv/
+out/
+build/
+build-cmake/
+CMakeLists.txt.user
+data/pptrader.db*
+.env
+.env.*
+!.env.example
+
+# 个人开发配置与机器特定路径
+/.vscode/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 运行时日志与临时测试输出
+artifacts/**/*.log
+artifacts/**/*.txt
