@@ -1,6 +1,8 @@
 #include "services/AShareTradingCalendar.h"
 
 #include <array>
+#include <set>
+#include <QSet>
 
 namespace pp {
 
@@ -69,6 +71,47 @@ QString AShareTradingCalendar::sourceForYear(int year)
 {
     return year == 2026 ? QStringLiteral("SSE-2025-45")
                         : QStringLiteral("weekday-fallback");
+}
+
+void AShareTradingCalendar::applyDatasetCoverage(BacktestDatasetIdentity &identity)
+{
+    identity.expectedTradingDays = 0;
+    identity.gapDayCount = 0;
+    identity.calendarCoverageKnown = true;
+    identity.calendarSource.clear();
+    identity.calendarNote.clear();
+
+    if (!identity.firstTradingDate.isValid() || !identity.lastTradingDate.isValid()
+        || identity.firstTradingDate > identity.lastTradingDate) {
+        identity.calendarCoverageKnown = false;
+        identity.calendarNote = QStringLiteral("无有效交易日范围");
+        return;
+    }
+
+    QSet<QDate> present;
+    for (const RawTickDayFingerprint &day : identity.days) {
+        present.insert(day.tradingDate);
+    }
+
+    std::set<QString> sources;
+    QDate cursor = identity.firstTradingDate;
+    while (cursor <= identity.lastTradingDate) {
+        const AShareTradingDayStatus status = AShareTradingCalendar::status(cursor);
+        if (!status.coverageKnown) identity.calendarCoverageKnown = false;
+        if (!status.source.isEmpty()) sources.insert(status.source);
+        if (status.tradingDay) {
+            ++identity.expectedTradingDays;
+            if (!present.contains(cursor)) ++identity.gapDayCount;
+        }
+        cursor = cursor.addDays(1);
+    }
+    for (const QString &source : sources) {
+        if (!identity.calendarSource.isEmpty()) identity.calendarSource += QStringLiteral("/");
+        identity.calendarSource += source;
+    }
+    if (!identity.calendarCoverageKnown) {
+        identity.calendarNote = QStringLiteral("日历未覆盖年份，缺口按工作日推定");
+    }
 }
 
 } // namespace pp

@@ -26,6 +26,8 @@ qt_add_executable(PPTrader
     src/app/WorkspaceInstrumentSelectionState.cpp
     src/app/WorkspaceInstrumentSelectionState.h
     src/domain/BacktestTypes.h
+    src/domain/BacktestDatasetTypes.cpp
+    src/domain/BacktestDatasetTypes.h
     src/domain/BatchBacktestTypes.cpp
     src/domain/BatchBacktestTypes.h
     src/domain/CrossSectionalTypes.h
@@ -465,6 +467,8 @@ if(BUILD_TESTING)
         src/services/LocalDataStore.h
         src/services/NasDataNodeClient.cpp
         src/services/NasDataNodeClient.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/SqliteLocalDataStore.cpp
         src/services/SqliteLocalDataStore.h
         src/services/StrategyExecutionStore.h
@@ -561,6 +565,8 @@ if(BUILD_TESTING)
         src/domain/TradingTypes.h
         src/models/MarketSnapshotListModel.cpp
         src/models/MarketSnapshotListModel.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/AShareUniverseLoader.cpp
         src/services/AShareUniverseLoader.h
         src/services/AsyncMarketSnapshotQueryService.cpp
@@ -606,6 +612,8 @@ if(BUILD_TESTING)
         src/domain/TradingTypes.h
         src/models/LocalCandleSeriesListModel.cpp
         src/models/LocalCandleSeriesListModel.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/AsyncLocalCandleSeriesQueryService.cpp
         src/services/AsyncLocalCandleSeriesQueryService.h
         src/services/CustomStrategyStore.h
@@ -624,6 +632,36 @@ if(BUILD_TESTING)
     )
     target_include_directories(tst_local_candle_series PRIVATE src)
     target_link_libraries(tst_local_candle_series PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+
+    qt_add_executable(tst_backtest_dataset_identity
+        tests/tst_backtest_dataset_identity.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/CrossSectionalTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/LocalHistoryTypes.cpp
+        src/domain/LocalHistoryTypes.h
+        src/domain/MarketTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
+        src/services/CustomStrategyStore.h
+        src/services/LocalDataStore.h
+        src/services/RawTickCandleAggregator.cpp
+        src/services/RawTickCandleAggregator.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
+    )
+    target_include_directories(tst_backtest_dataset_identity PRIVATE src)
+    target_link_libraries(tst_backtest_dataset_identity PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
 
     qt_add_executable(tst_cross_section_performance
         tests/tst_cross_section_performance.cpp
@@ -655,6 +693,8 @@ if(BUILD_TESTING)
         src/domain/TradingTypes.h
         src/models/CustomStrategyListModel.cpp
         src/models/CustomStrategyListModel.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/CustomStrategyStore.h
         src/services/LocalDataStore.h
         src/services/SqliteLocalDataStore.cpp
@@ -704,6 +744,8 @@ if(BUILD_TESTING)
         src/services/StrategyExecutionStore.h
         src/services/TickDataCsvImporter.cpp
         src/services/TickDataCsvImporter.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/TickDataBatchPlanner.cpp
         src/services/TickDataBatchPlanner.h
         src/services/AShareTradingCalendar.cpp
@@ -768,6 +810,7 @@ if(BUILD_TESTING)
     add_test(NAME market_snapshot_contract COMMAND tst_market_snapshot_contract)
     add_test(NAME cross_section_plot_data COMMAND tst_cross_section_plot_data)
     add_test(NAME local_candle_series COMMAND tst_local_candle_series)
+    add_test(NAME backtest_dataset_identity COMMAND tst_backtest_dataset_identity)
     add_test(NAME cross_section_performance COMMAND tst_cross_section_performance)
     add_test(NAME custom_strategy COMMAND tst_custom_strategy)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)
@@ -776,7 +819,7 @@ if(BUILD_TESTING)
     add_test(NAME historical_provider_router COMMAND tst_historical_provider_router)
     add_test(NAME realtime_provider_router COMMAND tst_realtime_provider_router)
 
-    set_tests_properties(market_session sqlite_local_data_store backtest_engine batch_backtest trading_account strategy_execution exchange_rules cross_sectional market_snapshot_contract cross_section_plot_data cross_section_performance custom_strategy workspace_instrument_selection tickdata_csv_import nas_data_node historical_provider_router realtime_provider_router PROPERTIES
+    set_tests_properties(market_session sqlite_local_data_store backtest_engine batch_backtest trading_account strategy_execution exchange_rules cross_sectional market_snapshot_contract cross_section_plot_data cross_section_performance custom_strategy workspace_instrument_selection tickdata_csv_import nas_data_node historical_provider_router realtime_provider_router local_candle_series backtest_dataset_identity PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
     )
 endif()

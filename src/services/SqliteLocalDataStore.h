@@ -71,6 +71,9 @@ public:
     QVector<Candle> loadCandlePage(const Instrument &instrument, int periodSeconds,
                                    int page, int pageSize, bool *ok = nullptr);
     QVector<LocalHistoryDataset> localHistoryCatalog() override;
+    QVector<BacktestDatasetIdentity> loadBacktestDatasetIdentities() override;
+    std::optional<BacktestDatasetIdentity> loadBacktestDatasetIdentity(
+        const Instrument &instrument, int periodSeconds) override;
     QHash<QDate, int> candleCountsByTradingDate(
         const Instrument &instrument, int periodSeconds,
         const QDate &startDate, const QDate &endDate);

@@ -41,4 +41,32 @@ QString computeBacktestDataVersion(const QVector<Candle> &candles,
     return QStringLiteral("sha256:%1").arg(QString::fromLatin1(hash.result().toHex()));
 }
 
+QString computeBacktestDatasetVersion(const BacktestDatasetIdentity &identity)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(identity.instrument.symbol.toUtf8());
+    hash.addData("\n");
+    hash.addData(QByteArray::number(identity.periodSeconds));
+    hash.addData("\n");
+    hash.addData(identity.source.toUtf8());
+    hash.addData("\n");
+    hash.addData(QByteArray::number(identity.aggregatorVersion));
+    hash.addData("\n");
+
+    QVector<RawTickDayFingerprint> days = identity.days;
+    std::sort(days.begin(), days.end(), [](const RawTickDayFingerprint &left,
+                                            const RawTickDayFingerprint &right) {
+        return left.tradingDate < right.tradingDate;
+    });
+    for (const RawTickDayFingerprint &day : days) {
+        hash.addData(day.tradingDate.toString(Qt::ISODate).toUtf8());
+        hash.addData(",");
+        hash.addData(QByteArray::number(day.rawCount));
+        hash.addData(",");
+        hash.addData(QByteArray::number(day.rawMaximumId));
+        hash.addData("\n");
+    }
+    return QStringLiteral("sha256:%1").arg(QString::fromLatin1(hash.result().toHex()));
+}
+
 } // namespace pp

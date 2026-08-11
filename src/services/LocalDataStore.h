@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/BacktestDatasetTypes.h"
 #include "domain/CrossSectionalTypes.h"
 #include "domain/BacktestTypes.h"
 #include "domain/LocalHistoryTypes.h"
@@ -54,6 +55,17 @@ public:
         const Instrument &instrument, int periodSeconds, int limit,
         const QString &source) = 0;
     virtual QVector<LocalHistoryDataset> localHistoryCatalog() = 0;
+    virtual QVector<BacktestDatasetIdentity> loadBacktestDatasetIdentities()
+    {
+        return {};
+    }
+    virtual std::optional<BacktestDatasetIdentity> loadBacktestDatasetIdentity(
+        const Instrument &instrument, int periodSeconds)
+    {
+        Q_UNUSED(instrument)
+        Q_UNUSED(periodSeconds)
+        return std::nullopt;
+    }
     virtual bool saveBacktestArchive(const BacktestArchiveRecord &record) = 0;
     virtual QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() = 0;
     virtual std::optional<BacktestArchiveRecord> loadBacktestArchive(

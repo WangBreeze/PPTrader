@@ -1,5 +1,7 @@
 #include "services/SqliteLocalDataStore.h"
 
+#include "services/BacktestDataVersion.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -19,7 +21,7 @@ namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 2;
+constexpr int kCurrentDatabaseSchemaVersion = 3;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -315,8 +317,23 @@ bool SqliteLocalDataStore::migrateSchema()
                 return false;
             }
         }
+        if (fromVersion < 3) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(3, 'backtest_dataset_identity', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-backtest-dataset-v3"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v3 迁移历史"));
+                return false;
+            }
+        }
         QSqlQuery setVersion(m_database);
-        if (!setVersion.exec(QStringLiteral("pragma user_version=2"))) {
+        if (!setVersion.exec(QStringLiteral("pragma user_version=%1")
+                                 .arg(kCurrentDatabaseSchemaVersion))) {
             m_database.rollback();
             emitSqlError(QStringLiteral("更新全库结构版本"));
             return false;
@@ -1236,6 +1253,176 @@ QVector<LocalHistoryDataset> SqliteLocalDataStore::localHistoryCatalog()
         identity.finish();
     }
     return result;
+}
+
+QVector<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdentities()
+{
+    QVector<BacktestDatasetIdentity> result;
+    QHash<QString, QVector<RawTickDayFingerprint>> daysBySymbol;
+    QHash<QString, Instrument> instrumentsBySymbol;
+
+    QSqlQuery facts(m_database);
+    if (!facts.exec(QStringLiteral(
+            "select symbol, max(name), max(market), max(venue), trading_date, count(*), max(id) "
+            "from raw_trade_ticks group by symbol, trading_date "
+            "order by symbol asc, trading_date asc"))) {
+        emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
+        return result;
+    }
+    while (facts.next()) {
+        const QString symbol = facts.value(0).toString();
+        const QDate tradingDate = QDate::fromString(facts.value(4).toString(), Qt::ISODate);
+        if (symbol.isEmpty() || !tradingDate.isValid()) continue;
+        RawTickDayFingerprint day;
+        day.tradingDate = tradingDate;
+        day.rawCount = facts.value(5).toLongLong();
+        day.rawMaximumId = facts.value(6).toLongLong();
+        daysBySymbol[symbol].append(day);
+
+        Instrument instrument;
+        instrument.symbol = symbol;
+        instrument.name = facts.value(1).toString();
+        instrument.market = marketFromCode(facts.value(2).toString(), Market::AShare);
+        instrument.venue = facts.value(3).toString();
+        instrumentsBySymbol.insert(symbol, instrument);
+    }
+    facts.finish();
+
+    QHash<QString, QHash<QDate, RawTickDayFingerprint>> cacheByKey;
+    QSqlQuery caches(m_database);
+    if (!caches.exec(QStringLiteral(
+            "select symbol, period_seconds, trading_date, raw_count, raw_max_id, "
+            "bar_count, cache_version "
+            "from raw_tick_candle_cache_state order by symbol asc, period_seconds asc, "
+            "trading_date asc"))) {
+        emitSqlError(QStringLiteral("读取逐笔派生缓存状态"));
+        return result;
+    }
+    while (caches.next()) {
+        const QString key = QStringLiteral("%1|%2")
+            .arg(caches.value(0).toString(), caches.value(1).toString());
+        const QDate tradingDate = QDate::fromString(caches.value(2).toString(), Qt::ISODate);
+        if (!tradingDate.isValid()) continue;
+        RawTickDayFingerprint cached;
+        cached.tradingDate = tradingDate;
+        cached.rawCount = caches.value(3).toLongLong();
+        cached.rawMaximumId = caches.value(4).toLongLong();
+        cached.barCount = caches.value(5).toInt();
+        cached.cacheVersion = caches.value(6).toInt();
+        cacheByKey[key].insert(tradingDate, cached);
+    }
+    caches.finish();
+
+    QStringList keys = cacheByKey.keys();
+    std::sort(keys.begin(), keys.end());
+    for (const QString &key : keys) {
+        const QStringList parts = key.split(QLatin1Char('|'));
+        if (parts.size() != 2) continue;
+        const QString symbol = parts.at(0);
+        const int periodSeconds = parts.at(1).toInt();
+        if (periodSeconds <= 0 || !instrumentsBySymbol.contains(symbol)) continue;
+
+        BacktestDatasetIdentity identity;
+        identity.instrument = instrumentsBySymbol.value(symbol);
+        identity.periodSeconds = periodSeconds;
+        identity.aggregatorVersion = 1;
+        identity.days = daysBySymbol.value(symbol);
+        const QHash<QDate, RawTickDayFingerprint> &cacheByDate = cacheByKey.value(key);
+        for (RawTickDayFingerprint &day : identity.days) {
+            const auto match = cacheByDate.constFind(day.tradingDate);
+            if (match != cacheByDate.constEnd()) {
+                day.barCount = match->barCount;
+                day.cacheVersion = match->cacheVersion;
+                if (match->rawCount != day.rawCount
+                    || match->rawMaximumId != day.rawMaximumId) {
+                    ++identity.staleDayCount;
+                }
+            } else {
+                ++identity.staleDayCount;
+            }
+        }
+        identity.firstTradingDate = identity.days.first().tradingDate;
+        identity.lastTradingDate = identity.days.last().tradingDate;
+        identity.datasetVersion = computeBacktestDatasetVersion(identity);
+        result.append(identity);
+    }
+    return result;
+}
+
+std::optional<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdentity(
+    const Instrument &instrument, int periodSeconds)
+{
+    if (instrument.symbol.isEmpty() || periodSeconds <= 0) return std::nullopt;
+
+    BacktestDatasetIdentity identity;
+    identity.instrument = instrument;
+    identity.periodSeconds = periodSeconds;
+    identity.aggregatorVersion = 1;
+
+    QSqlQuery facts(m_database);
+    facts.prepare(QStringLiteral(
+        "select trading_date, count(*), max(id) from raw_trade_ticks "
+        "where symbol = ? group by trading_date order by trading_date asc"));
+    facts.addBindValue(instrument.symbol);
+    if (!facts.exec()) {
+        emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
+        return std::nullopt;
+    }
+    while (facts.next()) {
+        const QDate tradingDate = QDate::fromString(facts.value(0).toString(), Qt::ISODate);
+        if (!tradingDate.isValid()) continue;
+        RawTickDayFingerprint day;
+        day.tradingDate = tradingDate;
+        day.rawCount = facts.value(1).toLongLong();
+        day.rawMaximumId = facts.value(2).toLongLong();
+        identity.days.append(day);
+    }
+    facts.finish();
+    if (identity.days.isEmpty()) return std::nullopt;
+
+    identity.firstTradingDate = identity.days.first().tradingDate;
+    identity.lastTradingDate = identity.days.last().tradingDate;
+
+    QHash<QDate, RawTickDayFingerprint> cacheByDate;
+    QSqlQuery caches(m_database);
+    caches.prepare(QStringLiteral(
+        "select trading_date, raw_count, raw_max_id, bar_count, cache_version "
+        "from raw_tick_candle_cache_state "
+        "where symbol = ? and period_seconds = ? order by trading_date asc"));
+    caches.addBindValue(instrument.symbol);
+    caches.addBindValue(periodSeconds);
+    if (!caches.exec()) {
+        emitSqlError(QStringLiteral("读取逐笔派生缓存状态"));
+        return std::nullopt;
+    }
+    while (caches.next()) {
+        const QDate tradingDate = QDate::fromString(caches.value(0).toString(), Qt::ISODate);
+        if (!tradingDate.isValid()) continue;
+        RawTickDayFingerprint cached;
+        cached.tradingDate = tradingDate;
+        cached.rawCount = caches.value(1).toLongLong();
+        cached.rawMaximumId = caches.value(2).toLongLong();
+        cached.barCount = caches.value(3).toInt();
+        cached.cacheVersion = caches.value(4).toInt();
+        cacheByDate.insert(tradingDate, cached);
+    }
+    caches.finish();
+
+    for (RawTickDayFingerprint &day : identity.days) {
+        const auto match = cacheByDate.constFind(day.tradingDate);
+        if (match != cacheByDate.constEnd()) {
+            day.barCount = match->barCount;
+            day.cacheVersion = match->cacheVersion;
+            if (match->rawCount != day.rawCount
+                || match->rawMaximumId != day.rawMaximumId) {
+                ++identity.staleDayCount;
+            }
+        } else {
+            ++identity.staleDayCount;
+        }
+    }
+    identity.datasetVersion = computeBacktestDatasetVersion(identity);
+    return identity;
 }
 
 QHash<QDate, int> SqliteLocalDataStore::candleCountsByTradingDate(
@@ -2418,7 +2605,16 @@ bool SqliteLocalDataStore::ensureSchema()
             "summary_initial_capital real not null, final_equity real not null, "
             "total_return_percent real not null, max_drawdown_percent real not null, "
             "win_rate_percent real not null, sharpe_ratio real not null, total_commission real not null, "
-            "total_trades integer not null, winning_trades integer not null, losing_trades integer not null)"),
+            "total_trades integer not null, winning_trades integer not null, losing_trades integer not null, "
+            "dataset_version text not null default '', dataset_identity_json text not null default '', "
+            "dataset_raw_tick_count integer not null default 0, "
+            "dataset_derived_bar_count integer not null default 0, "
+            "dataset_day_count integer not null default 0, "
+            "dataset_first_date text not null default '', dataset_last_date text not null default '', "
+            "dataset_gap_day_count integer not null default 0, "
+            "dataset_stale_day_count integer not null default 0, "
+            "dataset_calendar_source text not null default '', "
+            "dataset_calendar_coverage_known integer not null default 0)"),
         QStringLiteral(
             "create index if not exists idx_backtest_results_completed "
             "on backtest_results(completed_at_utc desc, result_id desc)"),
@@ -2539,7 +2735,29 @@ bool SqliteLocalDataStore::ensureSchema()
         || !ensureColumn(QStringLiteral("strategy_order_intents"), QStringLiteral("order_time_in_force"),
                          QStringLiteral("integer not null default 0"))
         || !ensureColumn(QStringLiteral("strategy_order_intents"), QStringLiteral("order_expires_at_utc"),
-                         QStringLiteral("text"))) {
+                         QStringLiteral("text"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_version"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_identity_json"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_raw_tick_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_derived_bar_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_day_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_first_date"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_last_date"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_gap_day_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_stale_day_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_calendar_source"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_calendar_coverage_known"),
+                         QStringLiteral("integer not null default 0"))) {
         return false;
     }
 

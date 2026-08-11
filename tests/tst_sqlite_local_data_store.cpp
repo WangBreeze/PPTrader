@@ -152,7 +152,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QCOMPARE(store.schemaVersion(), 2);
+        QCOMPARE(store.schemaVersion(), 3);
         QVERIFY(!store.databaseUuid().isEmpty());
         uuid = store.databaseUuid();
         backupPath = store.lastMigrationBackupPath();
@@ -168,7 +168,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
             QVERIFY(verify.open());
             QSqlQuery query(verify);
             QVERIFY(query.exec(QStringLiteral("pragma user_version")) && query.next());
-            QCOMPARE(query.value(0).toInt(), 2);
+            QCOMPARE(query.value(0).toInt(), 3);
             QVERIFY(query.exec(QStringLiteral(
                 "select migration_name from schema_migration_history where version = 1"))
                 && query.next());
@@ -178,6 +178,11 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
                 && query.next());
             QCOMPARE(query.value(0).toString(),
                      QStringLiteral("historical_dataset_identity"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 3"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("backtest_dataset_identity"));
             QVERIFY(query.exec(QStringLiteral("select value from legacy_marker where id = 1"))
                 && query.next());
             QCOMPARE(query.value(0).toString(), QStringLiteral("preserved"));
@@ -207,7 +212,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
     QCOMPARE(reopened.databaseUuid(), uuid);
-    QCOMPARE(reopened.schemaVersion(), 2);
+    QCOMPARE(reopened.schemaVersion(), 3);
     QVERIFY(reopened.lastMigrationBackupPath().isEmpty());
 }
 
