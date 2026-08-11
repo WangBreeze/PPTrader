@@ -8,7 +8,7 @@ PPTrader 是基于 Qt 6、C++20 和 QML 的桌面量化交易工作台。系统�
 
 盘中真实成交统一进入 `RawTradeIncrementalIngestService`。批次必须带稳定来源与成交序号，并限制为单代码、单交易日；SQLite 唯一键负责重放幂等，事实提交后只刷新该日已经物化过的 K 线周期。事实已提交但缓存刷新失败时两种状态分开报告：原始成交不会回滚或丢失，下次查询依据指纹自动补建缓存。
 
-SQLite 全库版本从阶段 10B 起由 `PRAGMA user_version` 管理，当前为 v2。`app_database_metadata` 的 database UUID 标识数据库身份，复制或搬迁后保持不变；`schema_migration_history` 记录全库迁移，原 `schema_versions` 只保留为回测归档等子模块的兼容版本。旧库升级先执行 `VACUUM INTO` 一致性备份，再在单事务内迁移并完成 SQLite、外键和必需业务表校验；程序不会自动删除这些备份。
+SQLite 全库版本从阶段 10B 起由 `PRAGMA user_version` 管理，当前为 v3（H2 增加回测数据集身份列）。`app_database_metadata` 的 database UUID 标识数据库身份，复制或搬迁后保持不变；`schema_migration_history` 记录全库迁移，原 `schema_versions` 只保留为回测归档等子模块的兼容版本。旧库升级先执行 `VACUUM INTO` 一致性备份，再在单事务内迁移并完成 SQLite、外键和必需业务表校验；程序不会自动删除这些备份。
 
 本地数据库位置由 `StorageProfile` 管理并写入 `QSettings`。搬迁是复制并切换，不删除源库：Controller 先拒绝所有活动任务并排空/关闭后台 SQLite 连接，工作线程复制到目标临时文件，校验 database UUID 与完整性后才原子确认、保存配置并重启连接。UNC/SMB/NFS 地址不能作为 SQLite 路径；NAS 数据在 10D 中作为独立数据节点，通过 catalog/分块接口同步到本地数据库。
 
@@ -209,6 +209,8 @@ python -m venv .venv
 | `Tick` / `Candle` | timestamp、OHLC、volume、可选 B/S/M 分向量 | Provider 行情观测与可缓存历史 K 线 |
 | `RawTradeTick` | instrument、tradingDate、timestamp、sourceLine、price、volumeShares、amount、direction | 本地逐笔成交事实；B/S/M 不复用策略信号 |
 | `RawTradeFingerprint` | count、maximumId | 判断指定代码/交易日的派生 K 线缓存是否过期 |
+| `RawTickDayFingerprint` | tradingDate、rawCount、rawMaximumId、barCount、cacheVersion | 单个交易日的事实指纹与派生缓存状态；参与数据集身份哈希的只有事实字段 |
+| `BacktestDatasetIdentity` | instrument、periodSeconds、source、aggregatorVersion、days、datasetVersion、日期范围、缺口/日历覆盖 | 可回测数据集的不可变身份；由原始日期集合+Tick 指纹+聚合版本组合，`toJson()` 随归档保存 |
 | `NasCatalogEntry` | symbol、tradingDate、format、size、sha256、version、downloadPath | NAS 单代码单交易日的不可变下载清单项 |
 | `NasDownloadResult` | requestId、entry、localPath、receivedBytes、cacheReused、error | 经大小与 SHA-256 校验的本地暂存结果 |
 | `TickDataImportRequest` | rootDirectory、instrument、tradingDate、format、period、volumeUnit | 一次显式的单文件本地导入请求 |
@@ -230,7 +232,7 @@ python -m venv .venv
 | `Position` | quantity、availableQuantity、averageCost | 当前持仓与盈亏 |
 | `AccountSnapshot` | cash、frozenCash、totalEquity、dailyPnl | 账户核算和日级风控基准 |
 | `StrategyOrderIntent` | signal、orderRequest、status、orderId | 从信号到订单的审计记录 |
-| `BacktestConfig` | taskId、strategyId、strategyVersion、strategyParameters、ruleSnapshot、dataVersion、instrument、frequency、fees | 一次回测的不可混用配置快照 |
+| `BacktestConfig` | taskId、strategyId、strategyVersion、strategyParameters、ruleSnapshot、dataVersion、datasetIdentity、instrument、frequency、fees | 一次回测的不可混用配置快照；datasetIdentity 为运行前准备的数据集身份 |
 | `BacktestResult` | config、summary、trades、equityCurve | 已完成任务的摘要、成交和权益结果 |
 | `BacktestArchiveSummary` | resultId、taskId、completedAt、策略/数据身份、摘要 | 启动与列表使用的轻量归档项 |
 | `BacktestArchiveRecord` | resultId、completedAt、完整 BacktestResult | SQLite 完整回测归档与恢复载体 |
@@ -260,7 +262,7 @@ python -m venv .venv
 | `strategy_order_intents` | 信号、订单参数、审批及提交结果 |
 | `custom_strategies` | 自定义策略 JSON；`strategy_id + version` 主键，禁止同版本覆盖 |
 | `schema_versions` | 子系统 schema 版本；回测归档当前为 v1 |
-| `backtest_results` | 不可变结果身份、配置、数据版本和摘要；`result_id` 主键 |
+| `backtest_results` | 不可变结果身份、配置、数据版本、数据集身份（`dataset_*` 列）和摘要；`result_id` 主键 |
 | `backtest_equity_points` | 权益、现金、持仓市值与回撤；按 result/sequence 排序 |
 | `backtest_trades` | 完整成交身份、价格、数量、费用、盈亏和原因 |
 | `tickdata_import_runs` | 多日导入运行参数、数量、质量和状态摘要；不保存任何路径或凭据 |
@@ -270,7 +272,7 @@ python -m venv .venv
 
 旧 `candles` 表会增量增加 `buy_volume`、`sell_volume`、`neutral_volume` 和 `directional_volume_known`，默认值为零/未知。普通 Provider K 线不会被误认为具备成交方向；逐笔 CSV 聚合 Bar 才设置已知标记。
 
-回测归档三张业务表使用外键和单事务保证原子性；父结果、权益曲线和成交明细要么全部提交，要么全部回滚。应用当前不提供删除和自动保留期，归档会持续保存在本地数据库；批量导出、多结果对比和云同步也尚未实现。
+回测归档三张业务表使用外键和单事务保证原子性；父结果、权益曲线和成交明细要么全部提交，要么全部回滚。归档父记录自 H2 起保存完整数据集身份 JSON（日期范围、原始行数、派生根数、缺口、日历来源），历史结果不以当前缓存解释；`BacktestDatasetService` 会在运行回测前按需重建过期派生缓存并校验身份。应用当前不提供删除和自动保留期，归档会持续保存在本地数据库；批量导出、多结果对比和云同步也尚未实现。H2 详细契约见 `docs/backtest-dataset-identity.md`。
 
 全市场 Tick 由 `AsyncTickWriter` 在独立线程和独立 SQLite 连接中写入。数据库启用 WAL、5 秒 `busy_timeout` 和 `NORMAL` 同步级别；队列最多保留 3 个待写批次，过载时丢弃新批次并报告。每批使用一个事务，`ticks(batch_id, symbol)` 的部分唯一索引保证同一批次重放不会产生重复记录。无批次的旧式 Tick 仍可同步写入。
 

@@ -24,9 +24,9 @@
 
 ### H2：回测数据集身份
 
-- 将原始日期集合、聚合算法版本、周期和 Tick 指纹组合为不可变数据集版本。
-- 归档结果展示数据来源日期范围、原始行数、派生根数和缺口，不以当前缓存解释历史结果。
-- 增加数据集完整率、交易日覆盖和坏行质量门槛。
+- **H2.1 已完成（2026-08-12）**：`BacktestDatasetIdentity`/`RawTickDayFingerprint` 领域类型；`computeBacktestDatasetVersion()` 将原始日期集合、聚合算法版本、周期和每交易日 Tick 指纹组合为 `sha256:` 数据集版本；`SqliteLocalDataStore` 以聚合 SQL 实时组装身份；`AShareTradingCalendar::applyDatasetCoverage()` 统计期望交易日、缺口与日历来源。
+- **H2.2 已完成（2026-08-12）**：`BacktestDatasetService` 运行前按需重建过期派生缓存并校验身份；`BacktestConfig` 携带身份，归档单事务保存完整身份 JSON（`backtest_results` 增加 `dataset_*` 列，全库 v3）；历史结果恢复不依赖当前缓存解释。
+- **H2.3 已完成（2026-08-12）**：QML 结果身份区、归档面板与本地回测目录展示数据来源日期范围、原始行数、派生根数和缺口、日历来源；目录刷新时批量填充身份摘要。数据集完整率与坏行质量门槛留待后续按需补充。
 
 ### H3：横向回测与组合研究
 

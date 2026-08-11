@@ -48,6 +48,13 @@ QVariantMap LocalHistoryDataset::toVariantMap() const
             {QStringLiteral("adjustment"), adjustment},
             {QStringLiteral("downloadedAt"), downloadedAt},
             {QStringLiteral("dataVersion"), dataVersion},
+            {QStringLiteral("datasetVersion"), datasetVersion},
+            {QStringLiteral("datasetFirstDate"), datasetFirstDate},
+            {QStringLiteral("datasetLastDate"), datasetLastDate},
+            {QStringLiteral("datasetDayCount"), datasetDayCount},
+            {QStringLiteral("datasetRawTickCount"), datasetRawTickCount},
+            {QStringLiteral("datasetGapDayCount"), datasetGapDayCount},
+            {QStringLiteral("datasetStaleDayCount"), datasetStaleDayCount},
             {QStringLiteral("rawTickDerived"), isRawTickDerived()},
             {QStringLiteral("backtestEligible"), isBacktestEligible()},
             {QStringLiteral("available"), candleCount > 0 && lastTime.isValid()}};

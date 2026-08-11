@@ -1,10 +1,10 @@
 # PPTrader 开发进度
 
-最后更新：2026-08-09
+最后更新：2026-08-12
 
 ## 当前阶段
 
-阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A 与 NAS H1A–H1C 已完成。历史 Tick 回测具备单品种闭环和同一内置策略多品种轻量结果矩阵；NAS 支持用户明确代码清单的受控 manifest、串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。下一步优先进入 H2 回测数据集不可变身份，再进行 H3B 单项结果按需归档和后续大档验证。
+阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A、NAS H1A–H1C 与 H2 回测数据集身份（H2.1–H2.3）已完成。历史 Tick 回测具备单品种闭环、同一内置策略多品种轻量结果矩阵、不可变数据集身份与结果身份展示；NAS 支持用户明确代码清单的受控 manifest、串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。下一步进入 H3B 单项结果按需归档和后续大档验证。
 
 ## 已完成
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 工程环境 | Qt 6.4.3、VS2022 x64、CMake Presets 和 VS Code 构建链路 |
 | 行情 | 模拟实时 Tick、mootdx A 股历史 K 线桥接、TickData 原始成交逐行导入、任意周期 K 线缓存、市场交易时段判断 |
-| 策略与回测 | SMA、RSI、MACD、布林带与受限 JSON DSL；严格 Tick 本地回测、交易记录、权益曲线和结果归档 |
+| 策略与回测 | SMA、RSI、MACD、布林带与受限 JSON DSL；严格 Tick 本地回测、交易记录、权益曲线和结果归档；回测数据集不可变身份（事实指纹 SHA-256） |
 | 横截面计算 | A 股全市场快照、完整率、因子接口、相对强弱排名/Z-Score/分位数；5000 标的容量基线 |
 | 交易账户 | 委托、成交、持仓、现金、冻结资金、手续费、盈亏核算和启动恢复 |
 | 模拟撮合 | 市价/限价、部分成交、DAY/GTC/IOC/FOK、流动性参与率、到期自动撤单 |
@@ -22,6 +22,13 @@
 | 新版界面 | 三页常驻主工作台；主页双选择器与真实交易日/本地历史双 K 线；策略页支持内置/自定义模式及严格本地回测；全市场页支持 Scene Graph 批量散点 |
 
 ## 本次完成
+
+- 完成 H2.3 数据集身份 QML 展示：`backtestResultConfiguration` 携带完整数据集身份；自定义策略结果身份区展示 `datasetVersion`、日期范围、交易日数、原始 Tick 数、缺口与日历来源；归档面板与本地回测目录显示同一身份摘要；`LocalHistoryDataset` 与 `BacktestArchiveListModel` 增加数据集摘要字段/角色，目录刷新时由聚合身份填充。副屏验收截图留待后续补录。
+- 文档同步：新增 `docs/backtest-dataset-identity.md` 契约，更新 `project-wiki.md`（v3、数据结构、归档说明）、`development-progress.md` 与 `历史Tick回测与NAS数据路线图.md` H2 状态。
+
+- 完成 H2 回测数据集身份 H2.1：新增 `BacktestDatasetIdentity` 与 `RawTickDayFingerprint` 领域类型。身份由原始日期集合、每交易日 Tick 指纹（count/max id）、周期和聚合算法版本组合，经 `computeBacktestDatasetVersion()` 生成 `sha256:` 数据集版本；派生缓存是否新鲜不参与身份哈希，只反映在 `staleDayCount`。`SqliteLocalDataStore` 以两条 GROUP BY 聚合 SQL 实时组装身份（不落身份缓存表），`AShareTradingCalendar::applyDatasetCoverage()` 统计期望交易日、缺口并标注 `SSE-2025-45`/`weekday-fallback` 来源。
+- 完成 H2.2 运行前数据准备与归档身份：新增独立线程 `BacktestDatasetService`，运行回测前加载身份、按需重建过期派生缓存（复用现有 `RawTickCandleAggregator` 派生链）、填充日历覆盖并读取 K 线；身份为空或重建后仍不一致直接拒绝，全程不访问 Provider/NAS。内置、自定义与本地自定义三个回测入口统一为异步准备→身份校验→启动引擎，旧结果不能覆盖新请求。数据库全库升级为 v3：`backtest_results` 增加 11 个 `dataset_*` 列，归档单事务保存完整身份 JSON，恢复时原样还原，历史结果不依赖当前库解释。
+- 测试与验证：新增 `tst_backtest_dataset_service`（空库拒绝/过期缓存重建/根数不足），扩展 `tst_backtest_dataset_identity`（JSON round-trip）与 `tst_sqlite_local_data_store`（归档身份持久化）；2026-08-12 全量串行 Debug 构建通过，CTest 20/20，`all_qmllint` 通过。修复 Qt 空 `QString()` 绑定 SQLite `NOT NULL` 列被当作 NULL 的真实问题。
 
 - 完成 H1A `NasTickSyncQueue`：当前 catalog 按交易日排序去重，逐日串行复用现有下载、SHA-256、流式解析和 SQLite 事务导入。单日失败继续后续日期；取消保留成功项，“重试未完成”只重试失败或取消项。队列状态、汇总、进度、当前日期和恢复能力均通过 `TradingController` 暴露。
 - 策略页 NAS 工作区提供“同步选中 / 同步全部 / 取消 / 重试未完成”，状态文字显示当前代码、日期、字节和总体进度。H1C 已将计划原子持久化；重启恢复不联网，中断项可显式重试，成功项不重复。缓存统计和 30 天前暂存清理都由用户点击触发，不删除 SQLite 事实，也不自动扫描或同步全市场。
@@ -331,7 +338,7 @@ cmake --build --preset vs2022-debug --parallel 1
 
 ## 未实现与后续优先级
 
-1. 按 `docs/roadmap/历史Tick回测与NAS数据路线图.md` 进入 H2：把原始日期集合、聚合算法版本、周期和 Tick 指纹组合为不可变数据集版本，并在回测结果中展示覆盖、缺口和质量。H3B 后续先复用已验收的 100 只装载基线增加单项曲线/成交按需归档；500 与 5207 档按用户决定暂不测试。
+1. 进入 H3B：先复用已验收的 100 只装载基线增加单项曲线/成交按需归档；500 与 5207 档按用户决定暂不测试。
 2. 为回测归档增加显式删除、保留期、版本引用保护和同输入确定性对照；当前不自动清理任何历史结果。
 3. 增加同品种、同数据版本最多三份结果对比；自定义策略仍不开放模拟交易。
 4. 为 TDX/腾讯主备与选中品种分钟服务完成 4 小时以上持续运行、失败分块重试、限流和 p50/p95 端到端延迟基准；如需要正式生产 SLA，再接入授权 QMT/专业源。

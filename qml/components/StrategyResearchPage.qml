@@ -373,7 +373,7 @@ Item {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.customMode
-                    ? (root.identityExpanded ? 504 : 438) : 390
+                    ? (root.identityExpanded ? 540 : 438) : 390
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 16; text: "权益曲线与成交明细"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: root.customMode ? 132 : 18; y: 18; text: root.hasBacktestResult ? (root.controller.backtestResultHistoricalSnapshot ? "历史归档 · " : "当前任务 · ") + root.controller.backtestResultSymbol + " · " + root.controller.backtestResultStrategyId + " · 任务 " + root.controller.completedBacktestTaskId : "尚无结果"; color: root.customResultMismatch || root.controller.backtestResultHistoricalSnapshot ? root.theme.yellow : root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -387,7 +387,7 @@ Item {
                 }
                 Rectangle {
                     x: 18; y: 48; width: parent.width - 36
-                    height: root.identityExpanded ? 82 : 34
+                    height: root.identityExpanded ? 118 : 34
                     visible: root.customMode
                     radius: 6; color: root.theme.bgInput
                     border.color: root.customResultMismatch ? root.theme.yellow : root.theme.border
@@ -410,6 +410,10 @@ Item {
                               + " · version=" + (root.resultConfiguration.strategyVersion || 0)
                               + " · parameters=" + JSON.stringify(root.resultConfiguration.strategyParameters || {})
                               + "\ndataVersion=" + (root.resultConfiguration.dataVersion || "--")
+                              + "\ndatasetVersion="
+                              + (root.resultConfiguration.datasetIdentity
+                                 && root.resultConfiguration.datasetIdentity.datasetVersion
+                                 ? root.resultConfiguration.datasetIdentity.datasetVersion : "--")
                         color: root.theme.textMuted; selectionColor: root.theme.cyan
                         selectedTextColor: root.theme.bgCanvas
                         font.family: "Consolas"; font.pixelSize: 8
@@ -417,10 +421,30 @@ Item {
                         Accessible.name: "回测结果版本与数据身份"
                         Accessible.description: text
                     }
+                    Text {
+                        x: 10; y: 96; width: parent.width - 20
+                        visible: root.identityExpanded && root.hasBacktestResult
+                        text: {
+                            const identity = root.resultConfiguration.datasetIdentity
+                            if (!identity || !identity.datasetVersion) return "数据集身份：--"
+                            return "数据集：" + Qt.formatDate(identity.firstTradingDate, "yyyy-MM-dd")
+                                   + " ~ " + Qt.formatDate(identity.lastTradingDate, "yyyy-MM-dd")
+                                   + " · " + identity.dayCount + " 交易日 · "
+                                   + identity.rawTickCount + " 原始 Tick"
+                                   + (identity.gapDayCount > 0
+                                      ? " · 缺口 " + identity.gapDayCount : "")
+                                   + " · " + (identity.calendarCoverageKnown
+                                              ? identity.calendarSource : "日历未覆盖")
+                        }
+                        color: root.theme.yellow
+                        elide: Text.ElideRight
+                        font.family: root.theme.fontFamily; font.pixelSize: 8
+                        Accessible.name: text
+                    }
                 }
                 RowLayout {
                     x: 18
-                    y: root.customMode ? (root.identityExpanded ? 142 : 94) : 52
+                    y: root.customMode ? (root.identityExpanded ? 178 : 94) : 52
                     width: parent.width - 36
                     height: parent.height - y - 20
                     spacing: 16

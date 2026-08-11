@@ -16,6 +16,13 @@ struct LocalHistoryDataset {
     QString adjustment = QStringLiteral("none");
     QDateTime downloadedAt;
     QString dataVersion;
+    QString datasetVersion;
+    QDate datasetFirstDate;
+    QDate datasetLastDate;
+    int datasetDayCount = 0;
+    int datasetRawTickCount = 0;
+    int datasetGapDayCount = 0;
+    int datasetStaleDayCount = 0;
 
     QString frequency() const;
     bool isRawTickDerived() const;

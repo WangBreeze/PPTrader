@@ -17,6 +17,16 @@ QVariantMap summaryMap(const BacktestArchiveSummary &item)
             {QStringLiteral("requestedBars"), item.requestedBars},
             {QStringLiteral("actualBars"), item.actualBars},
             {QStringLiteral("dataVersion"), item.dataVersion},
+            {QStringLiteral("datasetVersion"), item.datasetVersion},
+            {QStringLiteral("datasetFirstDate"), item.datasetFirstDate},
+            {QStringLiteral("datasetLastDate"), item.datasetLastDate},
+            {QStringLiteral("datasetDayCount"), item.datasetDayCount},
+            {QStringLiteral("datasetRawTickCount"), item.datasetRawTickCount},
+            {QStringLiteral("datasetGapDayCount"), item.datasetGapDayCount},
+            {QStringLiteral("datasetStaleDayCount"), item.datasetStaleDayCount},
+            {QStringLiteral("datasetCalendarSource"), item.datasetCalendarSource},
+            {QStringLiteral("datasetCalendarCoverageKnown"),
+             item.datasetCalendarCoverageKnown},
             {QStringLiteral("totalReturnPercent"), item.summary.totalReturnPercent},
             {QStringLiteral("maxDrawdownPercent"), item.summary.maxDrawdownPercent},
             {QStringLiteral("totalTrades"), item.summary.totalTrades},
@@ -56,6 +66,15 @@ QVariant BacktestArchiveListModel::data(const QModelIndex &index, int role) cons
     case RequestedBarsRole: return item.requestedBars;
     case ActualBarsRole: return item.actualBars;
     case DataVersionRole: return item.dataVersion;
+    case DatasetVersionRole: return item.datasetVersion;
+    case DatasetFirstDateRole: return item.datasetFirstDate;
+    case DatasetLastDateRole: return item.datasetLastDate;
+    case DatasetDayCountRole: return item.datasetDayCount;
+    case DatasetRawTickCountRole: return item.datasetRawTickCount;
+    case DatasetGapDayCountRole: return item.datasetGapDayCount;
+    case DatasetStaleDayCountRole: return item.datasetStaleDayCount;
+    case DatasetCalendarSourceRole: return item.datasetCalendarSource;
+    case DatasetCalendarCoverageKnownRole: return item.datasetCalendarCoverageKnown;
     case TotalReturnPercentRole: return item.summary.totalReturnPercent;
     case MaxDrawdownPercentRole: return item.summary.maxDrawdownPercent;
     case TotalTradesRole: return item.summary.totalTrades;
@@ -72,6 +91,15 @@ QHash<int, QByteArray> BacktestArchiveListModel::roleNames() const
             {NameRole, "name"}, {FrequencyRole, "frequency"},
             {RequestedBarsRole, "requestedBars"}, {ActualBarsRole, "actualBars"},
             {DataVersionRole, "dataVersion"},
+            {DatasetVersionRole, "datasetVersion"},
+            {DatasetFirstDateRole, "datasetFirstDate"},
+            {DatasetLastDateRole, "datasetLastDate"},
+            {DatasetDayCountRole, "datasetDayCount"},
+            {DatasetRawTickCountRole, "datasetRawTickCount"},
+            {DatasetGapDayCountRole, "datasetGapDayCount"},
+            {DatasetStaleDayCountRole, "datasetStaleDayCount"},
+            {DatasetCalendarSourceRole, "datasetCalendarSource"},
+            {DatasetCalendarCoverageKnownRole, "datasetCalendarCoverageKnown"},
             {TotalReturnPercentRole, "totalReturnPercent"},
             {MaxDrawdownPercentRole, "maxDrawdownPercent"},
             {TotalTradesRole, "totalTrades"}, {CustomStrategyRole, "customStrategy"}};

@@ -416,6 +416,14 @@ void SqliteLocalDataStoreTest::archivePreservesDatasetIdentity()
     QCOMPARE(summaries.first().datasetFirstDate, QDate(2026, 1, 5));
     QVERIFY(summaries.first().datasetCalendarCoverageKnown);
 
+    BacktestArchiveListModel model;
+    model.loadSummaries(summaries);
+    const QVariantMap modelRow = model.get(0);
+    QCOMPARE(modelRow.value(QStringLiteral("datasetVersion")).toString(),
+             identity.datasetVersion);
+    QCOMPARE(modelRow.value(QStringLiteral("datasetDayCount")).toInt(), 2);
+    QCOMPARE(modelRow.value(QStringLiteral("datasetRawTickCount")).toInt(), 5);
+
     const auto restored = reopened.loadBacktestArchive(QStringLiteral("result-dataset"));
     QVERIFY(restored.has_value());
     QCOMPARE(restored->result.config.datasetIdentity.datasetVersion,

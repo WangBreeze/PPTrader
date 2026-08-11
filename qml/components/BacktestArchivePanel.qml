@@ -118,18 +118,29 @@ Item {
             font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold
         }
         Text {
-            x: 12; y: 36; width: parent.width - 24; height: 72
+            x: 12; y: 36; width: parent.width - 24; height: 112
             text: root.selectedSummary.resultId
                 ? "请求/实际：" + root.selectedSummary.requestedBars + "/" + root.selectedSummary.actualBars
                   + " 根\n结果 ID：" + root.selectedSummary.resultId
                   + "\ndataVersion：" + root.selectedSummary.dataVersion
+                  + "\ndataset：" + (root.selectedSummary.datasetDayCount > 0
+                      ? Qt.formatDate(root.selectedSummary.datasetFirstDate, "yyyy-MM-dd")
+                        + " ~ " + Qt.formatDate(root.selectedSummary.datasetLastDate, "yyyy-MM-dd")
+                        + " · " + root.selectedSummary.datasetDayCount + " 交易日 · "
+                        + root.selectedSummary.datasetRawTickCount + " 原始 Tick"
+                        + (root.selectedSummary.datasetGapDayCount > 0
+                           ? " · 缺口 " + root.selectedSummary.datasetGapDayCount : "")
+                        + " · " + (root.selectedSummary.datasetCalendarCoverageKnown
+                                   ? root.selectedSummary.datasetCalendarSource
+                                   : "日历未覆盖")
+                      : "无数据集身份")
                 : "归档加载只读取 SQLite，不联网，也不会重新运行策略。"
             color: root.theme.textMuted; wrapMode: Text.WrapAnywhere
             font.family: root.theme.fontFamily; font.pixelSize: 8
             Accessible.name: text
         }
         Text {
-            x: 12; y: 112; width: parent.width - 24; height: 34
+            x: 12; y: 152; width: parent.width - 24; height: 34
             visible: root.controller.backtestResultHistoricalSnapshot
                      && root.controller.selectedBacktestArchiveId === root.selectedSummary.resultId
             text: "历史快照，与当前策略、参数或数据缓存可能不同"

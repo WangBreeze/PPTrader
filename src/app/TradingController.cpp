@@ -58,6 +58,9 @@ QVariantMap backtestConfigMap(const BacktestConfig &config)
             {QStringLiteral("strategyParameters"), config.strategyParameters},
             {QStringLiteral("ruleSnapshot"), config.ruleSnapshot},
             {QStringLiteral("dataVersion"), config.dataVersion},
+            {QStringLiteral("datasetIdentity"),
+             config.datasetIdentity.isEmpty()
+                 ? QVariantMap{} : config.datasetIdentity.toVariantMap()},
             {QStringLiteral("symbol"), config.instrument.symbol},
             {QStringLiteral("name"), config.instrument.name},
             {QStringLiteral("frequency"), config.frequency},
@@ -2496,9 +2499,29 @@ QVariantList TradingController::refreshLocalBacktestDataCatalog()
 {
     const QString previousSymbol = selectedBacktestSymbol();
     const int previousPeriod = selectedBacktestPeriodSeconds();
-    m_workspaceInstrumentSelections.setLocalHistoryCatalog(
-        m_storageReady ? m_dataStore.localHistoryCatalog()
-                       : QVector<LocalHistoryDataset>{});
+    QVector<LocalHistoryDataset> catalog = m_storageReady
+        ? m_dataStore.localHistoryCatalog() : QVector<LocalHistoryDataset>{};
+    if (m_storageReady) {
+        const QVector<BacktestDatasetIdentity> identities =
+            m_dataStore.loadBacktestDatasetIdentities();
+        for (LocalHistoryDataset &item : catalog) {
+            if (!item.isBacktestEligible()) continue;
+            for (const BacktestDatasetIdentity &identity : identities) {
+                if (identity.instrument.symbol == item.instrument.symbol
+                    && identity.periodSeconds == item.periodSeconds) {
+                    item.datasetVersion = identity.datasetVersion;
+                    item.datasetFirstDate = identity.firstTradingDate;
+                    item.datasetLastDate = identity.lastTradingDate;
+                    item.datasetDayCount = identity.days.size();
+                    item.datasetRawTickCount = identity.rawTickTotal();
+                    item.datasetGapDayCount = identity.gapDayCount;
+                    item.datasetStaleDayCount = identity.staleDayCount;
+                    break;
+                }
+            }
+        }
+    }
+    m_workspaceInstrumentSelections.setLocalHistoryCatalog(catalog);
 
     if (!m_workspaceInstrumentSelections.selectedBacktestDataset()) {
         for (const LocalHistoryDataset &item

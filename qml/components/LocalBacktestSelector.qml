@@ -92,6 +92,10 @@ Item {
                 highlighted: datasetCombo.highlightedIndex === index
                 text: modelData.title + " · " + modelData.frequency
                       + " · " + modelData.candleCount + " 根"
+                      + (modelData.datasetVersion
+                         ? " · " + modelData.datasetVersion.slice(7, 17)
+                           + " · " + modelData.datasetDayCount + " 日"
+                         : "")
                 font.family: root.theme.fontFamily; font.pixelSize: 10
                 Accessible.name: text
             }
@@ -127,6 +131,22 @@ Item {
             Text { text: root.controller.selectedBacktestFirstTime.toString().length > 0 ? Qt.formatDateTime(root.controller.selectedBacktestFirstTime, "yyyy-MM-dd HH:mm") : "--"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10 }
             Text { text: "末条"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
             Text { text: root.controller.selectedBacktestLastTime.toString().length > 0 ? Qt.formatDateTime(root.controller.selectedBacktestLastTime, "yyyy-MM-dd HH:mm") : "--"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10 }
+            Text { text: "数据集"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+            Text {
+                text: {
+                    const entry = datasetCombo.currentIndex >= 0
+                        ? root.controller.localBacktestDataCatalog[datasetCombo.currentIndex] : null
+                    return entry && entry.datasetVersion
+                        ? entry.datasetVersion.slice(7, 17)
+                          + " · " + entry.datasetDayCount + " 交易日"
+                          + (entry.datasetGapDayCount > 0
+                             ? " · 缺口 " + entry.datasetGapDayCount : "")
+                        : "--"
+                }
+                color: root.theme.textPrimary
+                font.family: root.theme.fontFamily; font.pixelSize: 10
+                Accessible.name: "数据集身份摘要"
+            }
         }
         Text {
             Layout.fillWidth: true
