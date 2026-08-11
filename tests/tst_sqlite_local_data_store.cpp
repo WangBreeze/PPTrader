@@ -1,6 +1,7 @@
 #include "app/WorkspaceInstrumentSelectionState.h"
 #include "models/BacktestArchiveListModel.h"
 #include "services/SqliteLocalDataStore.h"
+#include "services/BacktestDataVersion.h"
 #include "services/StorageProfile.h"
 #include "services/HistoricalDataService.h"
 #include "services/AsyncTickWriter.h"
@@ -121,6 +122,7 @@ private slots:
     void migratesLegacyAccountSnapshotSchema();
     void writesMarketSnapshotsAsynchronouslyAndIdempotently();
     void archivesBuiltInAndCustomBacktestsRoundTrip();
+    void archivePreservesDatasetIdentity();
     void archiveTransactionRollsBackOnChildFailure();
     void archiveRestoreIsStableAndDoesNotRequestNetwork();
     void migratesLegacyDatabaseWithBackupAndStableIdentity();
@@ -370,6 +372,60 @@ void SqliteLocalDataStoreTest::archivesBuiltInAndCustomBacktestsRoundTrip()
     QCOMPARE(model.indexOfResultId(QStringLiteral("result-built-in")), 1);
     QCOMPARE(model.get(0).value(QStringLiteral("customStrategy")).toBool(), true);
     QVERIFY(model.get(-1).isEmpty());
+}
+
+void SqliteLocalDataStoreTest::archivePreservesDatasetIdentity()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-dataset.db"));
+    BacktestArchiveRecord record = archiveFixture(
+        QStringLiteral("result-dataset"), QStringLiteral("43"),
+        QStringLiteral("sma_crossover"), 0,
+        QDateTime(QDate(2026, 7, 1), QTime(2, 0), Qt::UTC));
+
+    BacktestDatasetIdentity identity;
+    identity.instrument = record.result.config.instrument;
+    identity.periodSeconds = 60;
+    identity.aggregatorVersion = 1;
+    identity.days = {
+        {QDate(2026, 1, 5), 3, 3, 2, 1},
+        {QDate(2026, 1, 6), 2, 2, 1, 1}
+    };
+    identity.firstTradingDate = QDate(2026, 1, 5);
+    identity.lastTradingDate = QDate(2026, 1, 6);
+    identity.datasetVersion = computeBacktestDatasetVersion(identity);
+    identity.expectedTradingDays = 2;
+    identity.calendarCoverageKnown = true;
+    identity.calendarSource = QStringLiteral("SSE-2025-45");
+    record.result.config.datasetIdentity = identity;
+
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(record));
+    }
+
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    const QVector<BacktestArchiveSummary> summaries = reopened.loadBacktestArchiveSummaries();
+    QCOMPARE(summaries.size(), 1);
+    QCOMPARE(summaries.first().datasetVersion, identity.datasetVersion);
+    QCOMPARE(summaries.first().datasetDayCount, 2);
+    QCOMPARE(summaries.first().datasetRawTickCount, 5);
+    QCOMPARE(summaries.first().datasetFirstDate, QDate(2026, 1, 5));
+    QVERIFY(summaries.first().datasetCalendarCoverageKnown);
+
+    const auto restored = reopened.loadBacktestArchive(QStringLiteral("result-dataset"));
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->result.config.datasetIdentity.datasetVersion,
+             identity.datasetVersion);
+    QCOMPARE(restored->result.config.datasetIdentity.days.size(), 2);
+    QCOMPARE(restored->result.config.datasetIdentity.days.first().rawCount, 3);
+    QCOMPARE(restored->result.config.datasetIdentity.firstTradingDate,
+             QDate(2026, 1, 5));
+    QCOMPARE(restored->result.config.datasetIdentity.calendarSource,
+             QStringLiteral("SSE-2025-45"));
 }
 
 void SqliteLocalDataStoreTest::archiveTransactionRollsBackOnChildFailure()

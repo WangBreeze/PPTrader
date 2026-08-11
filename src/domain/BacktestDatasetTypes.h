@@ -42,6 +42,7 @@ struct BacktestDatasetIdentity {
     bool hasStaleCache() const;
     QVariantMap toVariantMap() const;
     QString toJson() const;
+    bool fromJson(const QString &json);
 };
 
 } // namespace pp

@@ -1697,6 +1697,8 @@ bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &reco
         || config.instrument.symbol.trimmed().isEmpty() || config.frequency.trimmed().isEmpty()
         || config.actualBars <= 0 || record.result.equityCurve.isEmpty()
         || !isSha256(config.dataVersion)
+        || (!config.datasetIdentity.isEmpty()
+            && !isSha256(config.datasetIdentity.datasetVersion))
         || (config.strategyId.startsWith(QStringLiteral("custom_"))
             && (config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()))) {
         emit writeFailed(QStringLiteral("回测结果身份不完整，未写入归档"));
@@ -1720,9 +1722,15 @@ bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &reco
         "frequency, period_seconds, requested_bars, actual_bars, from_utc, to_utc, "
         "initial_capital, commission_rate, slippage_rate, lot_size, summary_initial_capital, "
         "final_equity, total_return_percent, max_drawdown_percent, win_rate_percent, sharpe_ratio, "
-        "total_commission, total_trades, winning_trades, losing_trades) "
-        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "total_commission, total_trades, winning_trades, losing_trades, "
+        "dataset_version, dataset_identity_json, dataset_raw_tick_count, "
+        "dataset_derived_bar_count, dataset_day_count, dataset_first_date, dataset_last_date, "
+        "dataset_gap_day_count, dataset_stale_day_count, dataset_calendar_source, "
+        "dataset_calendar_coverage_known) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     const PerformanceSummary &summary = record.result.summary;
+    const BacktestDatasetIdentity &dataset = config.datasetIdentity;
     const QVariantList values {
         record.resultId, config.taskId, record.completedAt.toUTC().toString(Qt::ISODateWithMs),
         config.strategyId, config.strategyVersion, compactJson(config.strategyParameters),
@@ -1733,7 +1741,17 @@ bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &reco
         config.initialCapital, config.commissionRate, config.slippageRate, config.lotSize,
         summary.initialCapital, summary.finalEquity, summary.totalReturnPercent,
         summary.maxDrawdownPercent, summary.winRatePercent, summary.sharpeRatio,
-        summary.totalCommission, summary.totalTrades, summary.winningTrades, summary.losingTrades
+        summary.totalCommission, summary.totalTrades, summary.winningTrades, summary.losingTrades,
+        dataset.datasetVersion.isEmpty() ? QStringLiteral("") : dataset.datasetVersion,
+        dataset.isEmpty() ? QStringLiteral("") : dataset.toJson(),
+        dataset.rawTickTotal(), dataset.derivedBarTotal(), dataset.days.size(),
+        dataset.firstTradingDate.isValid()
+            ? dataset.firstTradingDate.toString(Qt::ISODate) : QStringLiteral(""),
+        dataset.lastTradingDate.isValid()
+            ? dataset.lastTradingDate.toString(Qt::ISODate) : QStringLiteral(""),
+        dataset.gapDayCount, dataset.staleDayCount,
+        dataset.calendarSource.isEmpty() ? QStringLiteral("") : dataset.calendarSource,
+        dataset.calendarCoverageKnown ? 1 : 0
     };
     for (const QVariant &value : values) resultQuery.addBindValue(value);
     if (!resultQuery.exec()) return fail(QStringLiteral("写入回测结果身份"), resultQuery);
@@ -1791,6 +1809,9 @@ QVector<BacktestArchiveSummary> SqliteLocalDataStore::loadBacktestArchiveSummari
     if (!query.exec(QStringLiteral(
             "select result_id, task_id, completed_at_utc, strategy_id, strategy_version, symbol, name, "
             "market, venue, frequency, requested_bars, actual_bars, data_version, "
+            "dataset_version, dataset_first_date, dataset_last_date, dataset_day_count, "
+            "dataset_raw_tick_count, dataset_derived_bar_count, dataset_gap_day_count, "
+            "dataset_stale_day_count, dataset_calendar_source, dataset_calendar_coverage_known, "
             "summary_initial_capital, final_equity, total_return_percent, max_drawdown_percent, "
             "win_rate_percent, sharpe_ratio, total_commission, total_trades, winning_trades, losing_trades "
             "from backtest_results order by completed_at_utc desc, result_id desc"))) {
@@ -1810,16 +1831,26 @@ QVector<BacktestArchiveSummary> SqliteLocalDataStore::loadBacktestArchiveSummari
         item.requestedBars = query.value(10).toInt();
         item.actualBars = query.value(11).toInt();
         item.dataVersion = query.value(12).toString();
-        item.summary.initialCapital = query.value(13).toDouble();
-        item.summary.finalEquity = query.value(14).toDouble();
-        item.summary.totalReturnPercent = query.value(15).toDouble();
-        item.summary.maxDrawdownPercent = query.value(16).toDouble();
-        item.summary.winRatePercent = query.value(17).toDouble();
-        item.summary.sharpeRatio = query.value(18).toDouble();
-        item.summary.totalCommission = query.value(19).toDouble();
-        item.summary.totalTrades = query.value(20).toInt();
-        item.summary.winningTrades = query.value(21).toInt();
-        item.summary.losingTrades = query.value(22).toInt();
+        item.datasetVersion = query.value(13).toString();
+        item.datasetFirstDate = QDate::fromString(query.value(14).toString(), Qt::ISODate);
+        item.datasetLastDate = QDate::fromString(query.value(15).toString(), Qt::ISODate);
+        item.datasetDayCount = query.value(16).toInt();
+        item.datasetRawTickCount = query.value(17).toInt();
+        item.datasetDerivedBarCount = query.value(18).toInt();
+        item.datasetGapDayCount = query.value(19).toInt();
+        item.datasetStaleDayCount = query.value(20).toInt();
+        item.datasetCalendarSource = query.value(21).toString();
+        item.datasetCalendarCoverageKnown = query.value(22).toBool();
+        item.summary.initialCapital = query.value(23).toDouble();
+        item.summary.finalEquity = query.value(24).toDouble();
+        item.summary.totalReturnPercent = query.value(25).toDouble();
+        item.summary.maxDrawdownPercent = query.value(26).toDouble();
+        item.summary.winRatePercent = query.value(27).toDouble();
+        item.summary.sharpeRatio = query.value(28).toDouble();
+        item.summary.totalCommission = query.value(29).toDouble();
+        item.summary.totalTrades = query.value(30).toInt();
+        item.summary.winningTrades = query.value(31).toInt();
+        item.summary.losingTrades = query.value(32).toInt();
         result.append(item);
     }
     return result;
@@ -1835,7 +1866,8 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         "requested_bars, actual_bars, from_utc, to_utc, initial_capital, commission_rate, "
         "slippage_rate, lot_size, summary_initial_capital, final_equity, total_return_percent, "
         "max_drawdown_percent, win_rate_percent, sharpe_ratio, total_commission, total_trades, "
-        "winning_trades, losing_trades from backtest_results where result_id = ?"));
+        "winning_trades, losing_trades, dataset_identity_json from backtest_results "
+        "where result_id = ?"));
     query.addBindValue(resultId);
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取回测归档身份"));
@@ -1876,6 +1908,11 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     summary.totalTrades = query.value(28).toInt();
     summary.winningTrades = query.value(29).toInt();
     summary.losingTrades = query.value(30).toInt();
+    const QString datasetJson = query.value(31).toString();
+    if (!datasetJson.isEmpty()) {
+        BacktestDatasetIdentity dataset;
+        if (dataset.fromJson(datasetJson)) config.datasetIdentity = dataset;
+    }
 
     QSqlQuery equityQuery(m_database);
     equityQuery.prepare(QStringLiteral(

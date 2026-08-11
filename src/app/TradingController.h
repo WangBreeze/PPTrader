@@ -25,6 +25,7 @@
 #include "services/AsyncMarketSnapshotQueryService.h"
 #include "services/AsyncLocalCandleSeriesQueryService.h"
 #include "services/AsyncTickWriter.h"
+#include "services/BacktestDatasetService.h"
 #include "services/NasDataNodeClient.h"
 #include "services/NasSyncStateStore.h"
 #include "services/NasTickCacheManager.h"
@@ -902,6 +903,10 @@ private:
     void handleBacktestFinished(const PerformanceSummary &summary);
     void handleBacktestCancelled();
     void handleBacktestError(const QString &message);
+    void handleBacktestDatasetPrepared(
+        quint64 requestId, const BacktestDatasetIdentity &identity,
+        const QVector<Candle> &candles);
+    void handleBacktestDatasetFailed(quint64 requestId, const QString &message);
     void handleHistoryKline(quint64 requestId, const QVector<Candle> &candles, bool fromCache);
     void handleHistoryError(quint64 requestId, const QString &message);
     void handleOrderChanged(const Order &order);
@@ -973,6 +978,7 @@ private:
     LocalCandleSeriesRequestGate m_localCandleSeriesRequestGate;
     AsyncLocalCandleSeriesQueryService m_asyncLiveDayCandleQueryService;
     LocalCandleSeriesRequestGate m_liveDayCandleSeriesRequestGate;
+    BacktestDatasetService m_backtestDatasetService;
     TencentMinuteBarService m_realtimeMinuteService;
     RealtimeMinuteRequestGate m_realtimeMinuteRequestGate;
     QTimer m_realtimeMinuteRefreshTimer;
@@ -1179,6 +1185,7 @@ private:
     quint64 m_backtestTaskId = 0;
     quint64 m_completedBacktestTaskId = 0;
     quint64 m_pendingBacktestHistoryRequestId = 0;
+    quint64 m_pendingBacktestDatasetRequestId = 0;
     quint64 m_activeHistoryRequestId = 0;
     int m_snapshotReceivedCount = 0;
     int m_snapshotHealth = SnapshotEmpty;

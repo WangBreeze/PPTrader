@@ -133,6 +133,10 @@ TradingController::TradingController(QObject *parent)
     connect(&m_asyncLiveDayCandleQueryService,
             &AsyncLocalCandleSeriesQueryService::resultReady,
             this, &TradingController::finishLiveDayCandleSeriesRequest);
+    connect(&m_backtestDatasetService, &BacktestDatasetService::prepared,
+            this, &TradingController::handleBacktestDatasetPrepared);
+    connect(&m_backtestDatasetService, &BacktestDatasetService::failed,
+            this, &TradingController::handleBacktestDatasetFailed);
     connect(&m_dataStore, &SqliteLocalDataStore::writeFailed, this, &TradingController::setStatusText);
     connect(&m_historicalDataService, &HistoricalDataService::candlesReady,
             this, &TradingController::handleHistoryKline);
@@ -452,6 +456,9 @@ TradingController::TradingController(QObject *parent)
         }
         if (!m_asyncLiveDayCandleQueryService.start(databasePath)) {
             setStatusText(QStringLiteral("异步真实交易日 K 线查询服务启动失败"));
+        }
+        if (!m_backtestDatasetService.start(databasePath)) {
+            setStatusText(QStringLiteral("回测数据集准备服务启动失败"));
         }
         emit storageStateChanged();
     }
@@ -1495,6 +1502,7 @@ bool TradingController::relocateStorage(const QString &pathOrUrl)
     m_asyncSnapshotQueryService.stop();
     m_asyncLocalCandleQueryService.stop();
     m_asyncLiveDayCandleQueryService.stop();
+    m_backtestDatasetService.stop();
     m_dataStore.close();
     m_storageReady = false;
     m_storageRelocationRunning = true;
@@ -1533,7 +1541,9 @@ bool TradingController::restartStorageServices(const QString &databasePath)
     const bool snapshotReady = m_asyncSnapshotQueryService.start(databasePath);
     const bool localSeriesReady = m_asyncLocalCandleQueryService.start(databasePath);
     const bool liveSeriesReady = m_asyncLiveDayCandleQueryService.start(databasePath);
-    if (!tickWriterReady || !snapshotReady || !localSeriesReady || !liveSeriesReady) {
+    const bool datasetReady = m_backtestDatasetService.start(databasePath);
+    if (!tickWriterReady || !snapshotReady || !localSeriesReady
+        || !liveSeriesReady || !datasetReady) {
         setStatusText(QStringLiteral("数据库已切换，但部分后台存储服务启动失败"));
     }
     return true;
@@ -1764,19 +1774,6 @@ qulonglong TradingController::runStrategyBacktest(const QString &strategyId,
         handleBacktestError(error);
         return 0;
     }
-    QVector<Candle> candles = m_dataStore.loadRecentCandlesFromSource(
-        dataset->instrument, dataset->periodSeconds, barCount,
-        QStringLiteral("raw_tick_cache_v1"));
-    if (candles.size() < barCount) {
-        const QString error = QStringLiteral(
-            "历史 Tick 派生数据实际只有 %1 根，需要 %2 根；未访问网络 Provider")
-                                  .arg(candles.size()).arg(barCount);
-        m_backtestConfigurationError = error;
-        emit backtestConfigurationChanged();
-        handleBacktestError(error);
-        return 0;
-    }
-
     if (m_backtest.isRunning()) {
         m_backtest.cancel();
     }
@@ -1806,14 +1803,20 @@ qulonglong TradingController::runStrategyBacktest(const QString &strategyId,
     m_pendingBacktestConfig.slippageRate = std::max(0.0, slippageRate);
     m_pendingBacktestConfig.lotSize = 100;
 
-    m_backtestPreparing = false;
     m_pendingBacktestHistoryRequestId = 0;
-    setBacktestStatus(QStringLiteral("正在计算历史 Tick 本地回测"));
-    setStatusText(QStringLiteral("严格本地回测：%1 · %2 · %3 根")
-                      .arg(dataset->instrument.symbol, strategyId)
-                      .arg(candles.size()));
-    if (!m_backtest.start(m_pendingBacktestConfig, std::move(candles))) {
-        emit backtestRunningChanged();
+    m_backtestPreparing = true;
+    m_pendingBacktestDatasetRequestId = ++m_pendingBacktestDatasetRequestId;
+    if (m_pendingBacktestDatasetRequestId == 0) ++m_pendingBacktestDatasetRequestId;
+    setBacktestStatus(QStringLiteral("正在准备回测数据集…"));
+    setStatusText(QStringLiteral("严格本地回测：%1 · %2 · 准备数据集中")
+                      .arg(dataset->instrument.symbol, strategyId));
+    if (!m_backtestDatasetService.isRunning()
+        || !m_backtestDatasetService.request(
+            m_pendingBacktestDatasetRequestId, dataset->instrument.symbol,
+            dataset->periodSeconds, barCount, m_aShareUniverse)) {
+        m_backtestPreparing = false;
+        m_pendingBacktestDatasetRequestId = 0;
+        handleBacktestError(QStringLiteral("回测数据集准备服务不可用"));
         return 0;
     }
     emit backtestRunningChanged();
@@ -1886,19 +1889,6 @@ qulonglong TradingController::runCustomStrategyBacktest(
         handleBacktestError(error);
         return 0;
     }
-    QVector<Candle> candles = m_dataStore.loadRecentCandlesFromSource(
-        dataset->instrument, dataset->periodSeconds, barCount,
-        QStringLiteral("raw_tick_cache_v1"));
-    if (candles.size() < barCount) {
-        error = QStringLiteral(
-            "历史 Tick 派生数据实际只有 %1 根，需要 %2 根；未访问网络 Provider")
-                    .arg(candles.size()).arg(barCount);
-        m_backtestConfigurationError = error;
-        emit backtestConfigurationChanged();
-        handleBacktestError(error);
-        return 0;
-    }
-
     if (m_backtest.isRunning()) m_backtest.cancel();
     clearBacktestResult();
     ++m_backtestTaskId;
@@ -1925,17 +1915,24 @@ qulonglong TradingController::runCustomStrategyBacktest(
     m_pendingBacktestConfig.commissionRate = std::max(0.0, commissionRate);
     m_pendingBacktestConfig.slippageRate = std::max(0.0, slippageRate);
     m_pendingBacktestConfig.lotSize = 100;
-    m_pendingCustomBacktestPlan.reset();
+    m_pendingCustomBacktestPlan = *plan;
 
-    m_backtestPreparing = false;
     m_pendingBacktestHistoryRequestId = 0;
-    setBacktestStatus(QStringLiteral("正在计算历史 Tick 本地自定义策略回测"));
-    setStatusText(QStringLiteral("严格本地回测：%1 · %2 v%3 · %4 根")
+    m_backtestPreparing = true;
+    m_pendingBacktestDatasetRequestId = ++m_pendingBacktestDatasetRequestId;
+    if (m_pendingBacktestDatasetRequestId == 0) ++m_pendingBacktestDatasetRequestId;
+    setBacktestStatus(QStringLiteral("正在准备回测数据集…"));
+    setStatusText(QStringLiteral("严格本地回测：%1 · %2 v%3 · 准备数据集中")
                       .arg(dataset->instrument.symbol, plan->strategyId)
-                      .arg(plan->version).arg(candles.size()));
-    auto strategy = std::make_unique<CustomBacktestStrategy>(*plan);
-    if (!m_backtest.start(m_pendingBacktestConfig, std::move(candles),
-                          std::move(strategy))) {
+                      .arg(plan->version));
+    if (!m_backtestDatasetService.isRunning()
+        || !m_backtestDatasetService.request(
+            m_pendingBacktestDatasetRequestId, dataset->instrument.symbol,
+            dataset->periodSeconds, barCount, m_aShareUniverse)) {
+        m_backtestPreparing = false;
+        m_pendingBacktestDatasetRequestId = 0;
+        m_pendingCustomBacktestPlan.reset();
+        handleBacktestError(QStringLiteral("回测数据集准备服务不可用"));
         emit backtestRunningChanged();
         return 0;
     }
@@ -2008,16 +2005,6 @@ qulonglong TradingController::runSelectedLocalCustomStrategyBacktest(
         return 0;
     }
 
-    QVector<Candle> candles = m_dataStore.loadRecentCandlesFromSource(
-        dataset->instrument, dataset->periodSeconds, m_backtestBarCount,
-        QStringLiteral("raw_tick_cache_v1"));
-    if (candles.size() < m_backtestBarCount) {
-        error = QStringLiteral("SQLite 实际只读取到 %1 根 K 线，需要 %2 根；未访问网络")
-                    .arg(candles.size()).arg(m_backtestBarCount);
-        handleBacktestError(error);
-        return 0;
-    }
-
     if (m_backtest.isRunning()) m_backtest.cancel();
     clearBacktestResult();
     ++m_backtestTaskId;
@@ -2038,14 +2025,23 @@ qulonglong TradingController::runSelectedLocalCustomStrategyBacktest(
     m_pendingBacktestConfig.commissionRate = std::max(0.0, m_backtestCommissionRate);
     m_pendingBacktestConfig.slippageRate = std::max(0.0, m_backtestSlippageRate);
     m_pendingBacktestConfig.lotSize = 100;
+    m_pendingCustomBacktestPlan = *plan;
 
-    setBacktestStatus(QStringLiteral("正在计算本地自定义策略回测"));
-    setStatusText(QStringLiteral("严格本地回测：%1 · %2 v%3 · %4 根")
+    m_backtestPreparing = true;
+    m_pendingBacktestDatasetRequestId = ++m_pendingBacktestDatasetRequestId;
+    if (m_pendingBacktestDatasetRequestId == 0) ++m_pendingBacktestDatasetRequestId;
+    setBacktestStatus(QStringLiteral("正在准备回测数据集…"));
+    setStatusText(QStringLiteral("严格本地回测：%1 · %2 v%3 · 准备数据集中")
                       .arg(dataset->instrument.symbol, plan->strategyId)
-                      .arg(plan->version).arg(candles.size()));
-    auto strategy = std::make_unique<CustomBacktestStrategy>(*plan);
-    if (!m_backtest.start(m_pendingBacktestConfig, std::move(candles),
-                          std::move(strategy))) {
+                      .arg(plan->version));
+    if (!m_backtestDatasetService.isRunning()
+        || !m_backtestDatasetService.request(
+            m_pendingBacktestDatasetRequestId, dataset->instrument.symbol,
+            dataset->periodSeconds, m_backtestBarCount, m_aShareUniverse)) {
+        m_backtestPreparing = false;
+        m_pendingBacktestDatasetRequestId = 0;
+        m_pendingCustomBacktestPlan.reset();
+        handleBacktestError(QStringLiteral("回测数据集准备服务不可用"));
         emit backtestRunningChanged();
         return 0;
     }
@@ -3968,6 +3964,7 @@ void TradingController::handleBacktestCancelled()
 {
     m_backtestPreparing = false;
     m_pendingBacktestHistoryRequestId = 0;
+    m_pendingBacktestDatasetRequestId = 0;
     m_pendingCustomBacktestPlan.reset();
     setBacktestStatus(QStringLiteral("已取消"));
     setStatusText(QStringLiteral("回测已取消"));
@@ -3978,10 +3975,64 @@ void TradingController::handleBacktestError(const QString &message)
 {
     m_backtestPreparing = false;
     m_pendingBacktestHistoryRequestId = 0;
+    m_pendingBacktestDatasetRequestId = 0;
     m_pendingCustomBacktestPlan.reset();
     setBacktestStatus(QStringLiteral("回测失败"), message);
     setStatusText(QStringLiteral("回测错误：%1").arg(message));
     emit backtestRunningChanged();
+}
+
+void TradingController::handleBacktestDatasetPrepared(
+    quint64 requestId, const BacktestDatasetIdentity &identity,
+    const QVector<Candle> &candles)
+{
+    if (!m_backtestPreparing || requestId != m_pendingBacktestDatasetRequestId) return;
+    m_backtestPreparing = false;
+    m_pendingBacktestDatasetRequestId = 0;
+    if (identity.isEmpty()) {
+        handleBacktestError(QStringLiteral("回测数据集身份不可用：无原始 Tick 事实"));
+        return;
+    }
+    if (candles.size() < m_pendingBacktestConfig.requestedBars) {
+        handleBacktestError(QStringLiteral(
+            "历史 Tick 派生数据实际只有 %1 根，需要 %2 根；未访问网络 Provider")
+            .arg(candles.size()).arg(m_pendingBacktestConfig.requestedBars));
+        return;
+    }
+    m_pendingBacktestConfig.datasetIdentity = identity;
+
+    const bool custom = m_pendingBacktestConfig.strategyId.startsWith(
+        QStringLiteral("custom_"));
+    setBacktestStatus(custom ? QStringLiteral("正在计算本地自定义策略回测")
+                             : QStringLiteral("正在计算历史 Tick 本地回测"));
+    setStatusText(QStringLiteral("严格本地回测：%1 · %2 · %3 根 · %4 个交易日")
+                      .arg(identity.instrument.symbol,
+                           m_pendingBacktestConfig.strategyId)
+                      .arg(candles.size())
+                      .arg(identity.days.size()));
+
+    std::unique_ptr<BacktestStrategy> strategy;
+    if (custom) {
+        if (!m_pendingCustomBacktestPlan) {
+            handleBacktestError(QStringLiteral("自定义策略编译快照已失效"));
+            return;
+        }
+        strategy = std::make_unique<CustomBacktestStrategy>(
+            std::move(*m_pendingCustomBacktestPlan));
+    }
+    m_pendingCustomBacktestPlan.reset();
+    if (!m_backtest.start(m_pendingBacktestConfig, candles, std::move(strategy))) {
+        emit backtestRunningChanged();
+        return;
+    }
+    emit backtestRunningChanged();
+}
+
+void TradingController::handleBacktestDatasetFailed(
+    quint64 requestId, const QString &message)
+{
+    if (!m_backtestPreparing || requestId != m_pendingBacktestDatasetRequestId) return;
+    handleBacktestError(message);
 }
 
 void TradingController::handleHistoryKline(quint64 requestId,

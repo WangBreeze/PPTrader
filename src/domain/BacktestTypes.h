@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/BacktestDatasetTypes.h"
 #include "domain/MarketTypes.h"
 
 #include <QVariantMap>
@@ -14,6 +15,7 @@ struct BacktestConfig {
     QVariantMap strategyParameters;
     QVariantMap ruleSnapshot;
     QString dataVersion;
+    BacktestDatasetIdentity datasetIdentity;
     Instrument instrument;
     QString frequency = QStringLiteral("day");
     int periodSeconds = 86400;
@@ -89,6 +91,16 @@ struct BacktestArchiveSummary {
     int requestedBars = 0;
     int actualBars = 0;
     QString dataVersion;
+    QString datasetVersion;
+    QDate datasetFirstDate;
+    QDate datasetLastDate;
+    int datasetDayCount = 0;
+    int datasetRawTickCount = 0;
+    int datasetDerivedBarCount = 0;
+    int datasetGapDayCount = 0;
+    int datasetStaleDayCount = 0;
+    QString datasetCalendarSource;
+    bool datasetCalendarCoverageKnown = false;
     PerformanceSummary summary;
 };
 

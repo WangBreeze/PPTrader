@@ -136,6 +136,14 @@ void BacktestDatasetIdentityTest::assemblesFactsAndCacheState()
     QCOMPARE(identity->toVariantMap().value(QStringLiteral("dayCount")).toInt(), 2);
     QCOMPARE(identity->toVariantMap().value(QStringLiteral("rawTickCount")).toInt(), 5);
 
+    BacktestDatasetIdentity restored;
+    QVERIFY(restored.fromJson(identity->toJson()));
+    QCOMPARE(restored.datasetVersion, identity->datasetVersion);
+    QCOMPARE(restored.days.size(), identity->days.size());
+    QCOMPARE(restored.days.first().rawMaximumId, identity->days.first().rawMaximumId);
+    QCOMPARE(restored.firstTradingDate, identity->firstTradingDate);
+    QVERIFY(!restored.fromJson(QStringLiteral("{invalid")));
+
     const auto all = store.loadBacktestDatasetIdentities();
     QCOMPARE(all.size(), 1);
     QCOMPARE(all.first().datasetVersion, identity->datasetVersion);
