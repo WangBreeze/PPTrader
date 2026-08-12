@@ -23,6 +23,8 @@
 
 ## 本次完成
 
+- 完成 H4.1b NAS 下载 Range 断点续传：客户端改为写 `.part` 暂存文件，中断/网络失败保留部分字节，重试时携带 `Range: bytes=N-` 续传（服务器不支持时自动从头并清理）；完成后按 catalog 大小与 SHA-256 整体校验并原子改名提交，缓存命中语义不变。FakeNasServer 支持 206/Content-Range 与中断模拟，`tst_nas_data_node` 新增中断→续传→完整校验用例（8/8 通过）。
+
 - 完成 H4.1 并发下载与多活动同步队列：`NasTickSyncQueue` 支持一次取一批 Ready 项并多活动推进（下载并行、导入串行），`TradingController` NAS 同步按 `PPTRADER_NAS_DOWNLOAD_CONCURRENCY`（默认 4）并行下载、独立 requestId 门控、串行事务导入；真实 100 档热缓存复验 21.58s → 18.60s（约 14%），冷缓存预期收益更高。`nas_sync_capacity` 探针支持 `--concurrency`。
 
 - 完成 H3C 组合资金回测（H3C.1–H3C.3）：新增 `PortfolioTypes`/`PortfolioBacktestEngine`（共享资金池、等权/固定权重、共同交易日收盘调仓、先卖后买、T+1、整手/费用/滑点、停牌估值、单腿权重上限与活跃腿数）；`PortfolioBacktestService` 逐腿校验 H2 数据集身份后异步运行；SQLite v5 组合归档三表单事务保存与恢复；策略页新增组合回测面板（腿解析、周期/调仓/根数配置、权益曲线、调仓成交、归档加载）。真实 100 档库 10 腿等权组合复验通过（10 笔建仓、佣金 299、归档成功）。

@@ -34,6 +34,8 @@ public:
     int manifestRequests = 0;
     int downloadRequests = 0;
     bool authorized = true;
+    bool resumeSupported = true;
+    int failAfterBytes = -1;
 
 protected:
     void incomingConnection(qintptr handle) override
@@ -90,10 +92,74 @@ protected:
                 socket->write(httpResponse(200, "application/json", body));
             } else if (firstLine.contains("/v1/ticks/600519/20260807")) {
                 ++downloadRequests;
-                socket->write(httpResponse(200, "text/csv", tickData));
+                QByteArray payload = tickData;
+                qint64 start = 0;
+                const QRegularExpression rangeExpression(
+                    QStringLiteral("Range: bytes=([0-9]+)-"),
+                    QRegularExpression::CaseInsensitiveOption);
+                const QRegularExpressionMatch rangeMatch = rangeExpression.match(
+                    QString::fromLatin1(request.left(headerEnd)));
+                if (resumeSupported && rangeMatch.hasMatch()) {
+                    start = rangeMatch.captured(1).toLongLong();
+                }
+                QByteArray response;
+                if (start > 0 && resumeSupported) {
+                    payload = payload.mid(start);
+                    response = QByteArray("HTTP/1.1 206 Partial Content\r\n")
+                        + "Content-Type: text/csv\r\n"
+                        + "Content-Range: bytes " + QByteArray::number(start)
+                        + "-" + QByteArray::number(tickData.size() - 1)
+                        + "/" + QByteArray::number(tickData.size()) + "\r\n"
+                        + "Content-Length: " + QByteArray::number(payload.size())
+                        + "\r\nConnection: close\r\n\r\n" + payload;
+                } else {
+                    response = httpResponse(200, "text/csv", tickData);
+                    payload = tickData;
+                }
+                if (failAfterBytes > 0 && payload.size() > failAfterBytes) {
+                    const int headerEndOffset =
+                        response.indexOf("\r\n\r\n") + 4;
+                    socket->write(response.left(
+                        headerEndOffset + failAfterBytes));
+                } else {
+                    socket->write(response);
+                }
+                socket->disconnectFromHost();
             } else if (firstLine.contains("/v1/ticks/000001/20260807")) {
                 ++downloadRequests;
-                socket->write(httpResponse(200, "text/csv", tickData));
+                QByteArray payload = tickData;
+                qint64 start = 0;
+                const QRegularExpression rangeExpression(
+                    QStringLiteral("Range: bytes=([0-9]+)-"),
+                    QRegularExpression::CaseInsensitiveOption);
+                const QRegularExpressionMatch rangeMatch = rangeExpression.match(
+                    QString::fromLatin1(request.left(headerEnd)));
+                if (resumeSupported && rangeMatch.hasMatch()) {
+                    start = rangeMatch.captured(1).toLongLong();
+                }
+                QByteArray response;
+                if (start > 0 && resumeSupported) {
+                    payload = payload.mid(start);
+                    response = QByteArray("HTTP/1.1 206 Partial Content\r\n")
+                        + "Content-Type: text/csv\r\n"
+                        + "Content-Range: bytes " + QByteArray::number(start)
+                        + "-" + QByteArray::number(tickData.size() - 1)
+                        + "/" + QByteArray::number(tickData.size()) + "\r\n"
+                        + "Content-Length: " + QByteArray::number(payload.size())
+                        + "\r\nConnection: close\r\n\r\n" + payload;
+                } else {
+                    response = httpResponse(200, "text/csv", tickData);
+                    payload = tickData;
+                }
+                if (failAfterBytes > 0 && payload.size() > failAfterBytes) {
+                    const int headerEndOffset =
+                        response.indexOf("\r\n\r\n") + 4;
+                    socket->write(response.left(
+                        headerEndOffset + failAfterBytes));
+                } else {
+                    socket->write(response);
+                }
+                socket->disconnectFromHost();
             } else if (firstLine.contains("/v1/health")) {
                 socket->write(httpResponse(
                     200, "application/json", "{\"status\":\"ok\",\"version\":\"test-v1\"}"));
@@ -115,6 +181,7 @@ private slots:
     void endpointPolicy();
     void catalogDownloadChecksumAndCacheReuse();
     void controlledManifestRequestAndQueue();
+    void resumeDownloadAfterInterruption();
     void multiDayQueueFailureResumeAndCancellation();
     void persistedQueueRecoveryAndCacheRetention();
 };
@@ -228,6 +295,55 @@ void NasDataNodeTest::catalogDownloadChecksumAndCacheReuse()
     QVERIFY(download.succeeded);
     QVERIFY(download.fromCache);
     QCOMPARE(server.downloadRequests, 1);
+}
+
+void NasDataNodeTest::resumeDownloadAfterInterruption()
+{
+    FakeNasServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    NasDataNodeClient client;
+    QString error;
+    QVERIFY(client.setEndpoint(QUrl(QStringLiteral("http://127.0.0.1:%1/")
+                                        .arg(server.serverPort())), &error));
+
+    QSignalSpy catalogSpy(&client, &NasDataNodeClient::catalogReady);
+    QVERIFY(client.requestCatalog(1, QStringLiteral("600519"),
+                                  QDate(2026, 8, 7), QDate(2026, 8, 7)));
+    QTRY_COMPARE_WITH_TIMEOUT(catalogSpy.count(), 1, 5000);
+    const NasCatalogResult catalog =
+        qvariant_cast<NasCatalogResult>(catalogSpy.takeFirst().at(1));
+    QVERIFY2(catalog.succeeded, qPrintable(catalog.error));
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    server.failAfterBytes = server.tickData.size() / 2;
+    QSignalSpy downloadSpy(&client, &NasDataNodeClient::downloadReady);
+    QVERIFY(client.downloadTickFile(2, catalog.entries.first(), directory.path()));
+    QTRY_COMPARE_WITH_TIMEOUT(downloadSpy.count(), 1, 5000);
+    NasDownloadResult interrupted =
+        qvariant_cast<NasDownloadResult>(downloadSpy.takeFirst().at(1));
+    QVERIFY(!interrupted.succeeded);
+    QVERIFY(QFileInfo::exists(
+        interrupted.localFilePath + QStringLiteral(".part")));
+    QCOMPARE(QFileInfo(interrupted.localFilePath
+                           + QStringLiteral(".part")).size(),
+             server.tickData.size() / 2);
+    QCOMPARE(server.downloadRequests, 1);
+
+    // 恢复服务器后重试：应携带 Range 续传并最终校验通过。
+    server.failAfterBytes = -1;
+    QVERIFY(client.downloadTickFile(3, catalog.entries.first(), directory.path()));
+    QTRY_COMPARE_WITH_TIMEOUT(downloadSpy.count(), 1, 5000);
+    NasDownloadResult resumed =
+        qvariant_cast<NasDownloadResult>(downloadSpy.takeFirst().at(1));
+    QVERIFY2(resumed.succeeded, qPrintable(resumed.error));
+    QVERIFY(!resumed.fromCache);
+    QCOMPARE(server.downloadRequests, 2);
+    QVERIFY(!QFileInfo::exists(resumed.localFilePath
+                               + QStringLiteral(".part")));
+    QFile file(resumed.localFilePath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), server.tickData);
 }
 
 void NasDataNodeTest::multiDayQueueFailureResumeAndCancellation()

@@ -9,7 +9,6 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QSaveFile>
 #include <QSet>
 #include <QUrlQuery>
 
@@ -118,9 +117,11 @@ struct NasDataNodeClient::DownloadState {
     NasCatalogEntry entry;
     QString localRoot;
     QString localFilePath;
-    std::unique_ptr<QSaveFile> file;
+    QString partFilePath;
+    std::unique_ptr<QFile> file;
     std::unique_ptr<QCryptographicHash> hash;
     qint64 receivedBytes = 0;
+    qint64 resumeOffset = 0;
     bool writeFailed = false;
 };
 
@@ -281,11 +282,39 @@ bool NasDataNodeClient::downloadTickFile(quint64 requestId,
     state->entry = entry;
     state->localRoot = localRoot;
     state->localFilePath = targetPath;
-    state->file = std::make_unique<QSaveFile>(targetPath);
+    state->partFilePath = targetPath + QStringLiteral(".part");
+    state->file = std::make_unique<QFile>(state->partFilePath);
     state->hash = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
-    if (!state->file->open(QIODevice::WriteOnly)) return false;
+    QIODevice::OpenMode mode = QIODevice::WriteOnly;
+    qint64 partSize = 0;
+    if (state->file->exists()) {
+        partSize = state->file->size();
+        if (partSize > 0 && partSize < entry.size) {
+            mode = QIODevice::WriteOnly | QIODevice::Append;
+        } else if (partSize >= entry.size) {
+            // 残留部分文件超过目标：从头开始。
+            if (!QFile::remove(state->partFilePath)) return false;
+            partSize = 0;
+        }
+    }
+    if (!state->file->open(mode)) return false;
+    if (partSize > 0) {
+        // 把已下载的部分计入哈希与字节数，便于续传后整体校验。
+        QFile partReader(state->partFilePath);
+        if (!partReader.open(QIODevice::ReadOnly)) return false;
+        while (!partReader.atEnd()) {
+            state->hash->addData(partReader.read(1024 * 1024));
+        }
+        state->receivedBytes = partSize;
+        state->resumeOffset = partSize;
+    }
     QNetworkRequest request = requestFor(resolve(entry.downloadPath));
     request.setRawHeader("Accept", "text/csv");
+    if (state->resumeOffset > 0) {
+        request.setRawHeader("Range", QByteArray("bytes=")
+                                 + QByteArray::number(state->resumeOffset)
+                                 + QByteArray("-"));
+    }
     QNetworkReply *reply = m_network.get(request);
     m_replies.insert(requestId, reply);
     m_downloads.insert(requestId, state);
@@ -357,16 +386,43 @@ void NasDataNodeClient::finishDownload(
     result.localRoot = state->localRoot;
     result.localFilePath = state->localFilePath;
     result.receivedBytes = state->receivedBytes;
-    if (reply->error() != QNetworkReply::NoError) result.error = reply->errorString();
-    else if (state->writeFailed) result.error = QStringLiteral("写入 NAS 下载缓存失败");
-    else if (state->receivedBytes != state->entry.size)
-        result.error = QStringLiteral("NAS 下载字节数与 catalog 不一致");
-    else if (QString::fromLatin1(state->hash->result().toHex())
-             != normalizedDigest(state->entry.sha256))
+    const int statusCode = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (reply->error() != QNetworkReply::NoError) {
+        result.error = reply->errorString();
+    } else if (statusCode == 200 && state->resumeOffset > 0) {
+        // 服务器忽略了 Range：从头下载，清理部分文件。
+        state->file->close();
+        if (!QFile::remove(state->partFilePath)) {
+            result.error = QStringLiteral("清理 NAS 续传缓存失败");
+        } else {
+            result.error = QStringLiteral("NAS 服务器未支持续传，请重试");
+        }
+    } else if (state->writeFailed) {
+        result.error = QStringLiteral("写入 NAS 下载缓存失败");
+    } else if (state->receivedBytes != state->entry.size) {
+        result.error = QStringLiteral("NAS 下载字节数与 catalog 不一致（可续传）");
+    } else if (QString::fromLatin1(state->hash->result().toHex())
+               != normalizedDigest(state->entry.sha256)) {
         result.error = QStringLiteral("NAS 下载 SHA-256 校验失败");
-    else if (!state->file->commit()) result.error = QStringLiteral("提交 NAS 下载缓存失败");
-    else result.succeeded = true;
-    if (!result.succeeded) state->file->cancelWriting();
+    } else {
+        state->file->close();
+        if (!QFile::rename(state->partFilePath, state->localFilePath)) {
+            result.error = QStringLiteral("提交 NAS 下载缓存失败");
+        } else {
+            result.succeeded = true;
+        }
+    }
+    if (!result.succeeded) {
+        state->file->close();
+        const bool retainForResume =
+            reply->error() != QNetworkReply::NoError
+            || result.error.startsWith(
+                QStringLiteral("NAS 下载字节数与 catalog 不一致"));
+        if (!retainForResume) {
+            QFile::remove(state->partFilePath);
+        }
+    }
     emit downloadReady(requestId, result);
     reply->deleteLater();
 }

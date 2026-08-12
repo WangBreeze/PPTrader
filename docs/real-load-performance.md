@@ -115,3 +115,5 @@ ssh -N -L 28765:127.0.0.1:18765 wanglc@192.168.3.7
 并发下 `transferMilliseconds` 为累计失真的统计（多个下载共享计时器），不计入结论；`elapsedMilliseconds` 为真实总耗时。热缓存下传输占比已被压缩，冷缓存/远端节点场景并发收益预计显著更高；本机瓶颈仍为解析（100 档约 14.6 s）与写库（约 2.7 s）。
 
 产品侧 `TradingController` NAS 同步已支持 `PPTRADER_NAS_DOWNLOAD_CONCURRENCY`（默认 4）：下载阶段并行、SHA-256 校验后导入仍串行（SQLite 单写者），队列多活动语义与并发下载由 `tst_nas_data_node` 覆盖。
+
+H4.1b 已交付客户端 Range 断点续传：下载写入 `<代码>.csv.part`，网络中断保留部分字节，重试自动携带 `Range` 续传，完成时按 catalog 大小与 SHA-256 整体校验后原子提交；服务器不支持 Range 时自动从头下载。节点端 `Accept-Ranges/ETag/Content-Range` 自 v1 起已支持。
