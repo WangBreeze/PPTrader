@@ -68,6 +68,8 @@ flowchart LR
 
 H3A/H3B 已增加独立 `BatchBacktestService` 和 `BatchBacktestResultListModel`。控制器从严格本地 Tick catalog 选择同周期数据集，后台线程以独立 SQLite 连接逐项读取，并把活动 `BacktestEngine` 限制为 20；每项运行前加载数据集身份（缺失/缓存过期按失败隔离），完成后保留摘要并在内存有界保留完整结果（32 项 LRU）。`archiveBatchBacktestItem(symbol)` 复用回测归档事务按需保存单项曲线/成交/身份；`batch_backtest_runs`/`batch_backtest_run_items` 持久化运行计划（全库 v4），应用重启把遗留 running 转为可重试 cancelled，`resumeBatchBacktest(runId)` 只重跑失败/取消项。批量任务与单标的任务互斥，支持原子取消、requestId 门控和单项失败隔离。它不是组合资金回测，也不自动批量保存曲线/成交。独立 Release 探针实测 5207×239 根在活动上限 20 时用时 2.710 秒；真实 5207 份数据的 NAS 同步、SQLite 装载和端到端上限仍属于 H1/H3B 后续大档验证。
 
+H3C 新增组合资金回测：`PortfolioBacktestEngine` 以共享资金池按目标权重（默认等权）在共同交易日收盘定期再平衡，强制 A 股整手、费用、滑点与 T+1（先卖后买，当日买入不可卖），停牌腿保持数量并按最后已知价估值；`PortfolioBacktestService` 逐腿校验 H2 数据集身份后异步运行，`portfolio_backtest_results`/`portfolio_equity_points`/`portfolio_trades` 三表单事务保存组合定义、数据集身份、每期持仓与调仓成交（全库 v5）。策略页组合回测面板支持腿解析、周期/调仓/根数配置、权益曲线、调仓成交与归档加载。它不是策略信号驱动调仓，也不含做空/杠杆/组合级熔断（见 `docs/portfolio-backtest-design.md`）。
+
 `TickDataImportPanel` 是阶段 8A 的显式本地文件入口。目录、单个 A 股代码、交易日、文件格式、聚合周期和 5min volume 单位全部由用户确认；目录选择只更新控制器状态，不枚举或打开文件。只有导入按钮调用 `startTickDataImport()`，后台结果通过 requestId 回传，QML 不直接访问 `QFile` 或 SQLite。
 
 `TickDataBatchImportPanel` 是阶段 8B 的受控多日入口。`prepareTickDataBatchImport()` 只为指定代码和日期区间计算确定性预期路径并检查文件元数据，不解析内容、不递归扫描；`startTickDataBatchImport()` 才逐日串行复用阶段 8A 解析器。每个日期独立提交事务，失败继续；取消后可用 `resumeTickDataBatchImport()` 保留成功项并重试其余项。

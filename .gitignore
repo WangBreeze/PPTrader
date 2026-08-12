@@ -10,6 +10,7 @@ data/pptrader.db*
 
 # 个人开发配置与机器特定路径
 /.vscode/
+/cbm-admin-install.ps1
 
 # Python 缓存
 __pycache__/

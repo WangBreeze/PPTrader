@@ -1,6 +1,6 @@
 # 组合资金回测设计（H3C）
 
-最后更新：2026-08-12
+最后更新：2026-08-13
 
 ## 目标与不变量
 
@@ -33,8 +33,10 @@ H3C 提供**组合资金回测**：一组 A 股共享一个初始资金池，按
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| H3C.1 | `PortfolioTypes` + `PortfolioBacktestEngine`（等权/固定权重、周期再平衡、T+1、整手/费用/滑点、停牌估值） | `tst_portfolio_backtest` 全绿 |
-| H3C.2 | SQLite 组合回测归档（复用回测归档事务模式）+ 控制器入口 + 数据集身份 | CTest + 真实 100 档样本组合复验 |
-| H3C.3 | 策略页组合回测面板 + 权益/成交展示 + 文档 | qmllint + 截图 |
+| H3C.1 ✅ | `PortfolioTypes` + `PortfolioBacktestEngine`（等权/固定权重、周期再平衡、T+1、整手/费用/滑点、停牌估值） | `tst_portfolio_backtest` 全绿 |
+| H3C.2 ✅ | SQLite 组合回测归档（v5）+ `PortfolioBacktestService` + 控制器入口 + 数据集身份 | CTest + 真实 100 档 10 腿组合复验 |
+| H3C.3 ✅ | 策略页组合回测面板（腿/权重/周期/资金 → 权益曲线/调仓成交/归档加载）+ 文档 | qmllint + CTest |
 
-详细契约随实施更新到 `docs/portfolio-backtest-design.md`。
+## 归档与恢复
+
+`portfolio_backtest_results` / `portfolio_equity_points` / `portfolio_trades` 三表单事务保存组合定义、数据集身份、权益曲线（含每期持仓）与调仓成交；应用启动只恢复摘要目录，用户显式加载后查看历史快照，不联网、不重跑。
