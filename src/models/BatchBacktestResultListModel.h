@@ -20,6 +20,13 @@ public:
         SucceededRole,
         ErrorRole,
         DataVersionRole,
+        DatasetVersionRole,
+        DatasetDayCountRole,
+        DatasetRawTickCountRole,
+        DatasetGapDayCountRole,
+        DatasetStaleDayCountRole,
+        ArchivedRole,
+        ArchivedResultIdRole,
         FinalEquityRole,
         TotalReturnPercentRole,
         MaxDrawdownPercentRole,
@@ -39,6 +46,7 @@ public:
     Q_INVOKABLE int indexOfSymbol(const QString &symbol) const;
     void clear();
     void addResult(const BatchBacktestItemResult &result);
+    void updateArchiveState(const QString &symbol, const QString &resultId);
 
 signals:
     void countChanged();
@@ -48,4 +56,3 @@ private:
 };
 
 } // namespace pp
-

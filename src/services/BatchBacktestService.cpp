@@ -1,16 +1,17 @@
 #include "services/BatchBacktestService.h"
 
+#include "services/AShareTradingCalendar.h"
 #include "services/BacktestEngine.h"
+#include "services/SqliteLocalDataStore.h"
 
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QPointer>
-#include <QSqlDatabase>
-#include <QSqlQuery>
 #include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
+#include <memory>
 
 namespace pp {
 
@@ -41,13 +42,9 @@ public:
             return;
         }
 
-        m_connectionName = QStringLiteral("batch-backtest-%1")
-            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-        m_database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
-        m_database.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY;QSQLITE_BUSY_TIMEOUT=5000"));
-        m_database.setDatabaseName(databasePath);
-        if (!m_database.open()) {
-            finish(false, QStringLiteral("批量回测只读 SQLite 连接失败"));
+        m_store = std::make_unique<SqliteLocalDataStore>();
+        if (!m_store->initialize(databasePath)) {
+            finish(false, QStringLiteral("批量回测 SQLite 连接失败"));
             return;
         }
         if (m_request.requestId == 0 || m_request.datasets.isEmpty()
@@ -75,44 +72,9 @@ public:
 private:
     QVector<Candle> loadCandles(const LocalHistoryDataset &dataset, QString *error)
     {
-        QVector<Candle> candles;
-        QSqlQuery query(m_database);
-        query.prepare(QStringLiteral(
-            "select start_time_utc, open, high, low, close, volume, buy_volume, "
-            "sell_volume, neutral_volume, directional_volume_known, adjustment, "
-            "downloaded_at_utc from (select start_time_utc, open, high, low, close, "
-            "volume, buy_volume, sell_volume, neutral_volume, directional_volume_known, "
-            "adjustment, downloaded_at_utc from candles where symbol = ? "
-            "and period_seconds = ? and source = 'raw_tick_cache_v1' and close > 0 "
-            "order by start_time_utc desc limit ?) order by start_time_utc asc"));
-        query.addBindValue(dataset.instrument.symbol);
-        query.addBindValue(dataset.periodSeconds);
-        query.addBindValue(m_request.barCount);
-        if (!query.exec()) {
-            if (error) *error = QStringLiteral("SQLite 读取失败");
-            return candles;
-        }
-        while (query.next()) {
-            Candle candle;
-            candle.instrument = dataset.instrument;
-            candle.startTime = QDateTime::fromString(query.value(0).toString(),
-                                                     Qt::ISODateWithMs);
-            candle.periodSeconds = dataset.periodSeconds;
-            candle.open = query.value(1).toDouble();
-            candle.high = query.value(2).toDouble();
-            candle.low = query.value(3).toDouble();
-            candle.close = query.value(4).toDouble();
-            candle.volume = query.value(5).toDouble();
-            candle.buyVolume = query.value(6).toDouble();
-            candle.sellVolume = query.value(7).toDouble();
-            candle.neutralVolume = query.value(8).toDouble();
-            candle.directionalVolumeKnown = query.value(9).toBool();
-            candle.source = QStringLiteral("raw_tick_cache_v1");
-            candle.adjustment = query.value(10).toString();
-            candle.downloadedAt = QDateTime::fromString(query.value(11).toString(),
-                                                       Qt::ISODateWithMs);
-            candles.append(candle);
-        }
+        QVector<Candle> candles = m_store->loadRecentCandlesFromSource(
+            dataset.instrument, dataset.periodSeconds, m_request.barCount,
+            QStringLiteral("raw_tick_cache_v1"));
         if (error) error->clear();
         return candles;
     }
@@ -129,17 +91,37 @@ private:
             const LocalHistoryDataset dataset = m_request.datasets.at(m_nextDataset++);
             QString loadError;
             QVector<Candle> candles = loadCandles(dataset, &loadError);
-            if (!loadError.isEmpty() || candles.size() < m_request.barCount) {
+            auto identity = m_store->loadBacktestDatasetIdentity(
+                dataset.instrument, dataset.periodSeconds);
+            const bool identityUnavailable = !identity || identity->isEmpty();
+            const bool identityStale = !identityUnavailable && identity->staleDayCount > 0;
+            if (!loadError.isEmpty() || candles.size() < m_request.barCount
+                || identityUnavailable || identityStale) {
                 BatchBacktestItemResult item;
                 item.requestId = m_request.requestId;
                 item.instrument = dataset.instrument;
                 item.frequency = dataset.frequency();
                 item.requestedBars = m_request.barCount;
                 item.actualBars = candles.size();
-                item.error = loadError.isEmpty()
-                    ? QStringLiteral("Tick 派生 K 线不足：%1/%2")
-                          .arg(candles.size()).arg(m_request.barCount)
-                    : loadError;
+                if (identity && !identity->isEmpty()) {
+                    item.datasetVersion = identity->datasetVersion;
+                    item.datasetDayCount = identity->days.size();
+                    item.datasetRawTickCount = identity->rawTickTotal();
+                    item.datasetGapDayCount = identity->gapDayCount;
+                    item.datasetStaleDayCount = identity->staleDayCount;
+                }
+                if (!loadError.isEmpty()) {
+                    item.error = loadError;
+                } else if (candles.size() < m_request.barCount) {
+                    item.error = QStringLiteral("Tick 派生 K 线不足：%1/%2")
+                                     .arg(candles.size()).arg(m_request.barCount);
+                } else if (identityUnavailable) {
+                    item.error = QStringLiteral("数据集身份不可用：无原始 Tick 事实");
+                } else {
+                    item.error = QStringLiteral(
+                        "派生缓存过期（%1 日），请先在本地分钟序列/导入面板刷新")
+                                     .arg(identity->staleDayCount);
+                }
                 ++m_completed;
                 ++m_failed;
                 postItem(item);
@@ -163,6 +145,7 @@ private:
             config.commissionRate = m_request.commissionRate;
             config.slippageRate = m_request.slippageRate;
             config.lotSize = m_request.lotSize;
+            config.datasetIdentity = *identity;
 
             connect(engine, &BacktestEngine::finished, this,
                     [this, engine, dataset, startedAt](const PerformanceSummary &) {
@@ -175,8 +158,18 @@ private:
                 item.actualBars = engine->result().config.actualBars;
                 item.succeeded = true;
                 item.dataVersion = engine->result().config.dataVersion;
+                item.datasetVersion = engine->result().config.datasetIdentity.datasetVersion;
+                item.datasetDayCount =
+                    engine->result().config.datasetIdentity.days.size();
+                item.datasetRawTickCount =
+                    engine->result().config.datasetIdentity.rawTickTotal();
+                item.datasetGapDayCount =
+                    engine->result().config.datasetIdentity.gapDayCount;
+                item.datasetStaleDayCount =
+                    engine->result().config.datasetIdentity.staleDayCount;
                 item.summary = engine->result().summary;
                 item.elapsedMilliseconds = m_clock.elapsed() - startedAt;
+                postCompleted(dataset.instrument.symbol, engine->result());
                 completeEngine(engine, item);
             });
             connect(engine, &BacktestEngine::errorOccurred, this,
@@ -223,6 +216,15 @@ private:
         }, Qt::QueuedConnection);
     }
 
+    void postCompleted(const QString &symbol, const BacktestResult &result)
+    {
+        const quint64 requestId = m_request.requestId;
+        QPointer<BatchBacktestService> guard(m_owner);
+        QMetaObject::invokeMethod(m_owner, [guard, requestId, symbol, result]() {
+            if (guard) emit guard->itemCompleted(requestId, symbol, result);
+        }, Qt::QueuedConnection);
+    }
+
     void postProgress()
     {
         const quint64 requestId = m_request.requestId;
@@ -251,21 +253,13 @@ private:
         if (!m_running) return;
         const quint64 requestId = m_request.requestId;
         m_running = false;
-        if (m_database.isValid()) {
-            m_database.close();
-            m_database = {};
-        }
-        if (!m_connectionName.isEmpty()) {
-            QSqlDatabase::removeDatabase(m_connectionName);
-            m_connectionName.clear();
-        }
+        m_store.reset();
         postFinished(requestId, cancelled, error);
     }
 
     QPointer<BatchBacktestService> m_owner;
     BatchBacktestRequest m_request;
-    QSqlDatabase m_database;
-    QString m_connectionName;
+    std::unique_ptr<SqliteLocalDataStore> m_store;
     QVector<BacktestEngine *> m_engines;
     QElapsedTimer m_clock;
     int m_nextDataset = 0;
@@ -280,6 +274,7 @@ BatchBacktestService::BatchBacktestService(QObject *parent)
 {
     qRegisterMetaType<BatchBacktestRequest>();
     qRegisterMetaType<BatchBacktestItemResult>();
+    qRegisterMetaType<BacktestResult>();
     m_worker->moveToThread(&m_thread);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
     m_thread.setObjectName(QStringLiteral("PPTraderBatchBacktest"));

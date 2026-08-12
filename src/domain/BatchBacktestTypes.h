@@ -29,6 +29,13 @@ struct BatchBacktestItemResult {
     bool succeeded = false;
     QString error;
     QString dataVersion;
+    QString datasetVersion;
+    int datasetDayCount = 0;
+    int datasetRawTickCount = 0;
+    int datasetGapDayCount = 0;
+    int datasetStaleDayCount = 0;
+    bool archived = false;
+    QString archivedResultId;
     PerformanceSummary summary;
     qint64 elapsedMilliseconds = 0;
 
@@ -39,4 +46,3 @@ struct BatchBacktestItemResult {
 
 Q_DECLARE_METATYPE(pp::BatchBacktestRequest)
 Q_DECLARE_METATYPE(pp::BatchBacktestItemResult)
-

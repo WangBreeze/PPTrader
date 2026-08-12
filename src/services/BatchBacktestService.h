@@ -25,6 +25,8 @@ public:
 
 signals:
     void itemReady(quint64 requestId, const pp::BatchBacktestItemResult &result);
+    void itemCompleted(quint64 requestId, const QString &symbol,
+                       const pp::BacktestResult &result);
     void progressChanged(quint64 requestId, int completed, int total,
                          int succeeded, int failed);
     void finished(quint64 requestId, bool cancelled, const QString &error);

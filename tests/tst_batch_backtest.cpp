@@ -1,14 +1,14 @@
 #include "domain/BatchBacktestTypes.h"
+#include "domain/RawTradeTypes.h"
 #include "models/BatchBacktestResultListModel.h"
 #include "services/BatchBacktestService.h"
+#include "services/SqliteLocalDataStore.h"
 
 #include <QDateTime>
 #include <QSignalSpy>
-#include <QSqlDatabase>
-#include <QSqlQuery>
 #include <QTemporaryDir>
+#include <QTimeZone>
 #include <QtTest>
-#include <QUuid>
 
 using namespace pp;
 
@@ -17,58 +17,67 @@ namespace {
 QString createDatabase(const QString &directory, int symbolCount, int barsPerSymbol)
 {
     const QString path = directory + QStringLiteral("/batch.db");
-    const QString connectionName = QStringLiteral("batch-test-create-%1")
-                                       .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-    {
-        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
-        database.setDatabaseName(path);
-        if (!database.open()) return {};
-        QSqlQuery query(database);
-        if (!query.exec(QStringLiteral(
-                "create table candles ("
-                "symbol text not null, name text, market integer, venue text, "
-                "start_time_utc text not null, period_seconds integer not null, "
-                "open real, high real, low real, close real, volume real, "
-                "buy_volume real, sell_volume real, neutral_volume real, "
-                "directional_volume_known integer, source text, adjustment text, "
-                "downloaded_at_utc text, primary key(symbol, period_seconds, start_time_utc))"))) {
+    SqliteLocalDataStore store;
+    if (!store.initialize(path)) return {};
+    const QDate day(2026, 1, 5);
+    const QTimeZone shanghai("Asia/Shanghai");
+    for (int symbolIndex = 0; symbolIndex < symbolCount; ++symbolIndex) {
+        const QString symbol = QStringLiteral("%1")
+            .arg(600000 + symbolIndex, 6, 10, QLatin1Char('0'));
+        const Instrument instrument{symbol,
+            QStringLiteral("测试%1").arg(symbolIndex), Market::AShare,
+            QStringLiteral("上交所")};
+
+        QVector<RawTradeTick> ticks;
+        ticks.reserve(barsPerSymbol);
+        QVector<Candle> candles;
+        candles.reserve(barsPerSymbol);
+        for (int bar = 0; bar < barsPerSymbol; ++bar) {
+            const double close = 10.0 + symbolIndex * 0.01 + bar * 0.02
+                                 + (bar % 7 == 0 ? -0.03 : 0.0);
+            RawTradeTick tick;
+            tick.instrument = instrument;
+            tick.tradingDate = day;
+            tick.timestamp = QDateTime(day, QTime(9, 30), shanghai)
+                                 .addSecs(bar * 60).toUTC();
+            tick.sourceLine = bar + 1;
+            tick.price = close;
+            tick.volumeShares = 100.0;
+            tick.amount = close * 100.0;
+            tick.direction = bar % 2 ? RawTradeDirection::Buy
+                                     : RawTradeDirection::Sell;
+            tick.source = QStringLiteral("tickdata_csv_tick");
+            ticks.append(tick);
+
+            Candle candle;
+            candle.instrument = instrument;
+            candle.startTime = QDateTime(day, QTime(9, 30), shanghai)
+                                   .addSecs(bar * 60).toUTC();
+            candle.periodSeconds = 60;
+            candle.open = close - 0.01;
+            candle.high = close + 0.03;
+            candle.low = close - 0.04;
+            candle.close = close;
+            candle.volume = 10000.0 + bar * 100.0;
+            candle.source = QStringLiteral("raw_tick_cache_v1");
+            candle.adjustment = QStringLiteral("none");
+            candles.append(candle);
+        }
+        if (!store.beginRawTradeTickImport(
+                instrument, day, QStringLiteral("tickdata_csv_tick"))) {
             return {};
         }
-        if (!database.transaction()) return {};
-        query.prepare(QStringLiteral(
-            "insert into candles values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
-        const QDateTime start(QDate(2024, 1, 2), QTime(1, 30), Qt::UTC);
-        for (int symbolIndex = 0; symbolIndex < symbolCount; ++symbolIndex) {
-            const QString symbol = QStringLiteral("%1").arg(600000 + symbolIndex, 6, 10, QLatin1Char('0'));
-            for (int bar = 0; bar < barsPerSymbol; ++bar) {
-                const double close = 10.0 + symbolIndex * 0.01 + bar * 0.02
-                                     + (bar % 7 == 0 ? -0.03 : 0.0);
-                query.addBindValue(symbol);
-                query.addBindValue(QStringLiteral("测试%1").arg(symbolIndex));
-                query.addBindValue(static_cast<int>(Market::AShare));
-                query.addBindValue(QStringLiteral("上交所"));
-                query.addBindValue(start.addSecs(bar * 60).toString(Qt::ISODateWithMs));
-                query.addBindValue(60);
-                query.addBindValue(close - 0.01);
-                query.addBindValue(close + 0.03);
-                query.addBindValue(close - 0.04);
-                query.addBindValue(close);
-                query.addBindValue(10000.0 + bar * 100.0);
-                query.addBindValue(5000.0);
-                query.addBindValue(4000.0);
-                query.addBindValue(1000.0);
-                query.addBindValue(1);
-                query.addBindValue(QStringLiteral("raw_tick_cache_v1"));
-                query.addBindValue(QStringLiteral("none"));
-                query.addBindValue(start.toString(Qt::ISODateWithMs));
-                if (!query.exec()) return {};
-                query.finish();
-            }
+        if (!store.appendRawTradeTicks(ticks)) return {};
+        if (!store.commitRawTradeTickImport()) return {};
+
+        const RawTradeFingerprint fingerprint =
+            store.rawTradeFingerprint(instrument, day);
+        if (fingerprint.count != barsPerSymbol) return {};
+        if (!store.replaceRawTickCandleCache(
+                instrument, day, 60, fingerprint, candles)) {
+            return {};
         }
-        if (!database.commit()) return {};
-        database.close();
     }
-    QSqlDatabase::removeDatabase(connectionName);
     return path;
 }
 
@@ -109,6 +118,8 @@ class BatchBacktestTest final : public QObject {
 
 private slots:
     void completesMultipleSymbolsAndReportsInsufficientData();
+    void identityAndArchiveRoundTrip();
+    void staleDatasetFailsBatchItem();
     void cancellationAndBusyGate();
     void resultModelRolesAndOrdering();
 };
@@ -144,6 +155,9 @@ void BatchBacktestTest::completesMultipleSymbolsAndReportsInsufficientData()
             QCOMPARE(item.actualBars, 60);
             QVERIFY(item.dataVersion.startsWith(QStringLiteral("sha256:")));
             QCOMPARE(item.dataVersion.size(), 71);
+            QVERIFY(item.datasetVersion.startsWith(QStringLiteral("sha256:")));
+            QCOMPARE(item.datasetDayCount, 1);
+            QCOMPARE(item.datasetRawTickCount, 60);
         } else {
             ++failed;
             QVERIFY(!item.error.isEmpty());
@@ -153,6 +167,147 @@ void BatchBacktestTest::completesMultipleSymbolsAndReportsInsufficientData()
     QVERIFY2(succeeded > 0, qPrintable(errors.join(QStringLiteral(" | "))));
     QCOMPARE(succeeded, 12);
     QCOMPARE(failed, 1);
+}
+
+void BatchBacktestTest::identityAndArchiveRoundTrip()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 3, 60);
+    QVERIFY(!path.isEmpty());
+
+    BatchBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy completedSpy(&service, &BatchBacktestService::itemCompleted);
+    QSignalSpy finishedSpy(&service, &BatchBacktestService::finished);
+    QVERIFY(service.start(requestFor(81, 3, 60)));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 10000);
+    QCOMPARE(completedSpy.count(), 3);
+
+    BacktestResult retained;
+    bool found = false;
+    for (const QList<QVariant> &arguments : completedSpy) {
+        const QString symbol = arguments.at(1).toString();
+        const BacktestResult result =
+            qvariant_cast<BacktestResult>(arguments.at(2));
+        QVERIFY(result.equityCurve.size() > 0);
+        QVERIFY(!result.config.datasetIdentity.isEmpty());
+        QVERIFY(result.config.datasetIdentity.datasetVersion.startsWith(
+            QStringLiteral("sha256:")));
+        if (symbol == QStringLiteral("600001")) {
+            retained = result;
+            found = true;
+        }
+    }
+    QVERIFY(found);
+
+    BacktestArchiveRecord archive;
+    archive.resultId = QStringLiteral("batch-archive-1");
+    archive.completedAt = QDateTime::currentDateTimeUtc();
+    archive.result = retained;
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(archive));
+        const auto restored = store.loadBacktestArchive(archive.resultId);
+        QVERIFY(restored.has_value());
+        QCOMPARE(restored->result.config.datasetIdentity.datasetVersion,
+                 retained.config.datasetIdentity.datasetVersion);
+        QCOMPARE(restored->result.config.datasetIdentity.days.size(), 1);
+        QCOMPARE(restored->result.config.datasetIdentity.rawTickTotal(), 60);
+    }
+
+    BatchBacktestResultListModel model;
+    BatchBacktestItemResult item;
+    item.instrument = datasetFor(0, 60).instrument;
+    item.succeeded = true;
+    item.datasetVersion = retained.config.datasetIdentity.datasetVersion;
+    model.addResult(item);
+    model.updateArchiveState(QStringLiteral("600000"),
+                             QStringLiteral("batch-archive-1"));
+    QCOMPARE(model.indexOfSymbol(QStringLiteral("600000")), 0);
+    QVERIFY(model.get(0).value(QStringLiteral("archived")).toBool());
+    QCOMPARE(model.get(0).value(QStringLiteral("archivedResultId")).toString(),
+             QStringLiteral("batch-archive-1"));
+}
+
+void BatchBacktestTest::staleDatasetFailsBatchItem()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 2, 60);
+    QVERIFY(!path.isEmpty());
+
+    // 替换 600001 的事实但不刷新派生缓存，制造 stale 数据集。
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        const QDate day(2026, 1, 5);
+        const QTimeZone shanghai("Asia/Shanghai");
+        const Instrument instrument{QStringLiteral("600001"),
+            QStringLiteral("测试1"), Market::AShare, QStringLiteral("上交所")};
+        QVector<RawTradeTick> ticks;
+        for (int bar = 0; bar < 61; ++bar) {
+            RawTradeTick tick;
+            tick.instrument = instrument;
+            tick.tradingDate = day;
+            tick.timestamp = QDateTime(day, QTime(9, 30), shanghai)
+                                 .addSecs(bar * 60).toUTC();
+            tick.sourceLine = bar + 1;
+            tick.price = 10.0 + bar * 0.02;
+            tick.volumeShares = 100.0;
+            tick.amount = tick.price * 100.0;
+            tick.direction = bar % 2 ? RawTradeDirection::Buy
+                                     : RawTradeDirection::Sell;
+            tick.source = QStringLiteral("tickdata_csv_tick");
+            ticks.append(tick);
+        }
+        QVERIFY(store.beginRawTradeTickImport(
+            instrument, day, QStringLiteral("tickdata_csv_tick")));
+        QVERIFY(store.appendRawTradeTicks(ticks));
+        QVERIFY(store.commitRawTradeTickImport());
+        QVERIFY(!store.rawTickCandleCacheFresh(instrument, day, 60));
+        const auto identity = store.loadBacktestDatasetIdentity(instrument, 60);
+        QVERIFY(identity.has_value());
+        QCOMPARE(identity->staleDayCount, 1);
+    }
+    {
+        SqliteLocalDataStore freshStore;
+        QVERIFY(freshStore.initialize(path));
+        const Instrument instrument{QStringLiteral("600001"),
+            QStringLiteral("测试1"), Market::AShare, QStringLiteral("上交所")};
+        const auto freshIdentity =
+            freshStore.loadBacktestDatasetIdentity(instrument, 60);
+        QVERIFY(freshIdentity.has_value());
+        QCOMPARE(freshIdentity->staleDayCount, 1);
+    }
+
+    BatchBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &BatchBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &BatchBacktestService::finished);
+    QVERIFY(service.start(requestFor(82, 2, 60)));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 10000);
+    QCOMPARE(itemSpy.count(), 2);
+
+    int succeeded = 0;
+    int staleFailures = 0;
+    BatchBacktestItemResult firstResult;
+    BatchBacktestItemResult secondResult;
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const BatchBacktestItemResult item =
+            qvariant_cast<BatchBacktestItemResult>(arguments.at(1));
+        if (item.instrument.symbol == QStringLiteral("600000")) firstResult = item;
+        else secondResult = item;
+    }
+    QVERIFY(firstResult.succeeded);
+    ++succeeded;
+    QVERIFY2(!secondResult.succeeded, qPrintable(secondResult.error));
+    QVERIFY(secondResult.error.contains(QStringLiteral("缓存过期")));
+    QCOMPARE(secondResult.datasetStaleDayCount, 1);
+    ++staleFailures;
+    QCOMPARE(succeeded, 1);
+    QCOMPARE(staleFailures, 1);
 }
 
 void BatchBacktestTest::cancellationAndBusyGate()

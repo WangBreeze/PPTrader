@@ -747,6 +747,7 @@ public:
         const QString &strategyId, const QVariantMap &strategyParameters,
         const QString &frequency, int barCount, int maximumSymbols = 5207);
     Q_INVOKABLE void cancelLocalBatchBacktest();
+    Q_INVOKABLE QString archiveBatchBacktestItem(const QString &symbol);
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
@@ -1017,6 +1018,8 @@ private:
     PerformanceSummary m_backtestSummary;
     AccountSnapshot m_accountSnapshot;
     QHash<QString, Tick> m_latestTicks;
+    QHash<QString, BacktestResult> m_batchRetainedResults;
+    QStringList m_batchResultOrder;
     FactorFrame m_latestCrossSectionalFrame;
     bool m_liveRunning = false;
     bool m_backtestPreparing = false;

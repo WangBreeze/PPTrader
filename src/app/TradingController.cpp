@@ -193,6 +193,21 @@ TradingController::TradingController(QObject *parent)
                 if (requestId != m_batchBacktestRequestId) return;
                 m_batchBacktestModel.addResult(result);
             });
+    connect(&m_batchBacktestService, &BatchBacktestService::itemCompleted, this,
+            [this](quint64 requestId, const QString &symbol,
+                   const BacktestResult &result) {
+                if (requestId != m_batchBacktestRequestId || symbol.isEmpty()) return;
+                constexpr int kMaxRetainedBatchResults = 32;
+                if (!m_batchRetainedResults.contains(symbol)) {
+                    m_batchResultOrder.removeAll(symbol);
+                    m_batchResultOrder.append(symbol);
+                    while (m_batchResultOrder.size() > kMaxRetainedBatchResults) {
+                        const QString oldest = m_batchResultOrder.takeFirst();
+                        m_batchRetainedResults.remove(oldest);
+                    }
+                }
+                m_batchRetainedResults.insert(symbol, result);
+            });
     connect(&m_batchBacktestService, &BatchBacktestService::progressChanged, this,
             [this](quint64 requestId, int completed, int total,
                    int succeeded, int failed) {
@@ -2317,6 +2332,8 @@ qulonglong TradingController::runLocalBatchBacktest(
     request.maximumActiveEngines = 20;
 
     m_batchBacktestModel.clear();
+    m_batchRetainedResults.clear();
+    m_batchResultOrder.clear();
     m_batchBacktestRequestedCount = request.datasets.size();
     m_batchBacktestCompletedCount = 0;
     m_batchBacktestSucceededCount = 0;
@@ -2337,6 +2354,47 @@ qulonglong TradingController::runLocalBatchBacktest(
 void TradingController::cancelLocalBatchBacktest()
 {
     m_batchBacktestService.cancel();
+}
+
+QString TradingController::archiveBatchBacktestItem(const QString &symbol)
+{
+    const QString normalized = symbol.trimmed();
+    m_batchBacktestError.clear();
+    emit batchBacktestStateChanged();
+    if (m_batchBacktestService.isRunning()) {
+        m_batchBacktestError = QStringLiteral("请先等待批量回测完成再归档单项结果");
+        emit batchBacktestStateChanged();
+        return {};
+    }
+    const auto retained = m_batchRetainedResults.constFind(normalized);
+    if (retained == m_batchRetainedResults.constEnd()) {
+        m_batchBacktestError = QStringLiteral(
+            "结果已释放或不存在：%1；请重新运行批量回测后再归档").arg(normalized);
+        emit batchBacktestStateChanged();
+        return {};
+    }
+    if (retained->config.datasetIdentity.isEmpty()) {
+        m_batchBacktestError = QStringLiteral("批量结果缺少数据集身份，拒绝归档：%1")
+                                   .arg(normalized);
+        emit batchBacktestStateChanged();
+        return {};
+    }
+
+    BacktestArchiveRecord archive;
+    archive.resultId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    archive.completedAt = QDateTime::currentDateTimeUtc();
+    archive.result = *retained;
+    if (m_storageReady && m_dataStore.saveBacktestArchive(archive)) {
+        m_batchBacktestModel.updateArchiveState(normalized, archive.resultId);
+        refreshBacktestArchiveList();
+        setStatusText(QStringLiteral("批量单项已归档：%1 · %2")
+                          .arg(normalized, archive.resultId));
+        emit batchBacktestStateChanged();
+        return archive.resultId;
+    }
+    m_batchBacktestError = QStringLiteral("归档写入失败：%1").arg(normalized);
+    emit batchBacktestStateChanged();
+    return {};
 }
 
 void TradingController::clearBacktestResult()

@@ -388,24 +388,40 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_batch_backtest
         tests/tst_batch_backtest.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
         src/domain/BatchBacktestTypes.cpp
         src/domain/BatchBacktestTypes.h
+        src/domain/CrossSectionalTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
         src/domain/LocalHistoryTypes.cpp
         src/domain/LocalHistoryTypes.h
         src/domain/MarketTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
         src/models/BatchBacktestResultListModel.cpp
         src/models/BatchBacktestResultListModel.h
         src/models/CandleListModel.cpp
         src/models/CandleListModel.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
         src/services/BacktestEngine.cpp
         src/services/BacktestEngine.h
         src/services/BacktestDataVersion.cpp
         src/services/BacktestDataVersion.h
         src/services/BatchBacktestService.cpp
         src/services/BatchBacktestService.h
+        src/services/CustomStrategyStore.h
         src/services/IndicatorEngine.cpp
         src/services/IndicatorEngine.h
+        src/services/LocalDataStore.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
         src/strategy/BacktestStrategy.cpp
         src/strategy/BacktestStrategy.h
         src/strategy/BacktestStrategyRegistry.cpp

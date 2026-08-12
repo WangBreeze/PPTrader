@@ -13,6 +13,13 @@ QVariantMap BatchBacktestItemResult::toVariantMap() const
             {QStringLiteral("succeeded"), succeeded},
             {QStringLiteral("error"), error},
             {QStringLiteral("dataVersion"), dataVersion},
+            {QStringLiteral("datasetVersion"), datasetVersion},
+            {QStringLiteral("datasetDayCount"), datasetDayCount},
+            {QStringLiteral("datasetRawTickCount"), datasetRawTickCount},
+            {QStringLiteral("datasetGapDayCount"), datasetGapDayCount},
+            {QStringLiteral("datasetStaleDayCount"), datasetStaleDayCount},
+            {QStringLiteral("archived"), archived},
+            {QStringLiteral("archivedResultId"), archivedResultId},
             {QStringLiteral("finalEquity"), summary.finalEquity},
             {QStringLiteral("totalReturnPercent"), summary.totalReturnPercent},
             {QStringLiteral("maxDrawdownPercent"), summary.maxDrawdownPercent},
@@ -24,4 +31,3 @@ QVariantMap BatchBacktestItemResult::toVariantMap() const
 }
 
 } // namespace pp
-

@@ -29,6 +29,13 @@ QVariant BatchBacktestResultListModel::data(const QModelIndex &index, int role) 
     case SucceededRole: return item.succeeded;
     case ErrorRole: return item.error;
     case DataVersionRole: return item.dataVersion;
+    case DatasetVersionRole: return item.datasetVersion;
+    case DatasetDayCountRole: return item.datasetDayCount;
+    case DatasetRawTickCountRole: return item.datasetRawTickCount;
+    case DatasetGapDayCountRole: return item.datasetGapDayCount;
+    case DatasetStaleDayCountRole: return item.datasetStaleDayCount;
+    case ArchivedRole: return item.archived;
+    case ArchivedResultIdRole: return item.archivedResultId;
     case FinalEquityRole: return item.summary.finalEquity;
     case TotalReturnPercentRole: return item.summary.totalReturnPercent;
     case MaxDrawdownPercentRole: return item.summary.maxDrawdownPercent;
@@ -47,6 +54,13 @@ QHash<int, QByteArray> BatchBacktestResultListModel::roleNames() const
             {FrequencyRole, "frequency"}, {RequestedBarsRole, "requestedBars"},
             {ActualBarsRole, "actualBars"}, {SucceededRole, "succeeded"},
             {ErrorRole, "error"}, {DataVersionRole, "dataVersion"},
+            {DatasetVersionRole, "datasetVersion"},
+            {DatasetDayCountRole, "datasetDayCount"},
+            {DatasetRawTickCountRole, "datasetRawTickCount"},
+            {DatasetGapDayCountRole, "datasetGapDayCount"},
+            {DatasetStaleDayCountRole, "datasetStaleDayCount"},
+            {ArchivedRole, "archived"},
+            {ArchivedResultIdRole, "archivedResultId"},
             {FinalEquityRole, "finalEquity"},
             {TotalReturnPercentRole, "totalReturnPercent"},
             {MaxDrawdownPercentRole, "maxDrawdownPercent"},
@@ -90,6 +104,17 @@ void BatchBacktestResultListModel::addResult(const BatchBacktestItemResult &resu
     m_results.insert(row, result);
     endInsertRows();
     emit countChanged();
+}
+
+void BatchBacktestResultListModel::updateArchiveState(
+    const QString &symbol, const QString &resultId)
+{
+    const int row = indexOfSymbol(symbol);
+    if (row < 0) return;
+    BatchBacktestItemResult &item = m_results[row];
+    item.archived = !resultId.isEmpty();
+    item.archivedResultId = resultId;
+    emit dataChanged(index(row), index(row));
 }
 
 } // namespace pp
