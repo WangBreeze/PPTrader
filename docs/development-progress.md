@@ -1,6 +1,6 @@
 # PPTrader 开发进度
 
-最后更新：2026-08-12
+最后更新：2026-08-13
 
 ## 当前阶段
 
@@ -22,6 +22,8 @@
 | 新版界面 | 三页常驻主工作台；主页双选择器与真实交易日/本地历史双 K 线；策略页支持内置/自定义模式及严格本地回测；全市场页支持 Scene Graph 批量散点 |
 
 ## 本次完成
+
+- 完成自定义策略 DSL v2 与向导第 3 步（指标组合）：`schemaVersion=2` 新增顶层 `series` 命名序列/别名引用（也支持操作数内联 `alias`，前向引用允许）与三个指标 `ROC`（百分比变动）、`VWAP`（Asia/Shanghai 会话累计）、`PP_FLOW`（价量趋势 PVT）；v1 文档语义保持不变并拒绝 v2 语法。新增只读预览服务 `CustomStrategyPreviewService` 与 `TradingController.customStrategyPreview()`（本地最近 K 线重放，返回指标序列 + B/S 信号，不写库）。`tst_custom_strategy` 扩展至 13 项（别名/顶层 series/新指标数值/会话重置/预览/ v1 拒绝），全量 CTest 22/22、`all_qmllint` 通过。QML 新增 `CustomStrategyWizard`：八步向导壳（第 3 步完整实现）、已选指标卡片（别名/周期/显示/移除/添加白名单）、入场/出场条件构建器（序列/字段/常量、七种比较符）、右侧组合预览（Canvas K 线 + 指标线叠加 + B/S 标记 + 命中详情 + 执行摘要）、前端草稿暂存（Qt.labs.settings），并与现有 JSON 工作台双模式并存（向导生成 DSL v2 JSON → 校验/保存/回测）。设计稿依据 Figma 节点 26:58。
 
 - 完成 H4.3 节点变更摘要与显式轮询：节点新增 `GET /v1/changes?since=<毫秒>`（只扫描根目录下一层日期目录 mtime，不递归、不下载、不触发回测），返回目录总数、最新时间与变更目录；客户端 `requestChanges`（含 401 重试）与控制器 `requestNasNodeChanges()`，NAS 面板新增"检查节点更新"按钮与变更展示。Python 真实服务验证 since 前后语义，`tst_nas_data_node` 新增 changes 解析用例（10/10）。Parquet/Zstd 压缩传输评估已写入 `nas-data-node-protocol.md`（预计冷缓存传输 8.6s→2-3s，解析仍为瓶颈，列为后续项）。
 

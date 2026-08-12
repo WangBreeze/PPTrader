@@ -122,6 +122,8 @@ qt_add_executable(PPTrader
     src/services/CrossSectionalIndicatorEngine.cpp
     src/services/CrossSectionalIndicatorEngine.h
     src/services/CustomStrategyStore.h
+    src/services/CustomStrategyPreviewService.cpp
+    src/services/CustomStrategyPreviewService.h
     src/services/DefaultExchangeRuleService.cpp
     src/services/DefaultExchangeRuleService.h
     src/services/ExchangeRuleService.h
@@ -248,6 +250,7 @@ qt_add_qml_module(PPTrader
         qml/components/LiveSnapshotRangeChart.qml
         qml/components/CandleSeriesChart.qml
         qml/components/CustomStrategyWorkbench.qml
+        qml/components/CustomStrategyWizard.qml
         qml/components/LocalHistoryDownloadPanel.qml
         qml/components/NasTickSyncPanel.qml
         qml/components/TickDataImportPanel.qml
@@ -872,6 +875,8 @@ if(BUILD_TESTING)
         src/models/CustomStrategyListModel.h
         src/services/BacktestDataVersion.cpp
         src/services/BacktestDataVersion.h
+        src/services/CustomStrategyPreviewService.cpp
+        src/services/CustomStrategyPreviewService.h
         src/services/CustomStrategyStore.h
         src/services/LocalDataStore.h
         src/services/SqliteLocalDataStore.cpp

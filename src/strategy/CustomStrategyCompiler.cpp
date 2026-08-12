@@ -22,8 +22,9 @@ bool fail(QString *error, const QString &message)
 
 class PlanBuilder {
 public:
-    PlanBuilder(const QVariantMap &parameters, CompiledCustomStrategy *plan, QString *error)
-        : m_parameters(parameters), m_plan(plan), m_error(error)
+    PlanBuilder(const QVariantMap &parameters, CompiledCustomStrategy *plan,
+                bool v2, QString *error)
+        : m_parameters(parameters), m_plan(plan), m_v2(v2), m_error(error)
     {
     }
 
@@ -74,9 +75,44 @@ public:
         return appendCondition(condition);
     }
 
+    void preRegisterAliases(const QJsonObject &condition)
+    {
+        const QString op = condition.value(QStringLiteral("op")).toString();
+        if (op == QStringLiteral("and") || op == QStringLiteral("or")) {
+            const QJsonArray children = condition.value(QStringLiteral("conditions")).toArray();
+            for (const QJsonValue &child : children) {
+                if (child.isObject()) preRegisterAliases(child.toObject());
+            }
+            return;
+        }
+        if (op == QStringLiteral("not")) {
+            if (condition.value(QStringLiteral("condition")).isObject()) {
+                preRegisterAliases(condition.value(QStringLiteral("condition")).toObject());
+            }
+            return;
+        }
+        registerOperandAlias(condition.value(QStringLiteral("left")).toObject());
+        registerOperandAlias(condition.value(QStringLiteral("right")).toObject());
+    }
+
+    void preRegisterSeries(const QJsonArray &series)
+    {
+        for (const QJsonValue &item : series) {
+            if (item.isObject()) registerOperandAlias(item.toObject());
+        }
+    }
+
     bool hasCross() const { return m_hasCross; }
 
 private:
+    void registerOperandAlias(const QJsonObject &operand)
+    {
+        if (m_v2 && operand.contains(QStringLiteral("indicator"))
+            && operand.contains(QStringLiteral("alias"))) {
+            compileIndicator(operand);
+        }
+    }
+
     int appendCondition(const CompiledCustomCondition &condition)
     {
         const int row = m_plan->conditions.size();
@@ -124,6 +160,19 @@ private:
                 {QStringLiteral("volume"), CustomOperandKind::Volume}
             };
             operand.kind = fields.value(object.value(QStringLiteral("field")).toString());
+        } else if (object.contains(QStringLiteral("series"))) {
+            if (!m_v2) {
+                fail(m_error, QStringLiteral("编译时遇到 schemaVersion=1 的序列引用"));
+                return -1;
+            }
+            const QString alias = object.value(QStringLiteral("series")).toString();
+            const auto row = m_aliasRows.constFind(alias);
+            if (row == m_aliasRows.constEnd()) {
+                fail(m_error, QStringLiteral("编译时遇到未定义的指标别名：%1").arg(alias));
+                return -1;
+            }
+            operand.kind = CustomOperandKind::Indicator;
+            operand.indicatorIndex = row.value();
         } else {
             const int indicatorIndex = compileIndicator(object);
             if (indicatorIndex < 0) return -1;
@@ -139,14 +188,19 @@ private:
     {
         CompiledCustomIndicator indicator;
         const QString name = object.value(QStringLiteral("indicator")).toString().toUpper();
+        if (m_v2 && object.contains(QStringLiteral("alias"))) {
+            indicator.alias = object.value(QStringLiteral("alias")).toString();
+        }
         bool ok = true;
         if (name == QStringLiteral("SMA") || name == QStringLiteral("EMA")
             || name == QStringLiteral("RSI") || name == QStringLiteral("ATR")
-            || name == QStringLiteral("VOLUME_SMA")) {
+            || name == QStringLiteral("VOLUME_SMA")
+            || (m_v2 && name == QStringLiteral("ROC"))) {
             if (name == QStringLiteral("SMA")) indicator.kind = CustomIndicatorKind::Sma;
             else if (name == QStringLiteral("EMA")) indicator.kind = CustomIndicatorKind::Ema;
             else if (name == QStringLiteral("RSI")) indicator.kind = CustomIndicatorKind::Rsi;
             else if (name == QStringLiteral("ATR")) indicator.kind = CustomIndicatorKind::Atr;
+            else if (name == QStringLiteral("ROC")) indicator.kind = CustomIndicatorKind::Roc;
             else indicator.kind = CustomIndicatorKind::VolumeSma;
             indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
         } else if (name == QStringLiteral("MACD")) {
@@ -167,6 +221,10 @@ private:
                 object.value(QStringLiteral("standardDeviations")), false, &optionOk);
             ok = ok && optionOk;
             indicator.output = object.value(QStringLiteral("output")).toString();
+        } else if (m_v2 && (name == QStringLiteral("VWAP")
+                            || name == QStringLiteral("PP_FLOW"))) {
+            indicator.kind = name == QStringLiteral("VWAP")
+                ? CustomIndicatorKind::Vwap : CustomIndicatorKind::PpFlow;
         } else {
             ok = false;
         }
@@ -176,17 +234,23 @@ private:
         }
         const QString key = indicator.cacheKey();
         const auto existing = m_indicatorRows.constFind(key);
-        if (existing != m_indicatorRows.constEnd()) return existing.value();
+        if (existing != m_indicatorRows.constEnd()) {
+            if (!indicator.alias.isEmpty()) m_aliasRows.insert(indicator.alias, existing.value());
+            return existing.value();
+        }
         const int row = m_plan->indicators.size();
         m_plan->indicators.append(indicator);
         m_indicatorRows.insert(key, row);
+        if (!indicator.alias.isEmpty()) m_aliasRows.insert(indicator.alias, row);
         return row;
     }
 
     const QVariantMap &m_parameters;
     CompiledCustomStrategy *m_plan = nullptr;
+    bool m_v2 = false;
     QString *m_error = nullptr;
     QHash<QString, int> m_indicatorRows;
+    QHash<QString, int> m_aliasRows;
     bool m_hasCross = false;
 };
 
@@ -198,12 +262,18 @@ int CompiledCustomIndicator::minimumBars() const
     case CustomIndicatorKind::Rsi: return period + 1;
     case CustomIndicatorKind::Macd:
         return output == QStringLiteral("macd") ? slowPeriod : slowPeriod + signalPeriod - 1;
+    case CustomIndicatorKind::Roc:
+        return period + 1;
     case CustomIndicatorKind::Sma:
     case CustomIndicatorKind::Ema:
     case CustomIndicatorKind::Bollinger:
     case CustomIndicatorKind::Atr:
     case CustomIndicatorKind::VolumeSma:
         return period;
+    case CustomIndicatorKind::Vwap:
+        return 1;
+    case CustomIndicatorKind::PpFlow:
+        return 2;
     }
     return 1;
 }
@@ -273,7 +343,15 @@ std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
     plan.rules.takeProfitPercent = risk.value(QStringLiteral("takeProfitPercent")).toDouble(0.0);
     plan.rules.maximumHoldingBars = risk.value(QStringLiteral("maximumHoldingBars")).toInt(0);
     plan.rules.tPlusOne = risk.value(QStringLiteral("tPlusOne")).toBool(true);
-    PlanBuilder builder(normalized, &plan, error);
+    PlanBuilder builder(normalized, &plan, validated.schemaVersion == 2, error);
+    if (validated.schemaVersion == 2) {
+        builder.preRegisterSeries(
+            validated.document.value(QStringLiteral("series")).toArray());
+        builder.preRegisterAliases(
+            validated.document.value(QStringLiteral("entry")).toObject());
+        builder.preRegisterAliases(
+            validated.document.value(QStringLiteral("exit")).toObject());
+    }
     plan.entryCondition = builder.compileCondition(
         validated.document.value(QStringLiteral("entry")).toObject());
     plan.exitCondition = builder.compileCondition(

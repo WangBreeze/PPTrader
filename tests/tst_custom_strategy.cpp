@@ -1,5 +1,6 @@
 #include "app/CustomStrategyWorkspacePolicy.h"
 #include "models/CustomStrategyListModel.h"
+#include "services/CustomStrategyPreviewService.h"
 #include "services/SqliteLocalDataStore.h"
 #include "strategy/CustomStrategyValidator.h"
 #include "strategy/CustomBacktestStrategy.h"
@@ -22,6 +23,10 @@ private slots:
     void persistsImmutableVersionsAndExposesModelRoles();
     void calculatesIndicatorsWithExplicitWarmupAndMissingValues();
     void compilesEveryWhitelistedIndicator();
+    void v2SupportsAliasedSeriesAndNewIndicators();
+    void v2SupportsTopLevelSeries();
+    void v1RejectsV2OnlySyntax();
+    void buildsPreviewSeriesAndSignals();
     void compilesCrossConditionsAndResetsDeterministically();
     void validatesCompilesAndExecutesPositionRiskRules();
     void enforcesWorkspaceRunAndResultIdentity();
@@ -30,6 +35,14 @@ private slots:
 static QJsonObject indicator(const QString &name, const QJsonValue &period)
 {
     return {{QStringLiteral("indicator"), name}, {QStringLiteral("period"), period}};
+}
+
+static QJsonObject indicatorWithAlias(const QString &name, int period,
+                                      const QString &alias)
+{
+    return {{QStringLiteral("indicator"), name},
+            {QStringLiteral("period"), period},
+            {QStringLiteral("alias"), alias}};
 }
 
 static QJsonObject parameterReference(const QString &key)
@@ -451,6 +464,274 @@ void CustomStrategyTest::compilesEveryWhitelistedIndicator()
     invalidMacd.insert(QStringLiteral("entry"), entry);
     QVERIFY(!validator.validate(invalidMacd, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("MACD")));
+}
+
+void CustomStrategyTest::v2SupportsAliasedSeriesAndNewIndicators()
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("schemaVersion"), 2);
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("and")},
+        {QStringLiteral("conditions"), QJsonArray{
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("momentum")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.8}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("lt")},
+                        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("vwap")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("ppflow")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), indicatorWithAlias(QStringLiteral("ROC"), 14, QStringLiteral("momentum"))},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), -100.0}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("lt")},
+                        {QStringLiteral("left"), QJsonObject{
+                            {QStringLiteral("indicator"), QStringLiteral("VWAP")},
+                            {QStringLiteral("alias"), QStringLiteral("vwap")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("field"), QStringLiteral("high")}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), QJsonObject{
+                            {QStringLiteral("indicator"), QStringLiteral("PP_FLOW")},
+                            {QStringLiteral("alias"), QStringLiteral("ppflow")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), -1.0e12}}}}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("momentum")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    QCOMPARE(definition.schemaVersion, 2);
+
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->indicators.size(), 3);
+    QCOMPARE(plan->minimumWarmupBars, 15);
+    bool foundRoc = false;
+    bool foundVwap = false;
+    bool foundPpFlow = false;
+    for (const CompiledCustomIndicator &indicator : plan->indicators) {
+        if (indicator.kind == CustomIndicatorKind::Roc) {
+            foundRoc = true;
+            QCOMPARE(indicator.period, 14);
+            QCOMPARE(indicator.alias, QStringLiteral("momentum"));
+        } else if (indicator.kind == CustomIndicatorKind::Vwap) {
+            foundVwap = true;
+            QCOMPARE(indicator.alias, QStringLiteral("vwap"));
+        } else if (indicator.kind == CustomIndicatorKind::PpFlow) {
+            foundPpFlow = true;
+            QCOMPARE(indicator.alias, QStringLiteral("ppflow"));
+        }
+    }
+    QVERIFY(foundRoc && foundVwap && foundPpFlow);
+
+    Instrument instrument;
+    instrument.symbol = QStringLiteral("600519");
+    instrument.market = Market::AShare;
+    auto candle = [&](const QDate &date, const QTime &time, double close) {
+        Candle value;
+        value.instrument = instrument;
+        value.startTime = QDateTime(date, time, Qt::UTC);
+        value.open = value.close = close;
+        value.high = close + 1.0;
+        value.low = close - 1.0;
+        value.volume = 1000.0;
+        return value;
+    };
+
+    CustomBacktestStrategy strategy(*plan);
+    qRegisterMetaType<TradeSignal>();
+    QSignalSpy signalSpy(&strategy, &Strategy::signalGenerated);
+    for (int row = 0; row < 40; ++row) {
+        strategy.onCandle(candle(QDate(2026, 4, 1),
+                                 QTime(1, 0).addSecs(row * 900), 100.0 + row));
+    }
+    QCOMPARE(signalSpy.count(), 1);
+    QCOMPARE(signalSpy.at(0).at(0).value<TradeSignal>().side, SignalSide::Buy);
+
+    QVector<CompiledCustomIndicator> runtimeIndicators;
+    runtimeIndicators.append({CustomIndicatorKind::Roc, 3});
+    CompiledCustomIndicator vwap;
+    vwap.kind = CustomIndicatorKind::Vwap;
+    CompiledCustomIndicator ppFlow;
+    ppFlow.kind = CustomIndicatorKind::PpFlow;
+    runtimeIndicators.append(vwap);
+    runtimeIndicators.append(ppFlow);
+    CustomIndicatorRuntime runtime(runtimeIndicators);
+    double expectedPvt = 0.0;
+    for (int row = 1; row <= 6; ++row) {
+        const double close = 9.0 + row;
+        runtime.append(candle(QDate(2026, 4, 1),
+                              QTime(1, 0).addSecs((row - 1) * 900), close));
+        if (row > 1) expectedPvt += (close - (8.0 + row)) / (8.0 + row) * 1000.0;
+    }
+    QVERIFY(runtime.value(0).has_value());
+    QVERIFY(std::abs(*runtime.value(0) - 25.0) < 1.0e-9);
+    QVERIFY(runtime.value(1).has_value());
+    QVERIFY(std::abs(*runtime.value(1) - 12.5) < 1.0e-9);
+    QVERIFY(runtime.value(2).has_value());
+    QVERIFY(std::abs(*runtime.value(2) - expectedPvt) < 1.0e-6);
+    runtime.append(candle(QDate(2026, 4, 2), QTime(7, 0), 100.0));
+    QVERIFY(runtime.value(1).has_value());
+    QVERIFY(std::abs(*runtime.value(1) - 100.0) < 1.0e-9);
+}
+
+void CustomStrategyTest::v1RejectsV2OnlySyntax()
+{
+    CustomStrategyValidator validator;
+    QString error;
+
+    QJsonObject aliasDocument = validDocument();
+    QJsonObject entry = aliasDocument.value(QStringLiteral("entry")).toObject();
+    QJsonObject sma = entry.value(QStringLiteral("left")).toObject();
+    sma.insert(QStringLiteral("alias"), QStringLiteral("fast"));
+    entry.insert(QStringLiteral("left"), sma);
+    aliasDocument.insert(QStringLiteral("entry"), entry);
+    QVERIFY(!validator.validate(aliasDocument, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("schemaVersion=2")));
+
+    QJsonObject rocDocument = validDocument();
+    entry = rocDocument.value(QStringLiteral("entry")).toObject();
+    entry.insert(QStringLiteral("left"), indicator(QStringLiteral("ROC"), 14));
+    rocDocument.insert(QStringLiteral("entry"), entry);
+    QVERIFY(!validator.validate(rocDocument, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("未知指标")));
+
+    QJsonObject v2 = validDocument();
+    v2.insert(QStringLiteral("schemaVersion"), 2);
+    v2.insert(QStringLiteral("parameters"), QJsonArray{});
+    v2.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gt")},
+        {QStringLiteral("left"), indicatorWithAlias(QStringLiteral("SMA"), 5, QStringLiteral("fast"))},
+        {QStringLiteral("right"), indicatorWithAlias(QStringLiteral("SMA"), 10, QStringLiteral("fast"))}});
+    QVERIFY(!validator.validate(v2, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("指标别名重复")));
+
+    v2.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("missing")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}});
+    QVERIFY(!validator.validate(v2, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("未定义的指标别名")));
+}
+
+void CustomStrategyTest::v2SupportsTopLevelSeries()
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("schemaVersion"), 2);
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("series"), QJsonArray{
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("fast")},
+                    {QStringLiteral("indicator"), QStringLiteral("SMA")},
+                    {QStringLiteral("period"), 20}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("slow")},
+                    {QStringLiteral("indicator"), QStringLiteral("SMA")},
+                    {QStringLiteral("period"), 60}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("momentum")},
+                    {QStringLiteral("indicator"), QStringLiteral("ROC")},
+                    {QStringLiteral("period"), 14}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("vwap")},
+                    {QStringLiteral("indicator"), QStringLiteral("VWAP")}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("ppflow")},
+                    {QStringLiteral("indicator"), QStringLiteral("PP_FLOW")}}});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("and")},
+        {QStringLiteral("conditions"), QJsonArray{
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("crossesAbove")},
+                        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("fast")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("series"), QStringLiteral("slow")}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("momentum")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.8}}}}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("momentum")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->indicators.size(), 5);
+    QCOMPARE(plan->minimumWarmupBars, 61);
+
+    QJsonObject duplicate = document;
+    QJsonArray series = duplicate.value(QStringLiteral("series")).toArray();
+    series.append(QJsonObject{{QStringLiteral("alias"), QStringLiteral("fast")},
+                              {QStringLiteral("indicator"), QStringLiteral("EMA")},
+                              {QStringLiteral("period"), 5}});
+    duplicate.insert(QStringLiteral("series"), series);
+    QVERIFY(!validator.validate(duplicate, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("指标别名重复")));
+
+    QJsonObject v1WithSeries = validDocument();
+    v1WithSeries.insert(QStringLiteral("series"), QJsonArray{});
+    QVERIFY(!validator.validate(v1WithSeries, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("schemaVersion=2")));
+}
+
+void CustomStrategyTest::buildsPreviewSeriesAndSignals()
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("schemaVersion"), 2);
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("and")},
+        {QStringLiteral("conditions"), QJsonArray{
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), indicatorWithAlias(QStringLiteral("ROC"), 14, QStringLiteral("momentum"))},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.8}}}},
+            QJsonObject{{QStringLiteral("op"), QStringLiteral("gt")},
+                        {QStringLiteral("left"), QJsonObject{
+                            {QStringLiteral("indicator"), QStringLiteral("PP_FLOW")},
+                            {QStringLiteral("alias"), QStringLiteral("ppflow")}}},
+                        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("series"), QStringLiteral("momentum")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+
+    Instrument instrument;
+    instrument.symbol = QStringLiteral("600519");
+    instrument.market = Market::AShare;
+    QVector<Candle> candles;
+    for (int row = 0; row < 40; ++row) {
+        Candle candle;
+        candle.instrument = instrument;
+        candle.startTime = QDateTime(QDate(2026, 4, 1),
+                                     QTime(1, 0).addSecs(row * 900), Qt::UTC);
+        candle.open = candle.close = 100.0 + row;
+        candle.high = candle.close + 1.0;
+        candle.low = candle.close - 1.0;
+        candle.volume = 1000.0;
+        candles.append(candle);
+    }
+
+    const auto preview = CustomStrategyPreviewService::buildPreview(
+        definition, {}, candles, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesAliases.size(), 2);
+    QCOMPARE(preview.seriesLabels.size(), 2);
+    QCOMPARE(preview.bars.size(), 40);
+    QVERIFY(!preview.signalEvents.isEmpty());
+    QCOMPARE(preview.signalEvents.first().side, 0);
+    QVERIFY(preview.signalEvents.first().barIndex >= 14);
+    QCOMPARE(preview.bars.last().seriesValues.size(), 2);
+    QVERIFY(preview.bars.last().seriesValues.at(0).has_value());
+    QVERIFY(preview.bars.last().seriesValues.at(1).has_value());
 }
 
 void CustomStrategyTest::validatesCompilesAndExecutesPositionRiskRules()

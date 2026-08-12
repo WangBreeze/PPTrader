@@ -61,3 +61,25 @@ SQLite 以 `(strategy_id, version)` 为主键。同版本同内容重复导入�
 - 最小预热根数取所有指标的最大值；包含交叉条件时额外增加一根用于确认前值。
 
 `TradingController.analyzeCustomStrategyJson()` 返回规范化参数、规则快照、指标/条件数量和预热根数。成功结果为 `backtest_ready`、`executable=true`；这里的“可执行”仅指受控历史回测。任务开始前，控制器从不可变版本编译计划；引擎再次核对实例声明的 ID、版本、参数和规则快照，任一不一致都会拒绝运行。
+
+## DSL v2（schemaVersion=2）
+
+v2 在 v1 基础上新增三项能力，v1 文档保持原语义不变（v1 仍然拒绝 v2 语法）：
+
+1. 顶层 `series` 数组：把指标定义成带别名的输出序列，条件通过 `{series: "别名"}` 引用，避免每个条件内联重复指标配置。
+   ```json
+   "series": [
+     {"alias": "fast", "indicator": "SMA", "period": 20},
+     {"alias": "slow", "indicator": "SMA", "period": 60},
+     {"alias": "momentum", "indicator": "ROC", "period": 14},
+     {"alias": "vwap", "indicator": "VWAP"},
+     {"alias": "ppflow", "indicator": "PP_FLOW"}
+   ]
+   ```
+   也可以只在条件操作数上写 `alias`（内联别名），两种方式共用同一别名命名空间，别名必须唯一且匹配 `^[a-z][A-Za-z0-9_]{0,31}$`。
+2. 新增指标白名单：`ROC`（period 2–500，按百分比输出 `(close - close[N]) / close[N] * 100`）、`VWAP`（按 Asia/Shanghai 交易会话累计典型价 × 成交量 / 累计成交量）、`PP_FLOW`（价量趋势 PVT，累计 `Σ (close - prevClose) / prevClose * volume`）。
+3. 编译器在编译条件前先注册全部 `series` 与内联别名，允许条件前向引用后面才定义的序列。
+
+约束与 v1 保持一致：`market` 仍仅支持 `A股`、`executionScope` 仍为 `backtest_only`、T+1 强制开启；新指标只允许出现在 v2 文档中。
+
+`TradingController.customStrategyPreview(json, symbol, periodSeconds, barCount)` 是只读预览接口：校验并编译后，在本地最近 K 线上重放，返回指标序列（按 series 顺序）与 B/S 信号，供向导预览图使用；不写库、不启动回测任务。

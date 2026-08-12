@@ -4,6 +4,7 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QSet>
 
 namespace pp {
 
@@ -28,10 +29,12 @@ private:
     bool validateParameters(const QJsonArray &parameters, ParameterMap *parameterMap,
                             QString *error) const;
     bool validateCondition(const QJsonObject &condition, const ParameterMap &parameters,
-                           const QString &path, int depth, int *nodeCount,
+                           const QString &path, int depth, bool v2,
+                           const QSet<QString> &aliases, int *nodeCount,
                            QString *error) const;
     bool validateOperand(const QJsonObject &operand, const ParameterMap &parameters,
-                         const QString &path, int depth, int *nodeCount,
+                         const QString &path, int depth, bool v2,
+                         const QSet<QString> &aliases, int *nodeCount,
                          QString *error) const;
 };
 

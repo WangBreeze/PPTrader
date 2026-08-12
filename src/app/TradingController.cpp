@@ -3,6 +3,7 @@
 #include "app/CustomStrategyWorkspacePolicy.h"
 
 #include "services/CompositeMarketDataProvider.h"
+#include "services/CustomStrategyPreviewService.h"
 #include "services/MarketSession.h"
 #include "services/MootdxMarketDataProvider.h"
 #include "services/StorageProfile.h"
@@ -2213,6 +2214,79 @@ QVariantMap TradingController::customStrategyLocalRunAvailability(
         result.insert(QStringLiteral("normalizedParameters"), plan->normalizedParameters);
         result.insert(QStringLiteral("ruleSnapshot"), plan->rules.toVariantMap());
     }
+    return result;
+}
+
+QVariantMap TradingController::customStrategyPreview(
+    const QString &json, const QString &symbol,
+    int periodSeconds, int barCount)
+{
+    QVariantMap result;
+    if (barCount <= 0) barCount = 300;
+    if (barCount > 2000) barCount = 2000;
+    if (periodSeconds <= 0) periodSeconds = 60;
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    if (!validator.parseAndValidate(json, &definition, &error)) {
+        result.insert(QStringLiteral("error"), error);
+        return result;
+    }
+
+    Instrument instrument = findInstrument(symbol.trimmed());
+    if (instrument.symbol.isEmpty()) {
+        instrument.symbol = symbol.trimmed();
+        instrument.name = symbol.trimmed();
+        instrument.market = Market::AShare;
+    }
+    const QVector<Candle> candles =
+        m_dataStore.loadRecentCandles(instrument, periodSeconds, barCount);
+    const auto preview = CustomStrategyPreviewService::buildPreview(
+        definition, {}, candles, &error);
+    if (!error.isEmpty()) {
+        result.insert(QStringLiteral("error"), error);
+        return result;
+    }
+
+    result.insert(QStringLiteral("symbol"), instrument.symbol);
+    result.insert(QStringLiteral("barCount"), preview.bars.size());
+    QVariantList aliases;
+    QVariantList labels;
+    for (int index = 0; index < preview.seriesAliases.size(); ++index) {
+        aliases.append(preview.seriesAliases.at(index));
+        labels.append(preview.seriesLabels.at(index));
+    }
+    result.insert(QStringLiteral("aliases"), aliases);
+    result.insert(QStringLiteral("labels"), labels);
+
+    QVariantList bars;
+    for (const auto &bar : preview.bars) {
+        QVariantMap row;
+        row.insert(QStringLiteral("t"), bar.time.toString(Qt::ISODateWithMs));
+        row.insert(QStringLiteral("o"), bar.open);
+        row.insert(QStringLiteral("h"), bar.high);
+        row.insert(QStringLiteral("l"), bar.low);
+        row.insert(QStringLiteral("c"), bar.close);
+        row.insert(QStringLiteral("v"), bar.volume);
+        QVariantList values;
+        for (const auto &value : bar.seriesValues) {
+            values.append(value ? QVariant(*value) : QVariant());
+        }
+        row.insert(QStringLiteral("s"), values);
+        bars.append(row);
+    }
+    result.insert(QStringLiteral("bars"), bars);
+
+    QVariantList signalList;
+    for (const auto &signal : preview.signalEvents) {
+        signalList.append(QVariantMap{
+            {QStringLiteral("index"), signal.barIndex},
+            {QStringLiteral("side"), signal.side},
+            {QStringLiteral("price"), signal.price},
+            {QStringLiteral("reason"), signal.reason}});
+    }
+    result.insert(QStringLiteral("signals"), signalList);
     return result;
 }
 

@@ -759,6 +759,9 @@ public:
     Q_INVOKABLE QVariantMap customStrategyLocalRunAvailability(
         const QString &strategyId, int version,
         const QVariantMap &strategyParameters = {}) const;
+    Q_INVOKABLE QVariantMap customStrategyPreview(
+        const QString &json, const QString &symbol,
+        int periodSeconds, int barCount);
     Q_INVOKABLE qulonglong runSelectedLocalCustomStrategyBacktest(
         const QString &strategyId, int version,
         const QVariantMap &strategyParameters = {});

@@ -9,7 +9,8 @@
 
 namespace pp {
 
-enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma };
+enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma,
+                                 Roc, Vwap, PpFlow };
 enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator };
 enum class CustomConditionOp {
     And, Or, Not, Greater, GreaterOrEqual, Less, LessOrEqual, Equal,
@@ -24,6 +25,7 @@ struct CompiledCustomIndicator {
     int signalPeriod = 0;
     double standardDeviations = 0.0;
     QString output;
+    QString alias;
 
     int minimumBars() const;
     QString cacheKey() const;

@@ -3,6 +3,7 @@
 #include "domain/MarketTypes.h"
 #include "strategy/CustomStrategyCompiler.h"
 
+#include <QDate>
 #include <QVector>
 
 #include <optional>
@@ -29,11 +30,15 @@ private:
         EmaAccumulator secondary;
         EmaAccumulator signal;
         std::optional<double> current;
+        QDate sessionDate;
+        double vwapNumerator = 0.0;
+        double vwapVolume = 0.0;
+        double cumulativePvt = 0.0;
     };
 
     static std::optional<double> windowAverage(const QVector<double> &values, int period);
     static std::optional<double> updateEma(EmaAccumulator *state, double input, int period);
-    void updateIndicator(int index);
+    void updateIndicator(int index, const Candle &candle);
 
     QVector<CompiledCustomIndicator> m_indicators;
     QVector<IndicatorState> m_states;

@@ -15,6 +15,7 @@ Item {
     property var runAvailability: ({ available: false, error: "请先选择策略版本" })
     property string operationMessage: ""
     property bool editorDirty: false
+    property bool wizardMode: false
 
     readonly property bool savedDefinitionMatches: validation.valid === true
         && selectedStrategyId.length > 0
@@ -100,8 +101,45 @@ Item {
         }
     }
 
+    Row {
+        id: modeHeader
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 32
+        spacing: 8
+
+        PpButton {
+            theme: root.theme
+            visualWidth: 96
+            text: "向导创建"
+            active: root.wizardMode
+            toolTip: "按设计稿向导逐步创建策略（当前实现第 3 步：指标组合）"
+            onClicked: root.wizardMode = true
+        }
+        PpButton {
+            theme: root.theme
+            visualWidth: 96
+            text: "JSON 编辑"
+            active: !root.wizardMode
+            toolTip: "直接编辑声明式 JSON DSL（v1/v2 均可）"
+            onClicked: root.wizardMode = false
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.wizardMode
+                ? "向导生成的 JSON 可在右侧 JSON 模式校验、保存与回测"
+                : "DSL v2 支持 ROC / VWAP / PP_FLOW 与 series 别名引用"
+            color: root.theme.textMuted
+            font.family: root.theme.fontFamily
+            font.pixelSize: 9
+            elide: Text.ElideRight
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
+        anchors.topMargin: 38
         spacing: 14
 
         Rectangle {
@@ -251,5 +289,21 @@ Item {
             }
             root.refreshRunAvailability()
         }
+    }
+
+    CustomStrategyWizard {
+        id: wizard
+        anchors.fill: parent
+        theme: root.theme
+        controller: root.controller
+        visible: root.wizardMode
+
+        onRequestOpenJson: function(json) {
+            jsonEditor.text = json
+            root.wizardMode = false
+            root.validateEditor()
+            root.operationMessage = "已从向导载入 DSL v2 JSON，可校验后保存为不可变版本"
+        }
+        onRequestClose: root.wizardMode = false
     }
 }

@@ -181,7 +181,7 @@ python -m venv .venv
 
 ### 自定义策略 DSL
 
-自定义策略定义由 `CustomStrategyValidator` 在写库前校验，SQLite 和 QML 不负责解释表达式。v1 仅允许 `custom_` ID、A 股、`backtest_only`、有限数字和固定指标/字段/操作符白名单；复杂度限制为 8 层、64 节点、32 个参数。详细格式见 `docs/custom-strategy-dsl.md`。
+自定义策略定义由 `CustomStrategyValidator` 在写库前校验，SQLite 和 QML 不负责解释表达式。v1 仅允许 `custom_` ID、A 股、`backtest_only`、有限数字和固定指标/字段/操作符白名单；复杂度限制为 8 层、64 节点、32 个参数。v2（`schemaVersion=2`）新增顶层 `series` 命名序列/别名引用与 `ROC`/`VWAP`/`PP_FLOW` 指标，v1 语义不变。详细格式见 `docs/custom-strategy-dsl.md`。策略页工作台提供“向导创建 / JSON 编辑”双模式：`CustomStrategyWizard` 按 Figma 26:58 实现第 3 步指标组合（指标卡、条件构建器、Canvas 预览与 B/S 标记、前端草稿），生成的 DSL v2 JSON 可回到 JSON 模式校验、保存不可变版本并严格本地回测。
 
 `CustomStrategyCompiler` 将已校验定义转为索引化条件、操作数、去重指标计划和不可变规则快照，运行参数在编译时规范化。`CustomIndicatorRuntime` 按 Bar 增量更新七类指标，`CustomBacktestStrategy` 使用三值逻辑求值；缺失值不会被当作 false 后再由 `not` 翻转，上穿/下穿也不会跨缺口。控制器可调用 `analyzeCustomStrategyJson()` 获取预热根数、计划规模和 `ruleSnapshot`。
 

@@ -1,5 +1,7 @@
 #include "strategy/CustomIndicatorRuntime.h"
 
+#include <QTimeZone>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -58,7 +60,7 @@ void CustomIndicatorRuntime::append(const Candle &candle)
     if (std::isfinite(close)) m_previousClose = close;
     else m_previousClose.reset();
 
-    for (int index = 0; index < m_indicators.size(); ++index) updateIndicator(index);
+    for (int index = 0; index < m_indicators.size(); ++index) updateIndicator(index, candle);
 }
 
 std::optional<double> CustomIndicatorRuntime::value(int indicatorIndex) const
@@ -103,7 +105,7 @@ std::optional<double> CustomIndicatorRuntime::updateEma(
     return state->value;
 }
 
-void CustomIndicatorRuntime::updateIndicator(int index)
+void CustomIndicatorRuntime::updateIndicator(int index, const Candle &candle)
 {
     const CompiledCustomIndicator &indicator = m_indicators.at(index);
     IndicatorState &state = m_states[index];
@@ -168,6 +170,55 @@ void CustomIndicatorRuntime::updateIndicator(int index)
         const auto signal = updateEma(&state.signal, macd, indicator.signalPeriod);
         if (!signal) break;
         state.current = indicator.output == QStringLiteral("signal") ? *signal : macd - *signal;
+        break;
+    }
+    case CustomIndicatorKind::Roc: {
+        const int row = m_closes.size() - indicator.period - 1;
+        if (row < 0) break;
+        const double current = m_closes.last();
+        const double previous = m_closes.at(row);
+        if (!std::isfinite(current) || !std::isfinite(previous)
+            || std::abs(previous) < 1.0e-12) {
+            break;
+        }
+        state.current = (current - previous) / previous * 100.0;
+        break;
+    }
+    case CustomIndicatorKind::Vwap: {
+        static const QTimeZone shanghaiTimeZone("Asia/Shanghai");
+        const QDate sessionDate = candle.startTime.isValid()
+            ? candle.startTime.toTimeZone(shanghaiTimeZone).date() : QDate{};
+        if (sessionDate.isValid() && state.sessionDate.isValid()
+            && sessionDate != state.sessionDate) {
+            state.sessionDate = sessionDate;
+            state.vwapNumerator = 0.0;
+            state.vwapVolume = 0.0;
+        } else if (sessionDate.isValid() && !state.sessionDate.isValid()) {
+            state.sessionDate = sessionDate;
+        }
+        const double close = m_closes.last();
+        const double high = validPrice(candle.high) ? candle.high : missingValue();
+        const double low = validPrice(candle.low) ? candle.low : missingValue();
+        const double volume = validVolume(candle.volume) ? candle.volume : missingValue();
+        if (std::isfinite(close) && std::isfinite(high) && std::isfinite(low)
+            && std::isfinite(volume) && volume > 0.0) {
+            const double typicalPrice = (high + low + close) / 3.0;
+            state.vwapNumerator += typicalPrice * volume;
+            state.vwapVolume += volume;
+        }
+        if (state.vwapVolume > 0.0) state.current = state.vwapNumerator / state.vwapVolume;
+        break;
+    }
+    case CustomIndicatorKind::PpFlow: {
+        if (m_closes.size() < 2) break;
+        const double close = m_closes.last();
+        const double previousClose = m_closes.at(m_closes.size() - 2);
+        const double volume = m_volumes.last();
+        if (std::isfinite(previousClose) && std::abs(previousClose) > 1.0e-12
+            && std::isfinite(close) && std::isfinite(volume)) {
+            state.cumulativePvt += (close - previousClose) / previousClose * volume;
+        }
+        state.current = state.cumulativePvt;
         break;
     }
     }
