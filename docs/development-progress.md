@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A、NAS H1A–H1C 与 H2 回测数据集身份（H2.1–H2.3）已完成。历史 Tick 回测具备单品种闭环、同一内置策略多品种轻量结果矩阵、不可变数据集身份与结果身份展示；NAS 支持用户明确代码清单的受控 manifest、串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。下一步进入 H3B 单项结果按需归档和后续大档验证。
+阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A、NAS H1A–H1C、H2 回测数据集身份（H2.1–H2.3）与 H3B 批量结果按需归档/中断恢复（H3B.1–H3B.3）已完成。历史 Tick 回测具备单品种闭环、多品种轻量结果矩阵、不可变数据集身份、批量逐项归档与失败项恢复；NAS 支持用户明确代码清单的受控 manifest、串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。
 
 ## 已完成
 
@@ -22,6 +22,9 @@
 | 新版界面 | 三页常驻主工作台；主页双选择器与真实交易日/本地历史双 K 线；策略页支持内置/自定义模式及严格本地回测；全市场页支持 Scene Graph 批量散点 |
 
 ## 本次完成
+
+- 完成 H3B 批量结果按需归档与中断恢复：批量每项运行前加载数据集身份（身份缺失/缓存过期按失败隔离，不自动重建），完整结果有界保留（32 项 LRU）并经 `archiveBatchBacktestItem(symbol)` 复用回测归档事务按需落库；新增 `batch_backtest_runs`/`batch_backtest_run_items` 持久化（全库 v4），应用启动把遗留 running 转为可重试 cancelled，`resumeBatchBacktest(runId)` 只重跑失败/取消项且不重复成功项。
+- 完成 H3B.3 批量回测 QML 面板：策略页新增 `BatchBacktestPanel`，提供策略/周期/根数/标的数上限配置、运行与取消、进度与结果列表（数据集短哈希、收益、错误）、逐项"归档"按钮，以及运行历史（runId/状态/成功失败计数）与"恢复失败项"入口；同步更新 `batch-backtest-contract.md`、`project-wiki.md` 与路线图 H3B 状态。
 
 - 完成 H2.3 数据集身份 QML 展示：`backtestResultConfiguration` 携带完整数据集身份；自定义策略结果身份区展示 `datasetVersion`、日期范围、交易日数、原始 Tick 数、缺口与日历来源；归档面板与本地回测目录显示同一身份摘要；`LocalHistoryDataset` 与 `BacktestArchiveListModel` 增加数据集摘要字段/角色，目录刷新时由聚合身份填充。副屏验收截图留待后续补录。
 - 文档同步：新增 `docs/backtest-dataset-identity.md` 契约，更新 `project-wiki.md`（v3、数据结构、归档说明）、`development-progress.md` 与 `历史Tick回测与NAS数据路线图.md` H2 状态。

@@ -371,6 +371,16 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 500
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                BatchBacktestPanel {
+                    anchors.fill: parent; anchors.margins: 18
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.customMode
                     ? (root.identityExpanded ? 540 : 438) : 390

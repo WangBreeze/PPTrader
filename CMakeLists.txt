@@ -246,6 +246,7 @@ qt_add_qml_module(PPTrader
         qml/components/StrategyResearchPage.qml
         qml/components/BacktestEquityChart.qml
         qml/components/BacktestArchivePanel.qml
+        qml/components/BatchBacktestPanel.qml
         qml/components/AppTopBar.qml
         qml/components/SnapshotTimeControls.qml
         qml/components/SnapshotStateOverlay.qml

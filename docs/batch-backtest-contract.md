@@ -12,14 +12,21 @@ H3A 提供同一内置策略对多个本地 A 股数据集的独立回测。`Tra
 
 ## QML 契约
 
-控制器已暴露 `batchBacktestModel`、running、requestId、requested/completed/succeeded/failed、progress、statusText、error，以及启动/取消接口。模型按证券代码稳定排序，包含真实数据版本、实际根数、收益、回撤、胜率、Sharpe、手续费、交易数与单项耗时。
+控制器已暴露 `batchBacktestModel`、running、requestId、requested/completed/succeeded/failed、progress、statusText、error，以及启动/取消接口。模型按证券代码稳定排序，包含真实数据版本、数据集版本/日数/原始 Tick 数/缺口、归档状态（archived/archivedResultId）、实际根数、收益、回撤、胜率、Sharpe、手续费、交易数与单项耗时。
 
-本阶段没有新增 QML 页面。后续界面只能通过这些控制器属性访问，不能直接查询 SQLite。
+H3B.3 已在策略页新增 `BatchBacktestPanel`：配置策略/周期/根数/标的数上限，运行与取消，结果列表逐项"归档"（`archiveBatchBacktestItem`），运行历史（`batchBacktestRunHistory`）逐项"恢复失败项"（`resumeBatchBacktest`）。界面只能通过这些控制器属性访问，不能直接查询 SQLite。
+
+## 运行持久化与恢复
+
+每次批量启动创建不可变 `runId`，`batch_backtest_runs` 保存策略、规范化参数、周期、根数、资金/费率与计数；`batch_backtest_run_items` 保存逐项状态、错误与数据身份。明细只含代码、周期、策略和状态，不保存任何路径或凭据。应用启动把遗留 `running` 运行转为 `cancelled`（可重试）；`resumeBatchBacktest(runId)` 从当前本地 catalog 重新匹配失败/取消项并创建新运行，成功项不重跑。
+
+## 单项按需归档
+
+完成项完整结果（权益曲线、成交、数据集身份）通过 `itemCompleted` 回传并由控制器有界保留（32 项 LRU）。`archiveBatchBacktestItem(symbol)` 复用 7B 单事务归档写入并返回 resultId；结果被淘汰或身份缺失时明确拒绝，不重跑。
 
 ## 明确不包含
 
 - 不共享一笔组合资金，不执行横截面调仓或组合风控；每行都是独立初始资金任务。
-- 不批量归档权益曲线和成交明细，也不支持中断后的任务恢复。
+- 不自动批量归档权益曲线和成交明细（按需单项归档）；批量结果不共享组合资金。
 - 不自动同步缺失 Tick，不以远端日 K 或实时分钟行情回退。
 - 当前真实本地 catalog 只有一个可回测样本；5000+ 真标的数据装载与端到端耗时仍需 H1/H3B 验证。
-

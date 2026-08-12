@@ -66,7 +66,7 @@ flowchart LR
 
 `BacktestArchivePanel` 消费 `backtestArchiveModel`，只通过 `TradingController.loadBacktestArchive(resultId)` 恢复归档。启动时仅查询摘要目录，不自动选择、不联网、不重跑；用户显式加载后，`equityCurveModel`、`backtestTradeModel`、摘要和 `backtestResultConfiguration` 同时切换到归档副本。页面以 `backtestResultHistoricalSnapshot` 标识历史快照，当前策略版本、编辑参数或本地 K 线变化不会覆盖该副本。
 
-H3A 已增加独立 `BatchBacktestService` 和 `BatchBacktestResultListModel`。控制器从严格本地 Tick catalog 选择同周期数据集，后台线程以 SQLite 只读连接逐项读取，并把活动 `BacktestEngine` 限制为 20；完成后只保留收益、回撤、胜率、Sharpe、交易数、数据版本和耗时等摘要。批量任务与单标的任务互斥，支持原子取消、requestId 门控和单项失败隔离。它不是组合资金回测，也未批量保存曲线/成交。独立 Release 探针实测 5207×239 根在活动上限 20 时用时 2.710 秒；真实 5207 份数据的 NAS 同步、SQLite 装载和端到端上限仍属于 H1/H3B。
+H3A/H3B 已增加独立 `BatchBacktestService` 和 `BatchBacktestResultListModel`。控制器从严格本地 Tick catalog 选择同周期数据集，后台线程以独立 SQLite 连接逐项读取，并把活动 `BacktestEngine` 限制为 20；每项运行前加载数据集身份（缺失/缓存过期按失败隔离），完成后保留摘要并在内存有界保留完整结果（32 项 LRU）。`archiveBatchBacktestItem(symbol)` 复用回测归档事务按需保存单项曲线/成交/身份；`batch_backtest_runs`/`batch_backtest_run_items` 持久化运行计划（全库 v4），应用重启把遗留 running 转为可重试 cancelled，`resumeBatchBacktest(runId)` 只重跑失败/取消项。批量任务与单标的任务互斥，支持原子取消、requestId 门控和单项失败隔离。它不是组合资金回测，也不自动批量保存曲线/成交。独立 Release 探针实测 5207×239 根在活动上限 20 时用时 2.710 秒；真实 5207 份数据的 NAS 同步、SQLite 装载和端到端上限仍属于 H1/H3B 后续大档验证。
 
 `TickDataImportPanel` 是阶段 8A 的显式本地文件入口。目录、单个 A 股代码、交易日、文件格式、聚合周期和 5min volume 单位全部由用户确认；目录选择只更新控制器状态，不枚举或打开文件。只有导入按钮调用 `startTickDataImport()`，后台结果通过 requestId 回传，QML 不直接访问 `QFile` 或 SQLite。
 
