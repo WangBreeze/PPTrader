@@ -1,0 +1,40 @@
+{
+    "archive": {
+        "elapsedMilliseconds": 1,
+        "resultId": "27db5ab9-bf4b-41be-ab0f-a2ed29687dee"
+    },
+    "backtest": {
+        "completed": 1,
+        "dataVersion": "sha256:a2399e50a62be3fe56cd552ed42436728248876487297941c25fdea22662f3f8",
+        "datasetVersion": "sha256:16b23529763bb852b1f1328926d4e3adff57897be627785fa09ac11248be2284",
+        "elapsedMilliseconds": 168,
+        "errors": [
+        ],
+        "failed": 0,
+        "requested": 1,
+        "succeeded": 1
+    },
+    "bars": 200,
+    "barsWritten": 0,
+    "databaseBytes": 1486848,
+    "databasePath": "I:\\workspace\\PPTrader\\artifacts\\real-load-100\\tier-1\\capacity.db",
+    "date": "2026-08-12",
+    "failedFiles": 0,
+    "identity": {
+        "datasetVersion": "sha256:16b23529763bb852b1f1328926d4e3adff57897be627785fa09ac11248be2284",
+        "dayCount": 1,
+        "derivedBarCount": 240,
+        "rawTickCount": 4554,
+        "staleDayCount": 0
+    },
+    "loadElapsedMilliseconds": 0,
+    "perFile": [
+    ],
+    "prepareElapsedMilliseconds": 10,
+    "schemaInitMilliseconds": 0,
+    "stagingRoot": "",
+    "symbols": [
+        "000001"
+    ],
+    "ticksWritten": 0
+}

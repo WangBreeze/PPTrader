@@ -1,6 +1,8 @@
 #include "domain/BatchBacktestTypes.h"
 #include "domain/LocalHistoryTypes.h"
+#include "domain/RawTradeTypes.h"
 #include "services/BatchBacktestService.h"
+#include "services/RawTickCandleAggregator.h"
 #include "services/SqliteLocalDataStore.h"
 #include "services/TickDataCsvImporter.h"
 
@@ -52,12 +54,15 @@ int main(int argc, char *argv[])
          QStringLiteral("结果 JSON 路径"), QStringLiteral("path")},
         {{QStringLiteral("k"), QStringLiteral("keep-db")},
          QStringLiteral("可选：保留临时数据库路径"), QStringLiteral("path")},
+        {{QStringLiteral("e"), QStringLiteral("existing-db")},
+         QStringLiteral("直接使用已有数据库（跳过装载，只跑回测与归档）"), QStringLiteral("path")},
     });
     parser.process(application);
 
     const QString staging = parser.value(QStringLiteral("staging"));
     const QString outputPath = parser.value(QStringLiteral("output"));
     const QString keepDb = parser.value(QStringLiteral("keep-db"));
+    const QString existingDb = parser.value(QStringLiteral("existing-db"));
     QStringList symbols;
     for (const QString &value : parser.value(QStringLiteral("symbols")).split(',')) {
         const QString symbol = value.trimmed();
@@ -65,15 +70,19 @@ int main(int argc, char *argv[])
     }
     bool barsOk = false;
     const int bars = parser.value(QStringLiteral("bars")).toInt(&barsOk);
-    if (staging.isEmpty() || outputPath.isEmpty() || symbols.isEmpty()
-        || !barsOk || bars < 2 || !QDir(staging).exists()) {
+    if (outputPath.isEmpty() || symbols.isEmpty() || !barsOk || bars < 2
+        || (existingDb.isEmpty()
+            && (staging.isEmpty() || !QDir(staging).exists()))
+        || (!existingDb.isEmpty() && !QFileInfo::exists(existingDb))) {
         QTextStream(stderr) << QStringLiteral(
-            "参数无效：需要 --staging/--symbols/--bars/--output") << Qt::endl;
+            "参数无效：需要 --symbols/--bars/--output 以及 --staging 或 --existing-db")
+                             << Qt::endl;
         return 1;
     }
 
     std::unique_ptr<QTemporaryDir> temporaryRoot;
     QString databasePath = keepDb;
+    if (!existingDb.isEmpty()) databasePath = existingDb;
     if (databasePath.isEmpty()) {
         temporaryRoot = std::make_unique<QTemporaryDir>();
         if (!temporaryRoot->isValid()) return 2;
@@ -87,7 +96,8 @@ int main(int argc, char *argv[])
     int failedFiles = 0;
     qint64 schemaInitMilliseconds = 0;
     qint64 loadElapsedMilliseconds = 0;
-    {
+    const bool skipLoad = !existingDb.isEmpty();
+    if (!skipLoad) {
         QElapsedTimer schemaTimer;
         schemaTimer.start();
         pp::SqliteLocalDataStore store;
@@ -187,9 +197,38 @@ int main(int argc, char *argv[])
     }
 
     QJsonObject identityResult;
+    qint64 prepareElapsedMilliseconds = 0;
     {
         pp::SqliteLocalDataStore store;
         if (store.initialize(databasePath)) {
+            QElapsedTimer prepareTimer;
+            prepareTimer.start();
+            for (const QString &symbol : symbols) {
+                const pp::Instrument instrument = instrumentFor(symbol);
+                auto identity = store.loadBacktestDatasetIdentity(instrument, 60);
+                if (!identity || identity->isEmpty()) continue;
+                for (const pp::RawTickDayFingerprint &day : identity->days) {
+                    if (store.rawTickCandleCacheFresh(
+                            instrument, day.tradingDate, 60)) {
+                        continue;
+                    }
+                    pp::RawTickCandleAggregator aggregator(instrument, 60);
+                    store.forEachRawTradeTick(
+                        instrument, day.tradingDate,
+                        [&aggregator](const pp::RawTradeTick &tick) {
+                            aggregator.append(tick);
+                            return true;
+                        });
+                    const pp::RawTradeFingerprint fingerprint =
+                        store.rawTradeFingerprint(instrument, day.tradingDate);
+                    if (fingerprint.count > 0) {
+                        store.replaceRawTickCandleCache(
+                            instrument, day.tradingDate, 60, fingerprint,
+                            aggregator.finish());
+                    }
+                }
+            }
+            prepareElapsedMilliseconds = prepareTimer.elapsed();
             const auto identity = store.loadBacktestDatasetIdentity(
                 instrumentFor(symbols.first()), 60);
             if (identity) {
@@ -313,6 +352,8 @@ int main(int argc, char *argv[])
                   static_cast<double>(schemaInitMilliseconds));
     report.insert(QStringLiteral("loadElapsedMilliseconds"),
                   static_cast<double>(loadElapsedMilliseconds));
+    report.insert(QStringLiteral("prepareElapsedMilliseconds"),
+                  static_cast<double>(prepareElapsedMilliseconds));
     report.insert(QStringLiteral("ticksWritten"), static_cast<double>(ticksWritten));
     report.insert(QStringLiteral("barsWritten"), static_cast<double>(barsWritten));
     report.insert(QStringLiteral("failedFiles"), failedFiles);

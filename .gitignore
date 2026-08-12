@@ -18,3 +18,7 @@ __pycache__/
 # 运行时日志与临时测试输出
 artifacts/**/*.log
 artifacts/**/*.txt
+artifacts/**/*.db
+artifacts/**/*.db-wal
+artifacts/**/*.db-shm
+artifacts/**/staging/

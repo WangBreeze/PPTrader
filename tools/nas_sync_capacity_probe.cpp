@@ -25,13 +25,15 @@ class NasSyncCapacityRunner final : public QObject {
 
 public:
     NasSyncCapacityRunner(QUrl endpoint, QStringList symbols, QVector<int> tiers,
-                          QDate tradingDate, QString outputPath, QObject *parent = nullptr)
+                          QDate tradingDate, QString outputPath,
+                          QString keepDir = {}, QObject *parent = nullptr)
         : QObject(parent)
         , m_endpoint(std::move(endpoint))
         , m_symbols(std::move(symbols))
         , m_tiers(std::move(tiers))
         , m_tradingDate(tradingDate)
         , m_outputPath(std::move(outputPath))
+        , m_keepDir(std::move(keepDir))
     {
         connect(&m_client, &pp::NasDataNodeClient::catalogReady,
                 this, &NasSyncCapacityRunner::handleManifest);
@@ -41,8 +43,14 @@ public:
 
     bool start(QString *error)
     {
-        if (!m_temporaryRoot.isValid()) {
-            if (error) *error = QStringLiteral("无法创建容量探针临时目录");
+        if (m_keepDir.isEmpty()) {
+            if (!m_temporaryRoot.isValid()) {
+                if (error) *error = QStringLiteral("无法创建容量探针临时目录");
+                return false;
+            }
+            m_keepDir = m_temporaryRoot.path();
+        } else if (!QDir().mkpath(m_keepDir)) {
+            if (error) *error = QStringLiteral("无法创建保留目录：%1").arg(m_keepDir);
             return false;
         }
         if (!m_client.setEndpoint(m_endpoint, error)) return false;
@@ -102,7 +110,7 @@ private:
         m_manifestMissingSymbols = result.missingSymbols;
         m_sourceBytes = result.totalBytes;
         m_entries = result.entries;
-        const QString tierRoot = QDir(m_temporaryRoot.path()).filePath(
+        const QString tierRoot = QDir(m_keepDir).filePath(
             QStringLiteral("tier-%1").arg(m_requestedSymbols));
         QDir().mkpath(tierRoot);
         m_stagingRoot = QDir(tierRoot).filePath(QStringLiteral("staging"));
@@ -259,6 +267,7 @@ private:
     qint64 m_candleDatabaseMilliseconds = 0;
     QString m_stagingRoot;
     QString m_databasePath;
+    QString m_keepDir;
     QElapsedTimer m_manifestTimer;
     QElapsedTimer m_transferTimer;
     QElapsedTimer m_runTimer;
@@ -307,6 +316,7 @@ int main(int argc, char *argv[])
         {{QStringLiteral("d"), QStringLiteral("date")}, QStringLiteral("交易日 yyyy-MM-dd"), QStringLiteral("date")},
         {{QStringLiteral("t"), QStringLiteral("tiers")}, QStringLiteral("逗号分隔档位"), QStringLiteral("counts"), QStringLiteral("10,100,500")},
         {{QStringLiteral("o"), QStringLiteral("output")}, QStringLiteral("结果 JSON"), QStringLiteral("path")},
+        {{QStringLiteral("k"), QStringLiteral("keep-dir")}, QStringLiteral("保留临时目录（用于后续回测）"), QStringLiteral("path")},
     });
     parser.process(application);
     QString error;
@@ -326,7 +336,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     NasSyncCapacityRunner runner(endpoint, symbols, tiers, date,
-                                 parser.value(QStringLiteral("output")));
+                                 parser.value(QStringLiteral("output")),
+                                 parser.value(QStringLiteral("keep-dir")));
     QObject::connect(&runner, &NasSyncCapacityRunner::finished,
                      &application, [&application](int exitCode) { application.exit(exitCode); });
     if (!runner.start(&error)) {
