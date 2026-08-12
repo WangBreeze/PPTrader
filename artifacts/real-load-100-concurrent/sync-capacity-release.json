@@ -1,0 +1,57 @@
+{
+    "date": "2026-08-07",
+    "endpoint": "loopback-tunnel",
+    "results": [
+        {
+            "availableSymbols": 1,
+            "candleBarsWritten": 240,
+            "candleDatabaseMilliseconds": 2,
+            "databaseBytes": 1569536,
+            "elapsedMilliseconds": 283,
+            "failedFiles": 0,
+            "files": 1,
+            "manifestMilliseconds": 6,
+            "missingSymbols": 0,
+            "parseMilliseconds": 222,
+            "rawDatabaseMilliseconds": 37,
+            "rawTicksWritten": 4554,
+            "requestedSymbols": 1,
+            "sourceBytes": 164357,
+            "transferMilliseconds": 6
+        },
+        {
+            "availableSymbols": 10,
+            "candleBarsWritten": 2363,
+            "candleDatabaseMilliseconds": 21,
+            "databaseBytes": 12261424,
+            "elapsedMilliseconds": 1759,
+            "failedFiles": 0,
+            "files": 10,
+            "manifestMilliseconds": 36,
+            "missingSymbols": 0,
+            "parseMilliseconds": 1366,
+            "rawDatabaseMilliseconds": 241,
+            "rawTicksWritten": 27715,
+            "requestedSymbols": 10,
+            "sourceBytes": 954322,
+            "transferMilliseconds": 2561
+        },
+        {
+            "availableSymbols": 100,
+            "candleBarsWritten": 23821,
+            "candleDatabaseMilliseconds": 251,
+            "databaseBytes": 83282192,
+            "elapsedMilliseconds": 18604,
+            "failedFiles": 0,
+            "files": 100,
+            "manifestMilliseconds": 34,
+            "missingSymbols": 0,
+            "parseMilliseconds": 14595,
+            "rawDatabaseMilliseconds": 2689,
+            "rawTicksWritten": 300988,
+            "requestedSymbols": 100,
+            "sourceBytes": 10488041,
+            "transferMilliseconds": 28198
+        }
+    ]
+}

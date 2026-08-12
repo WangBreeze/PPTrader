@@ -2,6 +2,7 @@
 
 #include "domain/NasDataNodeTypes.h"
 
+#include <QSet>
 #include <QStringList>
 
 namespace pp {
@@ -15,6 +16,7 @@ public:
     bool start();
     bool resume();
     int takeNextReady();
+    QVector<int> takeReadyBatch(int maximum);
     bool markImporting(int index, qint64 transferElapsedMilliseconds = 0,
                        bool fromCache = false);
     bool markSucceeded(int index, qint64 rawTicksWritten, int candleBarsWritten,
@@ -30,13 +32,15 @@ public:
     bool running() const;
     bool canResume() const;
     int activeIndex() const;
+    int activeCount() const;
+    int downloadingCount() const;
 
 private:
     bool validIndexAndStatus(int index, NasSyncItemStatus status) const;
 
     QVector<NasSyncPlanItem> m_items;
     bool m_running = false;
-    int m_activeIndex = -1;
+    QVector<int> m_activeIndices;
 };
 
 } // namespace pp

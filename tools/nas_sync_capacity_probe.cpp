@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QSet>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include <QTimer>
@@ -26,7 +27,8 @@ class NasSyncCapacityRunner final : public QObject {
 public:
     NasSyncCapacityRunner(QUrl endpoint, QStringList symbols, QVector<int> tiers,
                           QDate tradingDate, QString outputPath,
-                          QString keepDir = {}, QObject *parent = nullptr)
+                          QString keepDir = {}, int concurrency = 4,
+                          QObject *parent = nullptr)
         : QObject(parent)
         , m_endpoint(std::move(endpoint))
         , m_symbols(std::move(symbols))
@@ -34,6 +36,7 @@ public:
         , m_tradingDate(tradingDate)
         , m_outputPath(std::move(outputPath))
         , m_keepDir(std::move(keepDir))
+        , m_concurrency(concurrency)
     {
         connect(&m_client, &pp::NasDataNodeClient::catalogReady,
                 this, &NasSyncCapacityRunner::handleManifest);
@@ -64,6 +67,8 @@ signals:
 private:
     void startNextTier()
     {
+        qWarning() << "DIAG startNextTier tierIndex=" << m_tierIndex
+                   << "tiers=" << m_tiers << "entries=" << m_entries.size();
         if (++m_tierIndex >= m_tiers.size()) {
             QJsonObject report;
             report.insert(QStringLiteral("date"), m_tradingDate.toString(Qt::ISODate));
@@ -80,7 +85,11 @@ private:
         }
         m_requestedSymbols = qMin(m_tiers.at(m_tierIndex), m_symbols.size());
         m_entries.clear();
-        m_entryIndex = -1;
+        m_nextEntryIndex = 0;
+        m_downloadedCount = 0;
+        m_tierFinished = false;
+        m_activeEntries.clear();
+        m_downloadIndexByRequestId.clear();
         m_failures = 0;
         m_ticks = 0;
         m_bars = 0;
@@ -91,9 +100,9 @@ private:
         m_runTimer.restart();
         m_manifestTimer.restart();
         const QStringList selected = m_symbols.mid(0, m_requestedSymbols);
-        const quint64 requestId = ++m_requestId;
-        m_activeRequestId = requestId;
-        if (!m_client.requestManifest(requestId, selected, m_tradingDate, m_tradingDate)) {
+        m_activeRequestId = ++m_manifestRequestId;
+        if (!m_client.requestManifest(
+                m_activeRequestId, selected, m_tradingDate, m_tradingDate)) {
             emit finished(3);
         }
     }
@@ -121,32 +130,46 @@ private:
             emit finished(5);
             return;
         }
-        startNextDownload();
+        startNextDownloads();
     }
 
-    void startNextDownload()
+    void startNextDownloads()
     {
-        if (++m_entryIndex >= m_entries.size()) {
-            finishTier();
-            return;
+        while (m_activeEntries.size() < m_concurrency
+               && m_nextEntryIndex < m_entries.size()) {
+            const int entryIndex = m_nextEntryIndex++;
+            m_activeEntries.insert(entryIndex);
+            m_transferTimer.restart();
+            const quint64 requestId = ++m_requestId;
+            m_downloadIndexByRequestId.insert(requestId, entryIndex);
+            if (!m_client.downloadTickFile(
+                    requestId, m_entries.at(entryIndex), m_stagingRoot)) {
+                m_activeEntries.remove(entryIndex);
+                m_downloadIndexByRequestId.remove(requestId);
+                ++m_failures;
+            }
         }
-        m_transferTimer.restart();
-        const quint64 requestId = ++m_requestId;
-        m_activeRequestId = requestId;
-        if (!m_client.downloadTickFile(
-                requestId, m_entries.at(m_entryIndex), m_stagingRoot)) {
-            ++m_failures;
-            QTimer::singleShot(0, this, &NasSyncCapacityRunner::startNextDownload);
+        if (m_activeEntries.isEmpty() && m_downloadedCount >= m_entries.size()) {
+            if (m_nextEntryIndex >= m_entries.size()) {
+                finishTier();
+            }
+        } else if (m_activeEntries.isEmpty()) {
+            QTimer::singleShot(0, this,
+                               &NasSyncCapacityRunner::startNextDownloads);
         }
     }
 
     void handleDownload(quint64 requestId, const pp::NasDownloadResult &download)
     {
-        if (requestId != m_activeRequestId) return;
+        const int entryIndex = m_downloadIndexByRequestId.take(requestId);
+        if (!m_activeEntries.contains(entryIndex)) return;
+        m_activeEntries.remove(entryIndex);
+        ++m_downloadedCount;
         m_transferMilliseconds += m_transferTimer.elapsed();
         if (!download.succeeded) {
             ++m_failures;
-            QTimer::singleShot(0, this, &NasSyncCapacityRunner::startNextDownload);
+            QTimer::singleShot(0, this,
+                               &NasSyncCapacityRunner::startNextDownloads);
             return;
         }
         pp::Instrument instrument;
@@ -208,11 +231,13 @@ private:
             0, parseAndSinkNanoseconds - rawSinkNanoseconds)) / 1000000.0);
         m_rawDatabaseMilliseconds += qRound64(
             static_cast<double>(rawDatabaseNanoseconds) / 1000000.0);
-        QTimer::singleShot(0, this, &NasSyncCapacityRunner::startNextDownload);
+        QTimer::singleShot(0, this, &NasSyncCapacityRunner::startNextDownloads);
     }
 
     void finishTier()
     {
+        if (m_tierFinished) return;
+        m_tierFinished = true;
         const qint64 elapsed = m_runTimer.elapsed();
         const qint64 databaseBytes = QFileInfo(m_databasePath).size()
             + QFileInfo(m_databasePath + QStringLiteral("-wal")).size()
@@ -250,12 +275,18 @@ private:
     QVector<pp::NasCatalogEntry> m_entries;
     QJsonArray m_results;
     int m_tierIndex = -1;
-    int m_entryIndex = -1;
+    int m_nextEntryIndex = 0;
+    int m_downloadedCount = 0;
+    bool m_tierFinished = false;
+    QSet<int> m_activeEntries;
+    QHash<quint64, int> m_downloadIndexByRequestId;
+    int m_concurrency = 4;
     int m_requestedSymbols = 0;
     int m_manifestAvailableSymbols = 0;
     int m_manifestMissingSymbols = 0;
     int m_failures = 0;
     quint64 m_requestId = 0;
+    quint64 m_manifestRequestId = 0;
     quint64 m_activeRequestId = 0;
     qint64 m_sourceBytes = 0;
     qint64 m_ticks = 0;
@@ -317,6 +348,7 @@ int main(int argc, char *argv[])
         {{QStringLiteral("t"), QStringLiteral("tiers")}, QStringLiteral("逗号分隔档位"), QStringLiteral("counts"), QStringLiteral("10,100,500")},
         {{QStringLiteral("o"), QStringLiteral("output")}, QStringLiteral("结果 JSON"), QStringLiteral("path")},
         {{QStringLiteral("k"), QStringLiteral("keep-dir")}, QStringLiteral("保留临时目录（用于后续回测）"), QStringLiteral("path")},
+        {{QStringLiteral("c"), QStringLiteral("concurrency")}, QStringLiteral("并发下载数"), QStringLiteral("count"), QStringLiteral("4")},
     });
     parser.process(application);
     QString error;
@@ -329,15 +361,20 @@ int main(int argc, char *argv[])
     }
     const QDate date = QDate::fromString(parser.value(QStringLiteral("date")), Qt::ISODate);
     const QUrl endpoint(parser.value(QStringLiteral("endpoint")));
+    bool concurrencyOk = false;
+    const int concurrency =
+        parser.value(QStringLiteral("concurrency")).toInt(&concurrencyOk);
     if (!error.isEmpty() || tiers.isEmpty() || !date.isValid() || endpoint.isEmpty()
-        || parser.value(QStringLiteral("output")).isEmpty()) {
+        || parser.value(QStringLiteral("output")).isEmpty()
+        || !concurrencyOk || concurrency < 1 || concurrency > 16) {
         QTextStream(stderr) << (error.isEmpty() ? QStringLiteral("容量探针参数无效") : error)
                             << Qt::endl;
         return 1;
     }
     NasSyncCapacityRunner runner(endpoint, symbols, tiers, date,
                                  parser.value(QStringLiteral("output")),
-                                 parser.value(QStringLiteral("keep-dir")));
+                                 parser.value(QStringLiteral("keep-dir")),
+                                 concurrency);
     QObject::connect(&runner, &NasSyncCapacityRunner::finished,
                      &application, [&application](int exitCode) { application.exit(exitCode); });
     if (!runner.start(&error)) {

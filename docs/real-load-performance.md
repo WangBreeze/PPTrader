@@ -101,3 +101,17 @@ ssh -N -L 28765:127.0.0.1:18765 wanglc@192.168.3.7
 ```
 
 原始 JSON：`artifacts/real-load-1/`（本地多日）、`artifacts/real-load-100/`（NAS 1/10/100 档）。临时验证 SQLite 不进入版本库。
+
+## H4.1 并发下载基线（2026-08-13）
+
+同一节点、同日、文件系统热缓存环境下，`pptrader_nas_sync_capacity --concurrency 1/4` 对比（Release）：
+
+| 档位 | 串行总耗时 | 并发 4 总耗时 | 提升 |
+| --- | ---: | ---: | ---: |
+| 1 | 286 ms | 283 ms | 持平（单文件） |
+| 10 | 1807 ms | 1759 ms | 约 3% |
+| 100 | 21584 ms | 18604 ms | **约 14%** |
+
+并发下 `transferMilliseconds` 为累计失真的统计（多个下载共享计时器），不计入结论；`elapsedMilliseconds` 为真实总耗时。热缓存下传输占比已被压缩，冷缓存/远端节点场景并发收益预计显著更高；本机瓶颈仍为解析（100 档约 14.6 s）与写库（约 2.7 s）。
+
+产品侧 `TradingController` NAS 同步已支持 `PPTRADER_NAS_DOWNLOAD_CONCURRENCY`（默认 4）：下载阶段并行、SHA-256 校验后导入仍串行（SQLite 单写者），队列多活动语义与并发下载由 `tst_nas_data_node` 覆盖。

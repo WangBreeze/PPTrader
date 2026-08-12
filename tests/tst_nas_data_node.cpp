@@ -91,6 +91,9 @@ protected:
             } else if (firstLine.contains("/v1/ticks/600519/20260807")) {
                 ++downloadRequests;
                 socket->write(httpResponse(200, "text/csv", tickData));
+            } else if (firstLine.contains("/v1/ticks/000001/20260807")) {
+                ++downloadRequests;
+                socket->write(httpResponse(200, "text/csv", tickData));
             } else if (firstLine.contains("/v1/health")) {
                 socket->write(httpResponse(
                     200, "application/json", "{\"status\":\"ok\",\"version\":\"test-v1\"}"));
@@ -229,6 +232,72 @@ void NasDataNodeTest::catalogDownloadChecksumAndCacheReuse()
 
 void NasDataNodeTest::multiDayQueueFailureResumeAndCancellation()
 {
+    // 并发下载与多活动队列（测试前置：直接插入独立用例）
+    {
+        auto entry = [](const QString &symbol) {
+            NasCatalogEntry value;
+            value.symbol = symbol;
+            value.tradingDate = QDate(2026, 8, 7);
+            value.format = QStringLiteral("tick_csv");
+            value.size = 100;
+            value.sha256 = QString(64, QLatin1Char('a'));
+            value.version = QStringLiteral("sha256:") + QString(64, QLatin1Char('a'));
+            value.downloadPath =
+                QStringLiteral("/v1/ticks/%1/20260807").arg(symbol);
+            return value;
+        };
+        NasTickSyncQueue queue;
+        QVERIFY(queue.prepareManifest(
+            {entry(QStringLiteral("600519")), entry(QStringLiteral("000001"))},
+            {QStringLiteral("600519"), QStringLiteral("000001")}));
+        QVERIFY(queue.start());
+        const QVector<int> batch = queue.takeReadyBatch(2);
+        QCOMPARE(batch.size(), 2);
+        QCOMPARE(queue.activeCount(), 2);
+        QCOMPARE(queue.downloadingCount(), 2);
+        QVERIFY(queue.markImporting(batch.at(0), 10, false));
+        QVERIFY(queue.markSucceeded(batch.at(0), 4000, 239));
+        QCOMPARE(queue.activeCount(), 1);
+        QVERIFY(queue.markImporting(batch.at(1), 20, true));
+        QVERIFY(queue.markSucceeded(batch.at(1), 4100, 240));
+        QCOMPARE(queue.activeCount(), 0);
+        QVERIFY(queue.takeReadyBatch(2).isEmpty());
+        QVERIFY(!queue.running());
+    }
+    {
+        FakeNasServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        NasDataNodeClient client;
+        QString error;
+        QVERIFY(client.setEndpoint(QUrl(QStringLiteral("http://127.0.0.1:%1/")
+                                            .arg(server.serverPort())), &error));
+        QSignalSpy manifestSpy(&client, &NasDataNodeClient::catalogReady);
+        QVERIFY(client.requestManifest(1, {QStringLiteral("600519"),
+                                           QStringLiteral("000001")},
+                                       QDate(2026, 8, 7), QDate(2026, 8, 7)));
+        QTRY_COMPARE_WITH_TIMEOUT(manifestSpy.count(), 1, 5000);
+        const NasCatalogResult manifest =
+            qvariant_cast<NasCatalogResult>(manifestSpy.takeFirst().at(1));
+        QVERIFY2(manifest.succeeded, qPrintable(manifest.error));
+        QCOMPARE(manifest.entries.size(), 2);
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QSignalSpy downloadSpy(&client, &NasDataNodeClient::downloadReady);
+        QVERIFY(client.downloadTickFile(11, manifest.entries.at(0), directory.path()));
+        QVERIFY(client.downloadTickFile(12, manifest.entries.at(1), directory.path()));
+        QTRY_COMPARE_WITH_TIMEOUT(downloadSpy.count(), 2, 5000);
+        QSet<QString> symbols;
+        for (const QList<QVariant> &arguments : downloadSpy) {
+            const NasDownloadResult result =
+                qvariant_cast<NasDownloadResult>(arguments.at(1));
+            QVERIFY2(result.succeeded, qPrintable(result.error));
+            symbols.insert(result.entry.symbol);
+        }
+        QCOMPARE(symbols.size(), 2);
+        QCOMPARE(server.downloadRequests, 2);
+    }
+
     auto entry = [](const QDate &date) {
         NasCatalogEntry value;
         value.symbol = QStringLiteral("600519");

@@ -995,6 +995,8 @@ private:
     bool startNasSyncPlan(const QVector<NasCatalogEntry> &entries,
                           const QString &symbol);
     void startNextNasSyncItem();
+    void launchNasDownload(int index);
+    void startNextNasImport();
     void finishNasSyncRun(bool cancelled = false);
     void persistNasSyncState();
     void clearNasSyncState();
@@ -1094,9 +1096,15 @@ private:
     bool m_nasDataNodeLoading = false;
     bool m_nasDataNodeSyncRunning = false;
     quint64 m_nasDataNodeRequestVersion = 0;
+    quint64 m_nasDownloadRequestCounter = 0;
     quint64 m_nasActiveCatalogRequestId = 0;
     quint64 m_nasActiveDownloadRequestId = 0;
     quint64 m_nasImportRequestId = 0;
+    int m_nasMaxConcurrentDownloads = 4;
+    int m_nasImportingIndex = -1;
+    QHash<quint64, int> m_nasDownloadIndexByRequestId;
+    QHash<int, qint64> m_nasDownloadStartedAtMilliseconds;
+    QVector<int> m_nasImportQueue;
     qint64 m_nasDataNodeReceivedBytes = 0;
     qint64 m_nasDataNodeExpectedBytes = 0;
     qint64 m_nasManifestElapsedMilliseconds = 0;

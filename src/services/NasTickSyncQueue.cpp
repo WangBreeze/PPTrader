@@ -37,7 +37,7 @@ bool NasTickSyncQueue::prepareManifest(const QVector<NasCatalogEntry> &entries,
     m_items.clear();
     m_items.reserve(filtered.size());
     for (const NasCatalogEntry &entry : filtered) m_items.append({entry});
-    m_activeIndex = -1;
+    m_activeIndices.clear();
     return !m_items.isEmpty();
 }
 
@@ -65,7 +65,7 @@ bool NasTickSyncQueue::restore(const QVector<NasSyncPlanItem> &items)
         }
     }
     m_running = false;
-    m_activeIndex = -1;
+    m_activeIndices.clear();
     return !m_items.isEmpty();
 }
 
@@ -85,7 +85,7 @@ bool NasTickSyncQueue::start()
         item.error.clear();
     }
     m_running = true;
-    m_activeIndex = -1;
+    m_activeIndices.clear();
     return true;
 }
 
@@ -102,22 +102,30 @@ bool NasTickSyncQueue::resume()
         }
     }
     m_running = true;
-    m_activeIndex = -1;
+    m_activeIndices.clear();
     return true;
 }
 
 int NasTickSyncQueue::takeNextReady()
 {
-    if (!m_running || m_activeIndex >= 0) return -1;
+    const QVector<int> batch = takeReadyBatch(1);
+    return batch.isEmpty() ? -1 : batch.first();
+}
+
+QVector<int> NasTickSyncQueue::takeReadyBatch(int maximum)
+{
+    QVector<int> result;
+    if (!m_running || maximum <= 0) return result;
     for (int index = 0; index < m_items.size(); ++index) {
+        if (result.size() >= maximum) break;
         if (m_items.at(index).status == NasSyncItemStatus::Ready) {
             m_items[index].status = NasSyncItemStatus::Downloading;
-            m_activeIndex = index;
-            return index;
+            m_activeIndices.append(index);
+            result.append(index);
         }
     }
-    m_running = false;
-    return -1;
+    if (result.isEmpty()) m_running = false;
+    return result;
 }
 
 bool NasTickSyncQueue::markImporting(int index, qint64 transferElapsedMilliseconds,
@@ -147,34 +155,36 @@ bool NasTickSyncQueue::markSucceeded(int index, qint64 rawTicksWritten,
     item.candleDatabaseElapsedMilliseconds = candleDatabaseElapsedMilliseconds;
     item.importElapsedMilliseconds = importElapsedMilliseconds;
     item.error.clear();
-    m_activeIndex = -1;
+    m_activeIndices.removeAll(index);
     return true;
 }
 
 bool NasTickSyncQueue::markFailed(int index, const QString &error)
 {
-    if (index < 0 || index >= m_items.size() || index != m_activeIndex) return false;
+    if (index < 0 || index >= m_items.size()
+        || !m_activeIndices.contains(index)) return false;
     NasSyncPlanItem &item = m_items[index];
     if (item.status != NasSyncItemStatus::Downloading
         && item.status != NasSyncItemStatus::Importing) return false;
     item.status = NasSyncItemStatus::Failed;
     item.error = error.isEmpty() ? QStringLiteral("未知同步错误") : error;
-    m_activeIndex = -1;
+    m_activeIndices.removeAll(index);
     return true;
 }
 
 void NasTickSyncQueue::cancelActiveAndPending()
 {
-    if (m_activeIndex >= 0 && m_activeIndex < m_items.size()) {
-        m_items[m_activeIndex].status = NasSyncItemStatus::Cancelled;
-        m_items[m_activeIndex].error = QStringLiteral("用户取消");
+    for (int index : m_activeIndices) {
+        if (index < 0 || index >= m_items.size()) continue;
+        m_items[index].status = NasSyncItemStatus::Cancelled;
+        m_items[index].error = QStringLiteral("用户取消");
     }
     for (NasSyncPlanItem &item : m_items) {
         if (item.status == NasSyncItemStatus::Ready)
             item.status = NasSyncItemStatus::Cancelled;
     }
     m_running = false;
-    m_activeIndex = -1;
+    m_activeIndices.clear();
 }
 
 const QVector<NasSyncPlanItem> &NasTickSyncQueue::items() const { return m_items; }
@@ -222,11 +232,29 @@ bool NasTickSyncQueue::canResume() const
     });
 }
 
-int NasTickSyncQueue::activeIndex() const { return m_activeIndex; }
+int NasTickSyncQueue::activeIndex() const
+{
+    return m_activeIndices.isEmpty() ? -1 : m_activeIndices.first();
+}
+
+int NasTickSyncQueue::activeCount() const { return m_activeIndices.size(); }
+
+int NasTickSyncQueue::downloadingCount() const
+{
+    int count = 0;
+    for (int index : m_activeIndices) {
+        if (index >= 0 && index < m_items.size()
+            && m_items.at(index).status == NasSyncItemStatus::Downloading) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 bool NasTickSyncQueue::validIndexAndStatus(int index, NasSyncItemStatus status) const
 {
-    return index >= 0 && index < m_items.size() && index == m_activeIndex
+    return index >= 0 && index < m_items.size()
+        && m_activeIndices.contains(index)
         && m_items.at(index).status == status;
 }
 

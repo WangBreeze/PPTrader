@@ -428,15 +428,19 @@ TradingController::TradingController(QObject *parent)
             });
     connect(&m_nasDataNodeClient, &NasDataNodeClient::downloadProgress,
             this, [this](quint64 requestId, qint64 received, qint64 total) {
-                if (requestId != m_nasActiveDownloadRequestId) return;
+                if (!m_nasDownloadIndexByRequestId.contains(requestId)) return;
                 m_nasDataNodeReceivedBytes = received;
                 m_nasDataNodeExpectedBytes = total > 0 ? total : m_nasDataNodeExpectedBytes;
                 emit nasDataNodeStateChanged();
             });
     connect(&m_nasDataNodeClient, &NasDataNodeClient::downloadReady,
             this, [this](quint64 requestId, const NasDownloadResult &result) {
-                if (requestId != m_nasActiveDownloadRequestId) return;
-                const int syncIndex = m_nasSyncQueue.activeIndex();
+                const int syncIndex = m_nasDownloadIndexByRequestId.take(requestId);
+                if (syncIndex < 0) return;
+                if (m_nasActiveDownloadRequestId == requestId) {
+                    m_nasActiveDownloadRequestId = 0;
+                }
+                m_nasDownloadStartedAtMilliseconds.remove(syncIndex);
                 if (!result.succeeded) {
                     m_nasSyncQueue.markFailed(syncIndex, result.error);
                     persistNasSyncState();
@@ -454,48 +458,22 @@ TradingController::TradingController(QObject *parent)
                     QTimer::singleShot(0, this, &TradingController::startNextNasSyncItem);
                     return;
                 }
-                if (!m_nasSyncQueue.markImporting(
-                        syncIndex, m_nasPhaseTimer.isValid() ? m_nasPhaseTimer.elapsed() : 0,
-                        result.fromCache)) {
+                if (!m_nasSyncQueue.markImporting(syncIndex, 0, result.fromCache)) {
                     m_nasDataNodeError = QStringLiteral("NAS 多日同步状态异常");
                     m_nasSyncQueue.cancelActiveAndPending();
                     finishNasSyncRun(true);
                     return;
                 }
                 persistNasSyncState();
-                TickDataImportRequest importRequest;
-                importRequest.rootDirectory = result.localRoot;
-                importRequest.instrument = instrument;
-                importRequest.tradingDate = result.entry.tradingDate;
-                importRequest.format = TickDataCsvFormat::Tick;
-                importRequest.periodSeconds = 60;
-                m_tickDataImportRootDirectory = result.localRoot;
-                m_tickDataImportInstrument = instrument;
-                m_tickDataImportTradingDate = result.entry.tradingDate.toString(Qt::ISODate);
-                m_tickDataImportFormat = static_cast<int>(TickDataCsvFormat::Tick);
-                m_tickDataImportPeriodSeconds = 60;
-                m_tickDataImportRunning = true;
-                m_tickDataImportStatusText = result.fromCache
-                    ? QStringLiteral("NAS 文件命中本地校验缓存，正在事务导入")
-                    : QStringLiteral("NAS 文件校验通过，正在事务导入");
-                m_tickDataImportRequestId = m_tickDataCsvImportService.start(importRequest);
-                m_nasImportRequestId = m_tickDataImportRequestId;
-                m_nasPhaseTimer.restart();
-                if (m_tickDataImportRequestId == 0) {
-                    m_tickDataImportRunning = false;
-                    m_nasImportRequestId = 0;
-                    m_nasSyncQueue.markFailed(
-                        syncIndex, QStringLiteral("本地 Tick 导入服务当前不可用"));
-                    persistNasSyncState();
-                    m_nasDataNodeStatusText = QStringLiteral("NAS 文件未能开始导入，继续下一项");
-                    QTimer::singleShot(0, this, &TradingController::startNextNasSyncItem);
-                } else {
-                    m_nasDataNodeStatusText = QStringLiteral("正在同步 %1：写入本地事实表")
-                        .arg(result.entry.tradingDate.toString(Qt::ISODate));
-                }
-                emit tickDataImportStateChanged();
+                m_nasImportQueue.append(syncIndex);
+                startNextNasImport();
                 emit nasDataNodeStateChanged();
             });
+    const int configuredConcurrency = qEnvironmentVariableIntValue(
+        "PPTRADER_NAS_DOWNLOAD_CONCURRENCY");
+    if (configuredConcurrency > 0 && configuredConcurrency <= 16) {
+        m_nasMaxConcurrentDownloads = configuredConcurrency;
+    }
     m_nasDataNodeClient.setBearerToken(qgetenv("PPTRADER_NAS_TOKEN"));
     const QString savedNasEndpoint = QSettings().value(
         QStringLiteral("nas/endpoint")).toString();
@@ -1438,14 +1416,26 @@ void TradingController::startNextNasSyncItem()
         finishNasSyncRun(false);
         return;
     }
-    const int index = m_nasSyncQueue.takeNextReady();
-    if (index < 0) {
+    const int slotCount = std::max(1, m_nasMaxConcurrentDownloads)
+        - m_nasSyncQueue.downloadingCount();
+    const QVector<int> batch = m_nasSyncQueue.takeReadyBatch(slotCount);
+    for (int index : batch) launchNasDownload(index);
+    if (m_nasSyncQueue.downloadingCount() == 0
+        && m_nasImportQueue.isEmpty() && m_nasImportingIndex < 0) {
         finishNasSyncRun(false);
-        return;
     }
+}
+
+void TradingController::launchNasDownload(int index)
+{
     const NasCatalogEntry entry = m_nasSyncQueue.items().at(index).entry;
     persistNasSyncState();
-    m_nasActiveDownloadRequestId = m_nasDataNodeRequestVersion;
+    const quint64 requestId = ++m_nasDownloadRequestCounter;
+    if (requestId == 0) ++m_nasDownloadRequestCounter;
+    m_nasDownloadIndexByRequestId.insert(requestId, index);
+    m_nasDownloadStartedAtMilliseconds.insert(
+        index, QDateTime::currentMSecsSinceEpoch());
+    m_nasActiveDownloadRequestId = requestId;
     m_nasDataNodeReceivedBytes = 0;
     m_nasDataNodeExpectedBytes = entry.size;
     m_nasDataNodeStatusText = QStringLiteral("正在同步 %1 · %2：下载并校验")
@@ -1454,12 +1444,64 @@ void TradingController::startNextNasSyncItem()
     m_nasPhaseTimer.restart();
     const QString localRoot = m_nasTickCacheManager.rootDirectory();
     if (!m_nasDataNodeClient.downloadTickFile(
-            m_nasActiveDownloadRequestId, entry, localRoot)) {
+            requestId, entry, localRoot)) {
+        m_nasDownloadIndexByRequestId.remove(requestId);
+        m_nasDownloadStartedAtMilliseconds.remove(index);
         m_nasSyncQueue.markFailed(index, QStringLiteral("NAS Tick 下载请求未能启动"));
         persistNasSyncState();
         QTimer::singleShot(0, this, &TradingController::startNextNasSyncItem);
     }
     emit nasDataNodeStateChanged();
+}
+
+void TradingController::startNextNasImport()
+{
+    if (m_nasImportingIndex >= 0 || m_nasImportQueue.isEmpty()) {
+        startNextNasSyncItem();
+        return;
+    }
+    const int index = m_nasImportQueue.takeFirst();
+    m_nasImportingIndex = index;
+    const NasCatalogEntry &entry = m_nasSyncQueue.items().at(index).entry;
+    const Instrument instrument = findInstrument(entry.symbol);
+    if (instrument.symbol.isEmpty()) {
+        m_nasSyncQueue.markFailed(
+            index, QStringLiteral("NAS 品种不在已加载的 A 股股票池中"));
+        m_nasImportingIndex = -1;
+        persistNasSyncState();
+        QTimer::singleShot(0, this, &TradingController::startNextNasImport);
+        return;
+    }
+    TickDataImportRequest importRequest;
+    importRequest.rootDirectory = m_nasTickCacheManager.rootDirectory();
+    importRequest.instrument = instrument;
+    importRequest.tradingDate = entry.tradingDate;
+    importRequest.format = TickDataCsvFormat::Tick;
+    importRequest.periodSeconds = 60;
+    m_tickDataImportRootDirectory = importRequest.rootDirectory;
+    m_tickDataImportInstrument = instrument;
+    m_tickDataImportTradingDate = entry.tradingDate.toString(Qt::ISODate);
+    m_tickDataImportFormat = static_cast<int>(TickDataCsvFormat::Tick);
+    m_tickDataImportPeriodSeconds = 60;
+    m_tickDataImportRunning = true;
+    m_tickDataImportStatusText = QStringLiteral("NAS 文件校验通过，正在事务导入");
+    m_tickDataImportRequestId = m_tickDataCsvImportService.start(importRequest);
+    m_nasImportRequestId = m_tickDataImportRequestId;
+    m_nasPhaseTimer.restart();
+    if (m_tickDataImportRequestId == 0) {
+        m_tickDataImportRunning = false;
+        m_nasImportRequestId = 0;
+        m_nasSyncQueue.markFailed(
+            m_nasImportingIndex, QStringLiteral("本地 Tick 导入服务当前不可用"));
+        m_nasImportingIndex = -1;
+        persistNasSyncState();
+        m_nasDataNodeStatusText = QStringLiteral("NAS 文件未能开始导入，继续下一项");
+        QTimer::singleShot(0, this, &TradingController::startNextNasImport);
+    } else {
+        m_nasDataNodeStatusText = QStringLiteral("正在同步 %1：写入本地事实表")
+            .arg(entry.tradingDate.toString(Qt::ISODate));
+    }
+    emit tickDataImportStateChanged();
 }
 
 void TradingController::finishNasSyncRun(bool cancelled)
@@ -1469,6 +1511,10 @@ void TradingController::finishNasSyncRun(bool cancelled)
         ? m_nasSyncTimer.elapsed() : 0;
     m_nasActiveDownloadRequestId = 0;
     m_nasImportRequestId = 0;
+    m_nasDownloadIndexByRequestId.clear();
+    m_nasDownloadStartedAtMilliseconds.clear();
+    m_nasImportQueue.clear();
+    m_nasImportingIndex = -1;
     const NasSyncSummary summary = m_nasSyncQueue.summary();
     if (cancelled) {
         m_nasDataNodeStatusText = QStringLiteral("NAS 多日同步已取消：完成 %1/%2")
@@ -1490,13 +1536,20 @@ void TradingController::finishNasSyncRun(bool cancelled)
 void TradingController::cancelNasTickSync()
 {
     if (!m_nasDataNodeSyncRunning) return;
-    const quint64 downloadRequestId = m_nasActiveDownloadRequestId;
+    const QList<quint64> downloadRequestIds =
+        m_nasDownloadIndexByRequestId.keys();
     m_nasActiveDownloadRequestId = 0;
-    if (downloadRequestId != 0) m_nasDataNodeClient.cancel(downloadRequestId);
+    for (quint64 requestId : downloadRequestIds) {
+        m_nasDataNodeClient.cancel(requestId);
+    }
+    m_nasDownloadIndexByRequestId.clear();
+    m_nasDownloadStartedAtMilliseconds.clear();
+    m_nasImportQueue.clear();
     if (m_nasImportRequestId != 0) {
         m_nasImportRequestId = 0;
         m_tickDataCsvImportService.cancel();
     }
+    m_nasImportingIndex = -1;
     m_nasSyncQueue.cancelActiveAndPending();
     persistNasSyncState();
     finishNasSyncRun(true);
@@ -4739,30 +4792,34 @@ void TradingController::handleTickDataImportFinished(
     emit tickDataImportStateChanged();
     if (nasImport) {
         m_nasImportRequestId = 0;
-        const int syncIndex = m_nasSyncQueue.activeIndex();
-        if (m_tickDataImportError.isEmpty() && result.succeeded) {
-            m_nasSyncQueue.markSucceeded(
-                syncIndex, result.rawTicksWritten, m_tickDataImportWrittenBars,
-                result.parseElapsedMilliseconds,
-                result.rawDatabaseElapsedMilliseconds,
-                candleDatabaseElapsedMilliseconds,
-                m_nasPhaseTimer.isValid() ? m_nasPhaseTimer.elapsed() : 0);
-            m_nasDataNodeStatusText = QStringLiteral(
-                "NAS Tick 已写入本地事实表：%1 条；继续下一交易日")
-                .arg(result.rawTicksWritten);
-            m_nasDataNodeError.clear();
-            if (m_tickDataImportInstrument.symbol == selectedLiveSymbol()) {
-                requestLiveDayCandleSeries(
-                    m_tickDataImportInstrument.symbol, m_liveDayCandleSeriesPeriodSeconds);
+        const int syncIndex = m_nasImportingIndex;
+        m_nasImportingIndex = -1;
+        if (syncIndex >= 0) {
+            if (m_tickDataImportError.isEmpty() && result.succeeded) {
+                m_nasSyncQueue.markSucceeded(
+                    syncIndex, result.rawTicksWritten, m_tickDataImportWrittenBars,
+                    result.parseElapsedMilliseconds,
+                    result.rawDatabaseElapsedMilliseconds,
+                    candleDatabaseElapsedMilliseconds,
+                    m_nasPhaseTimer.isValid() ? m_nasPhaseTimer.elapsed() : 0);
+                m_nasDataNodeStatusText = QStringLiteral(
+                    "NAS Tick 已写入本地事实表：%1 条；继续下一交易日")
+                    .arg(result.rawTicksWritten);
+                m_nasDataNodeError.clear();
+                if (m_tickDataImportInstrument.symbol == selectedLiveSymbol()) {
+                    requestLiveDayCandleSeries(
+                        m_tickDataImportInstrument.symbol,
+                        m_liveDayCandleSeriesPeriodSeconds);
+                }
+            } else {
+                m_nasSyncQueue.markFailed(syncIndex, m_tickDataImportError);
+                m_nasDataNodeStatusText = QStringLiteral(
+                    "NAS 文件已下载，但本地事务导入失败；继续下一交易日");
             }
-        } else {
-            m_nasSyncQueue.markFailed(syncIndex, m_tickDataImportError);
-            m_nasDataNodeStatusText = QStringLiteral(
-                "NAS 文件已下载，但本地事务导入失败；继续下一交易日");
         }
         persistNasSyncState();
         emit nasDataNodeStateChanged();
-        QTimer::singleShot(0, this, &TradingController::startNextNasSyncItem);
+        QTimer::singleShot(0, this, &TradingController::startNextNasImport);
     }
 }
 
