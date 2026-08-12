@@ -120,6 +120,7 @@ private slots:
     void completesMultipleSymbolsAndReportsInsufficientData();
     void identityAndArchiveRoundTrip();
     void staleDatasetFailsBatchItem();
+    void runPersistenceRoundTrip();
     void cancellationAndBusyGate();
     void resultModelRolesAndOrdering();
 };
@@ -308,6 +309,78 @@ void BatchBacktestTest::staleDatasetFailsBatchItem()
     ++staleFailures;
     QCOMPARE(succeeded, 1);
     QCOMPARE(staleFailures, 1);
+}
+
+void BatchBacktestTest::runPersistenceRoundTrip()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("runs.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    QCOMPARE(store.schemaVersion(), 4);
+
+    BatchBacktestRunSummary summary;
+    summary.runId = QStringLiteral("run-1");
+    summary.createdAt = QDateTime::currentDateTimeUtc().addSecs(-60);
+    summary.strategyId = QStringLiteral("sma_crossover");
+    summary.strategyParameters = {{QStringLiteral("fastPeriod"), 3},
+                                  {QStringLiteral("slowPeriod"), 8}};
+    summary.frequency = QStringLiteral("1m");
+    summary.periodSeconds = 60;
+    summary.barCount = 60;
+    summary.initialCapital = 1000000.0;
+    summary.commissionRate = 0.0003;
+    summary.slippageRate = 0.0002;
+    summary.lotSize = 100;
+    summary.totalSymbols = 2;
+    summary.status = QStringLiteral("running");
+    QVERIFY(store.upsertBatchBacktestRun(summary));
+
+    BatchBacktestRunItem first;
+    first.runId = summary.runId;
+    first.instrument = datasetFor(0, 60).instrument;
+    first.status = QStringLiteral("succeeded");
+    first.dataVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    first.datasetVersion = QStringLiteral("sha256:") + QString(64, 'b');
+    QVERIFY(store.upsertBatchBacktestRunItem(first));
+    BatchBacktestRunItem second;
+    second.runId = summary.runId;
+    second.instrument = datasetFor(1, 60).instrument;
+    second.status = QStringLiteral("failed");
+    second.error = QStringLiteral("派生缓存过期");
+    QVERIFY(store.upsertBatchBacktestRunItem(second));
+
+    const QVector<BatchBacktestRunSummary> runs =
+        store.loadBatchBacktestRuns();
+    QCOMPARE(runs.size(), 1);
+    QCOMPARE(runs.first().runId, QStringLiteral("run-1"));
+    QCOMPARE(runs.first().strategyId, QStringLiteral("sma_crossover"));
+    QCOMPARE(runs.first().strategyParameters.value(QStringLiteral("fastPeriod")).toInt(), 3);
+    QCOMPARE(runs.first().periodSeconds, 60);
+    QCOMPARE(runs.first().totalSymbols, 2);
+    QCOMPARE(runs.first().status, QStringLiteral("running"));
+    QVERIFY(!runs.first().toVariantMap().value(QStringLiteral("runId")).toString().isEmpty());
+
+    const QVector<BatchBacktestRunItem> items =
+        store.loadBatchBacktestRunItems(summary.runId);
+    QCOMPARE(items.size(), 2);
+    QCOMPARE(items.at(0).instrument.symbol, QStringLiteral("600000"));
+    QCOMPARE(items.at(0).status, QStringLiteral("succeeded"));
+    QCOMPARE(items.at(1).status, QStringLiteral("failed"));
+
+    // 运行结束后更新汇总与明细，再次读取保持一致。
+    BatchBacktestRunSummary completed = summary;
+    completed.completedAt = QDateTime::currentDateTimeUtc();
+    completed.completedSymbols = 2;
+    completed.succeededSymbols = 1;
+    completed.failedSymbols = 1;
+    completed.status = QStringLiteral("completed");
+    QVERIFY(store.upsertBatchBacktestRun(completed));
+    const QVector<BatchBacktestRunSummary> completedRuns =
+        store.loadBatchBacktestRuns();
+    QCOMPARE(completedRuns.first().status, QStringLiteral("completed"));
+    QCOMPARE(completedRuns.first().succeededSymbols, 1);
 }
 
 void BatchBacktestTest::cancellationAndBusyGate()

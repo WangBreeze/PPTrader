@@ -159,6 +159,8 @@ class TradingController final : public QObject {
                NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(QString batchBacktestError READ batchBacktestError
                NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(QVariantList batchBacktestRunHistory READ batchBacktestRunHistory
+               NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(QString brokerName READ brokerName CONSTANT)
     Q_PROPERTY(bool brokerLoggedIn READ brokerLoggedIn NOTIFY brokerStateChanged)
     Q_PROPERTY(QString tradingError READ tradingError NOTIFY tradingStateChanged)
@@ -519,6 +521,7 @@ public:
     double batchBacktestProgress() const;
     QString batchBacktestStatusText() const;
     QString batchBacktestError() const;
+    QVariantList batchBacktestRunHistory() const;
     QString brokerName() const;
     bool brokerLoggedIn() const;
     QString tradingError() const;
@@ -748,6 +751,7 @@ public:
         const QString &frequency, int barCount, int maximumSymbols = 5207);
     Q_INVOKABLE void cancelLocalBatchBacktest();
     Q_INVOKABLE QString archiveBatchBacktestItem(const QString &symbol);
+    Q_INVOKABLE QString resumeBatchBacktest(const QString &runId);
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
@@ -952,6 +956,10 @@ private:
     void finishNasSyncRun(bool cancelled = false);
     void persistNasSyncState();
     void clearNasSyncState();
+    qulonglong launchBatchBacktest(const BatchBacktestRequest &request,
+                                   const QString &runId);
+    void reloadBatchBacktestRunHistory();
+    void recoverBatchBacktestRuns();
 
     TickListModel m_tickModel;
     StockSearchModel m_searchModel;
@@ -1081,6 +1089,9 @@ private:
     int m_batchBacktestFailedCount = 0;
     QString m_batchBacktestStatusText = QStringLiteral("未运行");
     QString m_batchBacktestError;
+    QString m_activeBatchBacktestRunId;
+    BatchBacktestRunSummary m_activeBatchBacktestRun;
+    QVariantList m_batchBacktestRunHistory;
     QString m_backtestInstrumentSelectionError;
     QString m_localCandleSeriesSymbol;
     QString m_localCandleSeriesFrequency;

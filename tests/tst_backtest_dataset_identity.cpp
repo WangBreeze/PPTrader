@@ -99,7 +99,7 @@ void BacktestDatasetIdentityTest::emptyDatabaseHasNoIdentity()
     QVERIFY(directory.isValid());
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(directory.filePath(QStringLiteral("empty.db"))));
-    QCOMPARE(store.schemaVersion(), 3);
+    QCOMPARE(store.schemaVersion(), 4);
     QVERIFY(store.loadBacktestDatasetIdentities().isEmpty());
     QVERIFY(!store.loadBacktestDatasetIdentity(instrument(), 60).has_value());
 }
@@ -273,10 +273,10 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(databasePath));
-        QCOMPARE(store.schemaVersion(), 3);
+        QCOMPARE(store.schemaVersion(), 4);
     }
 
-    // 模拟旧 v2 库：降低 user_version 后重新打开，应自动备份并升级到 v3。
+    // 模拟旧 v2 库：降低 user_version 后重新打开，应自动备份并升级到当前版本。
     {
         QSqlDatabase probe = QSqlDatabase::addDatabase(
             QStringLiteral("QSQLITE"), QStringLiteral("identity-migration-probe"));
@@ -290,7 +290,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-    QCOMPARE(store.schemaVersion(), 3);
+        QCOMPARE(store.schemaVersion(), 4);
     QVERIFY(!store.lastMigrationBackupPath().isEmpty());
 
     {
@@ -303,9 +303,17 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
             QVERIFY(history.exec(QStringLiteral(
                 "select count(*) from schema_migration_history where version = 3 "
                 "and migration_name = 'backtest_dataset_identity'")));
-            QVERIFY(history.next());
-            QCOMPARE(history.value(0).toInt(), 1);
-        }
+        QVERIFY(history.next());
+        QCOMPARE(history.value(0).toInt(), 1);
+    }
+    {
+        QSqlQuery history(verify);
+        QVERIFY(history.exec(QStringLiteral(
+            "select count(*) from schema_migration_history where version = 4 "
+            "and migration_name = 'batch_backtest_recovery'")));
+        QVERIFY(history.next());
+        QCOMPARE(history.value(0).toInt(), 1);
+    }
         {
             QSqlQuery columns(verify);
             QVERIFY(columns.exec(QStringLiteral("pragma table_info(backtest_results)")));

@@ -3,6 +3,7 @@
 #include "services/LocalDataStore.h"
 #include "services/CustomStrategyStore.h"
 #include "services/StrategyExecutionStore.h"
+#include "domain/BatchBacktestTypes.h"
 #include "domain/TickDataImportTypes.h"
 #include "domain/RawTradeTypes.h"
 
@@ -86,6 +87,11 @@ public:
     std::optional<TickDataImportRunSummary> loadTickDataImportRun(
         const QString &runId);
     QVector<TickDataBatchPlanItem> loadTickDataImportRunItems(
+        const QString &runId);
+    bool upsertBatchBacktestRun(const BatchBacktestRunSummary &summary);
+    bool upsertBatchBacktestRunItem(const BatchBacktestRunItem &item);
+    QVector<BatchBacktestRunSummary> loadBatchBacktestRuns(int limit = 20);
+    QVector<BatchBacktestRunItem> loadBatchBacktestRunItems(
         const QString &runId);
     bool saveBacktestArchive(const BacktestArchiveRecord &record) override;
     QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() override;

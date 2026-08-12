@@ -21,7 +21,7 @@ namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 3;
+constexpr int kCurrentDatabaseSchemaVersion = 4;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -328,6 +328,20 @@ bool SqliteLocalDataStore::migrateSchema()
             if (!history.exec()) {
                 m_database.rollback();
                 emitSqlError(QStringLiteral("记录全库 v3 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 4) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(4, 'batch_backtest_recovery', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-batch-recovery-v4"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v4 迁移历史"));
                 return false;
             }
         }
@@ -1689,6 +1703,164 @@ QVector<TickDataBatchPlanItem> SqliteLocalDataStore::loadTickDataImportRunItems(
     return result;
 }
 
+bool SqliteLocalDataStore::upsertBatchBacktestRun(
+    const BatchBacktestRunSummary &summary)
+{
+    if (summary.runId.trimmed().isEmpty() || summary.strategyId.trimmed().isEmpty()
+        || summary.frequency.trimmed().isEmpty() || summary.periodSeconds <= 0
+        || summary.barCount < 2 || summary.totalSymbols <= 0) {
+        emit writeFailed(QStringLiteral("批量回测运行摘要不完整，未写入"));
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into batch_backtest_runs(run_id, created_at_utc, completed_at_utc, strategy_id, "
+        "strategy_parameters_json, frequency, period_seconds, bar_count, initial_capital, "
+        "commission_rate, slippage_rate, lot_size, total_symbols, completed_symbols, "
+        "succeeded_symbols, failed_symbols, status, error) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(run_id) do update set completed_at_utc=excluded.completed_at_utc, "
+        "strategy_id=excluded.strategy_id, "
+        "strategy_parameters_json=excluded.strategy_parameters_json, "
+        "frequency=excluded.frequency, period_seconds=excluded.period_seconds, "
+        "bar_count=excluded.bar_count, initial_capital=excluded.initial_capital, "
+        "commission_rate=excluded.commission_rate, slippage_rate=excluded.slippage_rate, "
+        "lot_size=excluded.lot_size, total_symbols=excluded.total_symbols, "
+        "completed_symbols=excluded.completed_symbols, "
+        "succeeded_symbols=excluded.succeeded_symbols, "
+        "failed_symbols=excluded.failed_symbols, status=excluded.status, error=excluded.error"));
+    query.addBindValue(summary.runId);
+    query.addBindValue(summary.createdAt.toUTC().toString(Qt::ISODateWithMs));
+    query.addBindValue(summary.completedAt.isValid()
+        ? summary.completedAt.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""));
+    query.addBindValue(summary.strategyId);
+    query.addBindValue(compactJson(summary.strategyParameters));
+    query.addBindValue(summary.frequency);
+    query.addBindValue(summary.periodSeconds);
+    query.addBindValue(summary.barCount);
+    query.addBindValue(summary.initialCapital);
+    query.addBindValue(summary.commissionRate);
+    query.addBindValue(summary.slippageRate);
+    query.addBindValue(summary.lotSize);
+    query.addBindValue(summary.totalSymbols);
+    query.addBindValue(summary.completedSymbols);
+    query.addBindValue(summary.succeededSymbols);
+    query.addBindValue(summary.failedSymbols);
+    query.addBindValue(summary.status);
+    query.addBindValue(summary.error.isEmpty() ? QStringLiteral("") : summary.error);
+    if (!query.exec()) {
+        emit writeFailed(QStringLiteral("写入批量回测运行摘要失败：%1")
+                             .arg(query.lastError().text()));
+        return false;
+    }
+    return true;
+}
+
+bool SqliteLocalDataStore::upsertBatchBacktestRunItem(
+    const BatchBacktestRunItem &item)
+{
+    if (item.runId.trimmed().isEmpty() || item.instrument.symbol.trimmed().isEmpty()
+        || item.status.trimmed().isEmpty()) {
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into batch_backtest_run_items(run_id, symbol, name, market, venue, status, error, "
+        "data_version, dataset_version) values(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(run_id, symbol) do update set name=excluded.name, market=excluded.market, "
+        "venue=excluded.venue, status=excluded.status, error=excluded.error, "
+        "data_version=excluded.data_version, dataset_version=excluded.dataset_version"));
+    query.addBindValue(item.runId);
+    query.addBindValue(item.instrument.symbol);
+    query.addBindValue(item.instrument.name);
+    query.addBindValue(static_cast<int>(item.instrument.market));
+    query.addBindValue(item.instrument.venue);
+    query.addBindValue(item.status);
+    query.addBindValue(item.error.isEmpty() ? QStringLiteral("") : item.error);
+    query.addBindValue(item.dataVersion.isEmpty() ? QStringLiteral("") : item.dataVersion);
+    query.addBindValue(item.datasetVersion.isEmpty()
+                           ? QStringLiteral("") : item.datasetVersion);
+    if (!query.exec()) {
+        emit writeFailed(QStringLiteral("写入批量回测运行明细失败：%1")
+                             .arg(query.lastError().text()));
+        return false;
+    }
+    return true;
+}
+
+QVector<BatchBacktestRunSummary> SqliteLocalDataStore::loadBatchBacktestRuns(int limit)
+{
+    QVector<BatchBacktestRunSummary> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select run_id, created_at_utc, completed_at_utc, strategy_id, "
+        "strategy_parameters_json, frequency, period_seconds, bar_count, initial_capital, "
+        "commission_rate, slippage_rate, lot_size, total_symbols, completed_symbols, "
+        "succeeded_symbols, failed_symbols, status, error "
+        "from batch_backtest_runs order by created_at_utc desc, run_id desc limit ?"));
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取批量回测运行摘要"));
+        return result;
+    }
+    while (query.next()) {
+        BatchBacktestRunSummary summary;
+        summary.runId = query.value(0).toString();
+        summary.createdAt = QDateTime::fromString(
+            query.value(1).toString(), Qt::ISODateWithMs);
+        summary.completedAt = QDateTime::fromString(
+            query.value(2).toString(), Qt::ISODateWithMs);
+        summary.strategyId = query.value(3).toString();
+        summary.strategyParameters = QJsonDocument::fromJson(
+            query.value(4).toString().toUtf8()).object().toVariantMap();
+        summary.frequency = query.value(5).toString();
+        summary.periodSeconds = query.value(6).toInt();
+        summary.barCount = query.value(7).toInt();
+        summary.initialCapital = query.value(8).toDouble();
+        summary.commissionRate = query.value(9).toDouble();
+        summary.slippageRate = query.value(10).toDouble();
+        summary.lotSize = query.value(11).toInt();
+        summary.totalSymbols = query.value(12).toInt();
+        summary.completedSymbols = query.value(13).toInt();
+        summary.succeededSymbols = query.value(14).toInt();
+        summary.failedSymbols = query.value(15).toInt();
+        summary.status = query.value(16).toString();
+        summary.error = query.value(17).toString();
+        result.append(summary);
+    }
+    return result;
+}
+
+QVector<BatchBacktestRunItem> SqliteLocalDataStore::loadBatchBacktestRunItems(
+    const QString &runId)
+{
+    QVector<BatchBacktestRunItem> result;
+    if (runId.trimmed().isEmpty()) return result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select symbol, name, market, venue, status, error, data_version, dataset_version "
+        "from batch_backtest_run_items where run_id = ? order by symbol asc"));
+    query.addBindValue(runId.trimmed());
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取批量回测运行明细"));
+        return result;
+    }
+    while (query.next()) {
+        BatchBacktestRunItem item;
+        item.runId = runId;
+        item.instrument.symbol = query.value(0).toString();
+        item.instrument.name = query.value(1).toString();
+        item.instrument.market = static_cast<Market>(query.value(2).toInt());
+        item.instrument.venue = query.value(3).toString();
+        item.status = query.value(4).toString();
+        item.error = query.value(5).toString();
+        item.dataVersion = query.value(6).toString();
+        item.datasetVersion = query.value(7).toString();
+        result.append(item);
+    }
+    return result;
+}
+
 bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &record)
 {
     const BacktestConfig &config = record.result.config;
@@ -2700,7 +2872,31 @@ bool SqliteLocalDataStore::ensureSchema()
             "foreign key(run_id) references tickdata_import_runs(run_id) on delete cascade)"),
         QStringLiteral(
             "create index if not exists idx_tickdata_import_run_items_status "
-            "on tickdata_import_run_items(run_id, status, trading_date)")
+            "on tickdata_import_run_items(run_id, status, trading_date)"),
+        QStringLiteral(
+            "create table if not exists batch_backtest_runs("
+            "run_id text primary key, created_at_utc text not null, completed_at_utc text, "
+            "strategy_id text not null, strategy_parameters_json text not null default '', "
+            "frequency text not null, period_seconds integer not null, bar_count integer not null, "
+            "initial_capital real not null, commission_rate real not null, "
+            "slippage_rate real not null, lot_size integer not null, "
+            "total_symbols integer not null, completed_symbols integer not null default 0, "
+            "succeeded_symbols integer not null default 0, "
+            "failed_symbols integer not null default 0, "
+            "status text not null, error text not null default '')"),
+        QStringLiteral(
+            "create index if not exists idx_batch_backtest_runs_created "
+            "on batch_backtest_runs(created_at_utc desc, run_id desc)"),
+        QStringLiteral(
+            "create table if not exists batch_backtest_run_items("
+            "run_id text not null, symbol text not null, name text not null, "
+            "market integer not null, venue text not null, status text not null, "
+            "error text not null default '', data_version text not null default '', "
+            "dataset_version text not null default '', primary key(run_id, symbol), "
+            "foreign key(run_id) references batch_backtest_runs(run_id) on delete cascade)"),
+        QStringLiteral(
+            "create index if not exists idx_batch_backtest_run_items_status "
+            "on batch_backtest_run_items(run_id, status, symbol)")
     };
 
     for (const QString &statement : statements) {

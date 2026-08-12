@@ -192,6 +192,17 @@ TradingController::TradingController(QObject *parent)
             [this](quint64 requestId, const BatchBacktestItemResult &result) {
                 if (requestId != m_batchBacktestRequestId) return;
                 m_batchBacktestModel.addResult(result);
+                if (m_storageReady && !m_activeBatchBacktestRunId.isEmpty()) {
+                    BatchBacktestRunItem item;
+                    item.runId = m_activeBatchBacktestRunId;
+                    item.instrument = result.instrument;
+                    item.status = result.succeeded ? QStringLiteral("succeeded")
+                                                   : QStringLiteral("failed");
+                    item.error = result.error;
+                    item.dataVersion = result.dataVersion;
+                    item.datasetVersion = result.datasetVersion;
+                    m_dataStore.upsertBatchBacktestRunItem(item);
+                }
             });
     connect(&m_batchBacktestService, &BatchBacktestService::itemCompleted, this,
             [this](quint64 requestId, const QString &symbol,
@@ -216,6 +227,12 @@ TradingController::TradingController(QObject *parent)
                 m_batchBacktestRequestedCount = total;
                 m_batchBacktestSucceededCount = succeeded;
                 m_batchBacktestFailedCount = failed;
+                if (m_storageReady && !m_activeBatchBacktestRunId.isEmpty()) {
+                    m_activeBatchBacktestRun.completedSymbols = completed;
+                    m_activeBatchBacktestRun.succeededSymbols = succeeded;
+                    m_activeBatchBacktestRun.failedSymbols = failed;
+                    m_dataStore.upsertBatchBacktestRun(m_activeBatchBacktestRun);
+                }
                 m_batchBacktestStatusText = QStringLiteral("批量回测：%1/%2")
                                                 .arg(completed).arg(total);
                 emit batchBacktestStateChanged();
@@ -232,6 +249,18 @@ TradingController::TradingController(QObject *parent)
                     m_batchBacktestStatusText = QStringLiteral("批量回测完成：成功 %1，失败 %2")
                                                     .arg(m_batchBacktestSucceededCount)
                                                     .arg(m_batchBacktestFailedCount);
+                }
+                if (m_storageReady && !m_activeBatchBacktestRunId.isEmpty()) {
+                    m_activeBatchBacktestRun.completedAt =
+                        QDateTime::currentDateTimeUtc();
+                    m_activeBatchBacktestRun.status = !error.isEmpty()
+                        ? QStringLiteral("failed")
+                        : cancelled ? QStringLiteral("cancelled")
+                                    : QStringLiteral("completed");
+                    m_activeBatchBacktestRun.error = error;
+                    m_dataStore.upsertBatchBacktestRun(m_activeBatchBacktestRun);
+                    m_activeBatchBacktestRunId.clear();
+                    reloadBatchBacktestRunHistory();
                 }
                 emit batchBacktestStateChanged();
             });
@@ -463,6 +492,7 @@ TradingController::TradingController(QObject *parent)
         refreshLocalBacktestDataCatalog();
         refreshBacktestArchiveList();
         reloadTickDataImportRunHistory();
+        recoverBatchBacktestRuns();
         if (!m_tickWriter.start(databasePath)) {
             setStatusText(QStringLiteral("后台 Tick 写入服务启动失败，将使用同步写入"));
         }
@@ -2331,6 +2361,13 @@ qulonglong TradingController::runLocalBatchBacktest(
     request.lotSize = 100;
     request.maximumActiveEngines = 20;
 
+    const QString runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return launchBatchBacktest(request, runId);
+}
+
+qulonglong TradingController::launchBatchBacktest(
+    const BatchBacktestRequest &request, const QString &runId)
+{
     m_batchBacktestModel.clear();
     m_batchRetainedResults.clear();
     m_batchResultOrder.clear();
@@ -2341,12 +2378,44 @@ qulonglong TradingController::runLocalBatchBacktest(
     m_batchBacktestError.clear();
     m_batchBacktestStatusText = QStringLiteral("批量回测准备中：0/%1")
                                     .arg(m_batchBacktestRequestedCount);
+
+    m_activeBatchBacktestRun = {};
+    if (m_storageReady && !runId.isEmpty()) {
+        m_activeBatchBacktestRun.runId = runId;
+        m_activeBatchBacktestRun.createdAt = QDateTime::currentDateTimeUtc();
+        m_activeBatchBacktestRun.strategyId = request.strategyId;
+        m_activeBatchBacktestRun.strategyParameters = request.strategyParameters;
+        m_activeBatchBacktestRun.frequency = request.datasets.isEmpty()
+            ? QString{} : request.datasets.first().frequency();
+        m_activeBatchBacktestRun.periodSeconds = request.datasets.isEmpty()
+            ? 0 : request.datasets.first().periodSeconds;
+        m_activeBatchBacktestRun.barCount = request.barCount;
+        m_activeBatchBacktestRun.initialCapital = request.initialCapital;
+        m_activeBatchBacktestRun.commissionRate = request.commissionRate;
+        m_activeBatchBacktestRun.slippageRate = request.slippageRate;
+        m_activeBatchBacktestRun.lotSize = request.lotSize;
+        m_activeBatchBacktestRun.totalSymbols = request.datasets.size();
+        m_activeBatchBacktestRun.status = QStringLiteral("running");
+        m_dataStore.upsertBatchBacktestRun(m_activeBatchBacktestRun);
+        for (const LocalHistoryDataset &dataset : request.datasets) {
+            BatchBacktestRunItem item;
+            item.runId = runId;
+            item.instrument = dataset.instrument;
+            item.status = QStringLiteral("ready");
+            m_dataStore.upsertBatchBacktestRunItem(item);
+        }
+    }
+    m_activeBatchBacktestRunId = m_activeBatchBacktestRun.runId;
+
     if (!m_batchBacktestService.start(request)) {
         m_batchBacktestError = QStringLiteral("批量回测后台线程未能启动");
         m_batchBacktestStatusText = QStringLiteral("批量回测未启动");
+        m_activeBatchBacktestRunId.clear();
+        m_activeBatchBacktestRun = {};
         emit batchBacktestStateChanged();
         return 0;
     }
+    reloadBatchBacktestRunHistory();
     emit batchBacktestStateChanged();
     return m_batchBacktestRequestId;
 }
@@ -2395,6 +2464,133 @@ QString TradingController::archiveBatchBacktestItem(const QString &symbol)
     m_batchBacktestError = QStringLiteral("归档写入失败：%1").arg(normalized);
     emit batchBacktestStateChanged();
     return {};
+}
+
+QString TradingController::resumeBatchBacktest(const QString &runId)
+{
+    m_batchBacktestError.clear();
+    emit batchBacktestStateChanged();
+    if (!m_storageReady) {
+        m_batchBacktestError = QStringLiteral("本地 SQLite 数据库不可用");
+        emit batchBacktestStateChanged();
+        return {};
+    }
+    if (batchBacktestRunning() || backtestRunning()) {
+        m_batchBacktestError = QStringLiteral("已有单品种或批量回测正在运行");
+        emit batchBacktestStateChanged();
+        return {};
+    }
+
+    const QString normalized = runId.trimmed();
+    const QVector<BatchBacktestRunSummary> runs =
+        m_dataStore.loadBatchBacktestRuns(1000);
+    const BatchBacktestRunSummary *source = nullptr;
+    for (const BatchBacktestRunSummary &run : runs) {
+        if (run.runId == normalized) {
+            source = &run;
+            break;
+        }
+    }
+    if (!source) {
+        m_batchBacktestError = QStringLiteral("未找到批量回测运行：%1")
+                                   .arg(normalized);
+        emit batchBacktestStateChanged();
+        return {};
+    }
+    if (source->status == QStringLiteral("running")) {
+        m_batchBacktestError = QStringLiteral("该批量任务仍未完成，不能恢复");
+        emit batchBacktestStateChanged();
+        return {};
+    }
+
+    QVector<LocalHistoryDataset> datasets;
+    const QVector<BatchBacktestRunItem> items =
+        m_dataStore.loadBatchBacktestRunItems(normalized);
+    for (const BatchBacktestRunItem &item : items) {
+        if (item.status == QStringLiteral("succeeded")) continue;
+        for (const LocalHistoryDataset &candidate
+             : m_workspaceInstrumentSelections.localHistoryCatalog()) {
+            if (candidate.instrument.symbol == item.instrument.symbol
+                && candidate.periodSeconds == source->periodSeconds
+                && candidate.isBacktestEligible()
+                && candidate.candleCount >= source->barCount) {
+                datasets.append(candidate);
+                break;
+            }
+        }
+    }
+    if (datasets.isEmpty()) {
+        m_batchBacktestError = QStringLiteral(
+            "没有可恢复的本地 Tick 派生数据集；请先同步或导入数据");
+        emit batchBacktestStateChanged();
+        return {};
+    }
+
+    ++m_batchBacktestRequestId;
+    if (m_batchBacktestRequestId == 0) ++m_batchBacktestRequestId;
+    BatchBacktestRequest request;
+    request.requestId = m_batchBacktestRequestId;
+    request.datasets = std::move(datasets);
+    request.strategyId = source->strategyId;
+    request.strategyParameters = source->strategyParameters;
+    request.barCount = source->barCount;
+    request.initialCapital = source->initialCapital;
+    request.commissionRate = source->commissionRate;
+    request.slippageRate = source->slippageRate;
+    request.lotSize = source->lotSize;
+    request.maximumActiveEngines = 20;
+
+    const QString newRunId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (launchBatchBacktest(request, newRunId) == 0) return {};
+    return newRunId;
+}
+
+void TradingController::reloadBatchBacktestRunHistory()
+{
+    m_batchBacktestRunHistory.clear();
+    if (!m_storageReady) return;
+    const QVector<BatchBacktestRunSummary> runs =
+        m_dataStore.loadBatchBacktestRuns(20);
+    m_batchBacktestRunHistory.reserve(runs.size());
+    for (const BatchBacktestRunSummary &run : runs) {
+        m_batchBacktestRunHistory.append(run.toVariantMap());
+    }
+}
+
+void TradingController::recoverBatchBacktestRuns()
+{
+    if (!m_storageReady) return;
+    const QVector<BatchBacktestRunSummary> runs =
+        m_dataStore.loadBatchBacktestRuns(1000);
+    bool changed = false;
+    for (const BatchBacktestRunSummary &run : runs) {
+        if (run.status != QStringLiteral("running")) continue;
+        const QVector<BatchBacktestRunItem> items =
+            m_dataStore.loadBatchBacktestRunItems(run.runId);
+        for (const BatchBacktestRunItem &item : items) {
+            if (item.status != QStringLiteral("ready")
+                && item.status != QStringLiteral("running")) {
+                continue;
+            }
+            BatchBacktestRunItem updated = item;
+            updated.status = QStringLiteral("cancelled");
+            updated.error = QStringLiteral("应用启动恢复时终止未完成批量任务");
+            m_dataStore.upsertBatchBacktestRunItem(updated);
+            changed = true;
+        }
+        BatchBacktestRunSummary updatedRun = run;
+        updatedRun.completedAt = QDateTime::currentDateTimeUtc();
+        updatedRun.status = QStringLiteral("cancelled");
+        updatedRun.error = QStringLiteral("应用启动恢复时终止未完成批量任务");
+        m_dataStore.upsertBatchBacktestRun(updatedRun);
+        changed = true;
+    }
+    if (changed) reloadBatchBacktestRunHistory();
+}
+
+QVariantList TradingController::batchBacktestRunHistory() const
+{
+    return m_batchBacktestRunHistory;
 }
 
 void TradingController::clearBacktestResult()

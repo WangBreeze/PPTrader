@@ -30,4 +30,26 @@ QVariantMap BatchBacktestItemResult::toVariantMap() const
             {QStringLiteral("elapsedMilliseconds"), elapsedMilliseconds}};
 }
 
+QVariantMap BatchBacktestRunSummary::toVariantMap() const
+{
+    return {{QStringLiteral("runId"), runId},
+            {QStringLiteral("createdAt"), createdAt},
+            {QStringLiteral("completedAt"), completedAt},
+            {QStringLiteral("strategyId"), strategyId},
+            {QStringLiteral("strategyParameters"), strategyParameters},
+            {QStringLiteral("frequency"), frequency},
+            {QStringLiteral("periodSeconds"), periodSeconds},
+            {QStringLiteral("barCount"), barCount},
+            {QStringLiteral("initialCapital"), initialCapital},
+            {QStringLiteral("commissionRate"), commissionRate},
+            {QStringLiteral("slippageRate"), slippageRate},
+            {QStringLiteral("lotSize"), lotSize},
+            {QStringLiteral("totalSymbols"), totalSymbols},
+            {QStringLiteral("completedSymbols"), completedSymbols},
+            {QStringLiteral("succeededSymbols"), succeededSymbols},
+            {QStringLiteral("failedSymbols"), failedSymbols},
+            {QStringLiteral("status"), status},
+            {QStringLiteral("error"), error}};
+}
+
 } // namespace pp
