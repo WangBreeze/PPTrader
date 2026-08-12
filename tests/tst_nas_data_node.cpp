@@ -180,6 +180,15 @@ protected:
             } else if (firstLine.contains("/v1/health")) {
                 socket->write(httpResponse(
                     200, "application/json", "{\"status\":\"ok\",\"version\":\"test-v1\"}"));
+            } else if (firstLine.contains("/v1/changes")) {
+                const QByteArray body = QByteArray(
+                    "{\"schemaVersion\":1,\"totalDirectories\":3,"
+                    "\"latestDirectoryAt\":1750000000000,"
+                    "\"changedDirectories\":["
+                    "{\"tradingDate\":\"20260807\",\"modifiedAt\":1750000000000},"
+                    "{\"tradingDate\":\"20260808\",\"modifiedAt\":1750100000000}]}");
+                socket->write(httpResponse(200, "application/json", body));
+                socket->disconnectFromHost();
             } else {
                 socket->write(httpResponse(404, "application/json", "{}"));
             }
@@ -200,6 +209,7 @@ private slots:
     void controlledManifestRequestAndQueue();
     void resumeDownloadAfterInterruption();
     void tokenRotationHotReloadAndRetry();
+    void nasChangesSummaryParsed();
     void multiDayQueueFailureResumeAndCancellation();
     void persistedQueueRecoveryAndCacheRetention();
 };
@@ -421,6 +431,32 @@ void NasDataNodeTest::tokenRotationHotReloadAndRetry()
     QTRY_COMPARE_WITH_TIMEOUT(healthSpy.count(), 1, 5000);
     QVERIFY(healthSpy.takeFirst().at(1).toBool());
     QCOMPARE(server.lastAuthorization, QByteArray("Bearer gamma"));
+}
+
+void NasDataNodeTest::nasChangesSummaryParsed()
+{
+    FakeNasServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    NasDataNodeClient client;
+    QString error;
+    QVERIFY(client.setEndpoint(QUrl(QStringLiteral("http://127.0.0.1:%1/")
+                                        .arg(server.serverPort())), &error));
+
+    QSignalSpy changesSpy(&client, &NasDataNodeClient::changesReady);
+    QVERIFY(client.requestChanges(7, 1700000000000LL));
+    QTRY_COMPARE_WITH_TIMEOUT(changesSpy.count(), 1, 5000);
+    const NasChangesResult result =
+        qvariant_cast<NasChangesResult>(changesSpy.takeFirst().at(1));
+    QVERIFY2(result.succeeded, qPrintable(result.error));
+    QCOMPARE(result.schemaVersion, 1);
+    QCOMPARE(result.totalDirectories, 3);
+    QCOMPARE(result.latestDirectoryAt, 1750000000000LL);
+    QCOMPARE(result.changedDates.size(), 2);
+    QCOMPARE(result.changedDates.at(0), QStringLiteral("20260807"));
+    QCOMPARE(result.changedDates.at(1), QStringLiteral("20260808"));
+    QCOMPARE(result.changedAt.at(1), 1750100000000LL);
+    QCOMPARE(result.toVariantMap().value(
+                 QStringLiteral("totalDirectories")).toInt(), 3);
 }
 
 void NasDataNodeTest::multiDayQueueFailureResumeAndCancellation()

@@ -411,6 +411,7 @@ class TradingController final : public QObject {
     Q_PROPERTY(QVariantMap nasDataNodeSyncSummary READ nasDataNodeSyncSummary NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(QVariantMap nasDataNodeManifestSummary READ nasDataNodeManifestSummary NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(QVariantMap nasDataNodeCacheSummary READ nasDataNodeCacheSummary NOTIFY nasDataNodeStateChanged)
+    Q_PROPERTY(QVariantMap nasNodeChangesSummary READ nasNodeChangesSummary NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(bool nasDataNodePlanRecovered READ nasDataNodePlanRecovered NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(double nasDataNodeSyncProgress READ nasDataNodeSyncProgress NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(QString nasDataNodeSyncCurrentSymbol READ nasDataNodeSyncCurrentSymbol NOTIFY nasDataNodeStateChanged)
@@ -688,6 +689,7 @@ public:
     QVariantMap nasDataNodeSyncSummary() const;
     QVariantMap nasDataNodeManifestSummary() const;
     QVariantMap nasDataNodeCacheSummary() const;
+    QVariantMap nasNodeChangesSummary() const;
     bool nasDataNodePlanRecovered() const;
     double nasDataNodeSyncProgress() const;
     QString nasDataNodeSyncCurrentSymbol() const;
@@ -865,6 +867,7 @@ public:
     Q_INVOKABLE bool reloadAShareUniverse();
     Q_INVOKABLE bool relocateStorage(const QString &pathOrUrl);
     Q_INVOKABLE bool configureNasDataNode(const QString &endpoint);
+    Q_INVOKABLE qulonglong requestNasNodeChanges();
     Q_INVOKABLE qulonglong requestNasTickCatalog(
         const QString &symbol, const QString &startDate, const QString &endDate);
     Q_INVOKABLE qulonglong requestNasTickManifest(
@@ -1089,6 +1092,7 @@ private:
     NasTickCacheManager m_nasTickCacheManager;
     NasTickSyncQueue m_nasSyncQueue;
     QVariantMap m_nasDataNodeCacheSummary;
+    QVariantMap m_nasNodeChangesSummary;
     bool m_nasDataNodePlanRecovered = false;
     QString m_nasDataNodeEndpoint;
     QString m_nasDataNodeStatusText = QStringLiteral("NAS 数据节点尚未配置");

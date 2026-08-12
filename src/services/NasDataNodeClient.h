@@ -35,6 +35,7 @@ public:
                         const QDate &startDate, const QDate &endDate);
     bool requestManifest(quint64 requestId, const QStringList &symbols,
                          const QDate &startDate, const QDate &endDate);
+    bool requestChanges(quint64 requestId, qint64 sinceMilliseconds = 0);
     bool downloadTickFile(quint64 requestId, const NasCatalogEntry &entry,
                           const QString &localRoot);
     void cancel(quint64 requestId);
@@ -43,6 +44,7 @@ signals:
     void healthReady(quint64 requestId, bool succeeded,
                      const QString &version, const QString &error);
     void catalogReady(quint64 requestId, const pp::NasCatalogResult &result);
+    void changesReady(quint64 requestId, const pp::NasChangesResult &result);
     void downloadProgress(quint64 requestId, qint64 receivedBytes, qint64 totalBytes);
     void downloadReady(quint64 requestId, const pp::NasDownloadResult &result);
 
@@ -54,6 +56,7 @@ private:
                            const std::function<void()> &resend);
     void finishCatalog(quint64 requestId, QNetworkReply *reply,
                        int requestedSymbols, int maximumPayloadBytes);
+    void finishChanges(quint64 requestId, QNetworkReply *reply);
     void finishHealth(quint64 requestId, QNetworkReply *reply);
     void finishDownload(quint64 requestId, QNetworkReply *reply,
                         const std::shared_ptr<DownloadState> &state);

@@ -23,6 +23,8 @@
 
 ## 本次完成
 
+- 完成 H4.3 节点变更摘要与显式轮询：节点新增 `GET /v1/changes?since=<毫秒>`（只扫描根目录下一层日期目录 mtime，不递归、不下载、不触发回测），返回目录总数、最新时间与变更目录；客户端 `requestChanges`（含 401 重试）与控制器 `requestNasNodeChanges()`，NAS 面板新增"检查节点更新"按钮与变更展示。Python 真实服务验证 since 前后语义，`tst_nas_data_node` 新增 changes 解析用例（10/10）。Parquet/Zstd 压缩传输评估已写入 `nas-data-node-protocol.md`（预计冷缓存传输 8.6s→2-3s，解析仍为瓶颈，列为后续项）。
+
 - 完成 H4.2 NAS Token 轮换：客户端支持 `PPTRADER_NAS_TOKEN_FILE` 热重载（每次请求前按 mtime 重读，环境 Token 兼容兜底）与 401 自动重试一次；节点端 `PPTRADER_NAS_TOKEN_FILE` 每行一个 Token、鉴权前重建集合（撤销的旧 Token 立即失效，环境 Token 始终有效）。`tst_nas_data_node` 新增热重载与 401 自愈用例（9/9），Python 节点脚本 Token 重建逻辑验证通过。
 
 - 完成 H4.1b NAS 下载 Range 断点续传：客户端改为写 `.part` 暂存文件，中断/网络失败保留部分字节，重试时携带 `Range: bytes=N-` 续传（服务器不支持时自动从头并清理）；完成后按 catalog 大小与 SHA-256 整体校验并原子改名提交，缓存命中语义不变。FakeNasServer 支持 206/Content-Range 与中断模拟，`tst_nas_data_node` 新增中断→续传→完整校验用例（8/8 通过）。

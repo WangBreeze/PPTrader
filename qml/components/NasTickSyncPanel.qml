@@ -234,6 +234,15 @@ Item {
         RowLayout {
             Layout.fillWidth: true; spacing: 8
             PpButton {
+                theme: root.theme; text: root.controller.nasDataNodeLoading ? "检查中" : "检查节点更新"
+                visualWidth: 108
+                available: !root.controller.nasDataNodeLoading
+                           && !root.controller.nasDataNodeSyncRunning
+                           && root.controller.nasDataNodeEndpoint.length > 0
+                toolTip: "只读取 NAS 日期目录层变更摘要；不下载、不自动同步"
+                onClicked: root.controller.requestNasNodeChanges()
+            }
+            PpButton {
                 theme: root.theme; text: "刷新缓存统计"; visualWidth: 96
                 available: !root.controller.nasDataNodeSyncRunning
                 toolTip: "只扫描应用 NAS 暂存目录的日期/代码 CSV，不访问网络"
@@ -248,11 +257,24 @@ Item {
             }
             Text {
                 Layout.fillWidth: true
-                text: "暂存 " + (root.controller.nasDataNodeCacheSummary.files || 0)
+                text: {
+                    const changes = root.controller.nasNodeChangesSummary
+                    const changeText = changes && changes.totalDirectories
+                        ? " · 节点 " + changes.totalDirectories + " 目录"
+                          + (changes.changedDates && changes.changedDates.length > 0
+                             ? " · 变更 " + changes.changedDates.length
+                               + "（最近 "
+                               + Qt.formatDateTime(
+                                     new Date(changes.latestDirectoryAt), "MM-dd HH:mm")
+                               + "）" : " · 无新变更")
+                        : ""
+                    return "暂存 " + (root.controller.nasDataNodeCacheSummary.files || 0)
                       + " 文件 · " + (root.controller.nasDataNodeCacheSummary.bytes || 0)
                       + " bytes · 本轮 SHA 复用 "
                       + (root.controller.nasDataNodeSyncSummary.cacheHits || 0)
                       + (root.controller.nasDataNodePlanRecovered ? " · 已恢复上次计划" : "")
+                      + changeText
+                }
                 color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9
                 elide: Text.ElideRight
                 Accessible.name: "NAS 暂存缓存与恢复状态"

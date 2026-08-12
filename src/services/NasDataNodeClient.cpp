@@ -131,6 +131,7 @@ NasDataNodeClient::NasDataNodeClient(QObject *parent)
 {
     qRegisterMetaType<NasCatalogResult>();
     qRegisterMetaType<NasDownloadResult>();
+    qRegisterMetaType<NasChangesResult>();
 }
 
 bool NasDataNodeClient::validateEndpoint(const QUrl &endpoint, QString *error)
@@ -289,6 +290,28 @@ bool NasDataNodeClient::requestManifest(quint64 requestId,
     return true;
 }
 
+bool NasDataNodeClient::requestChanges(quint64 requestId,
+                                       qint64 sinceMilliseconds)
+{
+    if (requestId == 0 || m_endpoint.isEmpty()
+        || m_replies.contains(requestId)) return false;
+    QUrl url = resolve(QStringLiteral("v1/changes"));
+    if (sinceMilliseconds > 0) {
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("since"),
+                           QString::number(sinceMilliseconds));
+        url.setQuery(query);
+    }
+    QNetworkReply *reply = m_network.get(requestFor(url));
+    m_replies.insert(requestId, reply);
+    m_resenders.insert(requestId, [this, requestId, sinceMilliseconds]() {
+        requestChanges(requestId, sinceMilliseconds);
+    });
+    connect(reply, &QNetworkReply::finished, this,
+            [this, requestId, reply]() { finishChanges(requestId, reply); });
+    return true;
+}
+
 bool NasDataNodeClient::downloadTickFile(quint64 requestId,
                                          const NasCatalogEntry &entry,
                                          const QString &localRoot)
@@ -409,6 +432,48 @@ void NasDataNodeClient::finishCatalog(quint64 requestId, QNetworkReply *reply,
         result = parseCatalogPayload(payload, requestedSymbols, maximumPayloadBytes);
     }
     emit catalogReady(requestId, result);
+    reply->deleteLater();
+}
+
+void NasDataNodeClient::finishChanges(quint64 requestId, QNetworkReply *reply)
+{
+    const auto resender = m_resenders.value(requestId);
+    if (resender && retryUnauthorized(requestId, reply, resender)) return;
+    m_resenders.remove(requestId);
+    m_replies.remove(requestId);
+    NasChangesResult result;
+    const QByteArray payload = reply->readAll();
+    if (reply->error() != QNetworkReply::NoError) {
+        result.error = reply->errorString();
+    } else {
+        const QJsonDocument document = QJsonDocument::fromJson(payload);
+        if (!document.isObject()) {
+            result.error = QStringLiteral("NAS changes JSON 无效");
+        } else {
+            const QJsonObject root = document.object();
+            result.schemaVersion =
+                root.value(QStringLiteral("schemaVersion")).toInt();
+            result.totalDirectories =
+                root.value(QStringLiteral("totalDirectories")).toInt();
+            result.latestDirectoryAt =
+                root.value(QStringLiteral("latestDirectoryAt"))
+                    .toVariant().toLongLong();
+            for (const QJsonValue &value :
+                 root.value(QStringLiteral("changedDirectories")).toArray()) {
+                const QJsonObject object = value.toObject();
+                result.changedDates.append(
+                    object.value(QStringLiteral("tradingDate")).toString());
+                result.changedAt.append(
+                    object.value(QStringLiteral("modifiedAt"))
+                        .toVariant().toLongLong());
+            }
+            result.succeeded = result.schemaVersion == 1;
+            if (!result.succeeded) {
+                result.error = QStringLiteral("NAS changes schema 版本不受支持");
+            }
+        }
+    }
+    emit changesReady(requestId, result);
     reply->deleteLater();
 }
 

@@ -2,6 +2,23 @@
 
 namespace pp {
 
+QVariantMap NasChangesResult::toVariantMap() const
+{
+    QVariantList changedAtList;
+    for (qint64 value : changedAt) changedAtList.append(value);
+    return {{QStringLiteral("succeeded"), succeeded},
+            {QStringLiteral("schemaVersion"), schemaVersion},
+            {QStringLiteral("totalDirectories"), totalDirectories},
+            {QStringLiteral("latestDirectoryAt"), latestDirectoryAt},
+            {QStringLiteral("changedDates"), changedDates},
+            {QStringLiteral("changedAt"), changedAtList},
+            {QStringLiteral("error"), error}};
+}
+
+} // namespace pp
+
+namespace pp {
+
 QVariantMap NasCatalogEntry::toVariantMap() const
 {
     return {{QStringLiteral("symbol"), symbol},

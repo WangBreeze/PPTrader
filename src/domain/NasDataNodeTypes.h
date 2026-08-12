@@ -40,6 +40,18 @@ struct NasDownloadResult {
     QString error;
 };
 
+struct NasChangesResult {
+    bool succeeded = false;
+    int schemaVersion = 0;
+    int totalDirectories = 0;
+    qint64 latestDirectoryAt = 0;
+    QStringList changedDates;
+    QVector<qint64> changedAt;
+    QString error;
+
+    QVariantMap toVariantMap() const;
+};
+
 enum class NasSyncItemStatus {
     Ready = 0,
     Downloading,
@@ -90,3 +102,4 @@ struct NasSyncSummary {
 
 Q_DECLARE_METATYPE(pp::NasCatalogResult)
 Q_DECLARE_METATYPE(pp::NasDownloadResult)
+Q_DECLARE_METATYPE(pp::NasChangesResult)

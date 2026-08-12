@@ -27,6 +27,14 @@ catalog 的 `schemaVersion` 当前为 `1`。每个条目包含 `symbol`、`tradi
 - 节点端：`PPTRADER_NAS_TOKEN` 环境 Token 始终有效；新增 `PPTRADER_NAS_TOKEN_FILE`，文件每行一个有效 Token，**每次鉴权前重建集合**（文件更新后旧 Token 立即失效，环境 Token 保留）。运维可在重叠期把新旧 Token 同时写入文件，再移除旧 Token，实现不停机轮换。
 - Token 文件路径只来自运行环境，文件内容、路径与轮换状态不写入 SQLite、日志或文档。
 
+### 变更摘要（H4.3）
+
+`GET /v1/changes?since=<epoch 毫秒>`：只扫描根目录下一层日期目录的修改时间，不递归文件，不下载、不触发回测。返回 `schemaVersion`、`totalDirectories`、`latestDirectoryAt` 与 `changedDirectories`（按日期升序）。客户端 `requestNasNodeChanges()` 显式轮询，QML"检查节点更新"按钮展示目录总数、最近时间与变更数量；它只提示变化，不自动同步。
+
+### 压缩传输评估（Parquet/Zstd，后续项）
+
+当前瓶颈是解析与写库，传输占比约 20%（热缓存约 9%）。Zstd 压缩 CSV 方案预计把冷缓存传输段从 8.6 s 降至 2–3 s，但解析 21.6 s 不变，100 档端到端预计 43 s → 30–35 s。需要新增 `zstandard` Python 依赖与节点端预压缩/客户端解压桥；若引入二进制批量解析（pyarrow），解析段可进一步下降，但改动面更大。建议在并发下载与断点续传稳定后按需实施。
+
 ## systemd 用户服务部署
 
 仓库提供 `deploy/systemd/pptrader-nas-node.service` 通用模板。虚拟机基线已经把节点脚本安装到用户本地目录，并启用该用户服务；节点只监听 `127.0.0.1`，实际仓库根目录和端口仅写入目标机的 `%h/.config/pptrader/nas-node.env`，不进入源码或文档。`loginctl enable-linger` 已用于保证没有交互登录时用户服务仍可恢复。

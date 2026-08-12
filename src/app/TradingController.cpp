@@ -426,6 +426,22 @@ TradingController::TradingController(QObject *parent)
                     : QStringLiteral("NAS catalog 查询失败");
                 emit nasDataNodeStateChanged();
             });
+    connect(&m_nasDataNodeClient, &NasDataNodeClient::changesReady,
+            this, [this](quint64 requestId, const NasChangesResult &result) {
+                if (requestId != m_nasDataNodeRequestVersion) return;
+                m_nasDataNodeLoading = false;
+                m_nasNodeChangesSummary = result.toVariantMap();
+                m_nasDataNodeStatusText = result.succeeded
+                    ? QStringLiteral("节点变更检查完成：%1 个目录 · 变更 %2 · 最近 %3")
+                          .arg(result.totalDirectories)
+                          .arg(result.changedDates.size())
+                          .arg(QDateTime::fromMSecsSinceEpoch(
+                                   result.latestDirectoryAt)
+                                   .toString(Qt::ISODate))
+                    : QStringLiteral("节点变更检查失败");
+                m_nasDataNodeError = result.error;
+                emit nasDataNodeStateChanged();
+            });
     connect(&m_nasDataNodeClient, &NasDataNodeClient::downloadProgress,
             this, [this](quint64 requestId, qint64 received, qint64 total) {
                 if (!m_nasDownloadIndexByRequestId.contains(requestId)) return;
@@ -1183,6 +1199,11 @@ QVariantMap TradingController::nasDataNodeCacheSummary() const
 {
     return m_nasDataNodeCacheSummary;
 }
+
+QVariantMap TradingController::nasNodeChangesSummary() const
+{
+    return m_nasNodeChangesSummary;
+}
 bool TradingController::nasDataNodePlanRecovered() const
 {
     return m_nasDataNodePlanRecovered;
@@ -1253,6 +1274,35 @@ bool TradingController::configureNasDataNode(const QString &endpoint)
     m_nasDataNodeStatusText = QStringLiteral("NAS 数据节点已配置；尚未请求网络");
     emit nasDataNodeStateChanged();
     return true;
+}
+
+qulonglong TradingController::requestNasNodeChanges()
+{
+    if (m_nasDataNodeEndpoint.isEmpty()) {
+        m_nasDataNodeError = QStringLiteral("尚未配置 NAS 数据节点");
+        emit nasDataNodeStateChanged();
+        return 0;
+    }
+    if (m_nasDataNodeLoading || m_nasDataNodeSyncRunning) {
+        m_nasDataNodeError = QStringLiteral("请先等待 NAS 查询结束或取消同步任务");
+        emit nasDataNodeStateChanged();
+        return 0;
+    }
+    ++m_nasDataNodeRequestVersion;
+    if (m_nasDataNodeRequestVersion == 0) ++m_nasDataNodeRequestVersion;
+    m_nasDataNodeLoading = true;
+    m_nasDataNodeError.clear();
+    m_nasDataNodeStatusText = QStringLiteral("正在检查 NAS 节点变更…");
+    m_nasNodeChangesSummary.clear();
+    if (!m_nasDataNodeClient.requestChanges(m_nasDataNodeRequestVersion)) {
+        m_nasDataNodeLoading = false;
+        m_nasDataNodeError = QStringLiteral("NAS 变更检查请求未能启动");
+        m_nasDataNodeStatusText = QStringLiteral("NAS 变更检查失败");
+        emit nasDataNodeStateChanged();
+        return 0;
+    }
+    emit nasDataNodeStateChanged();
+    return m_nasDataNodeRequestVersion;
 }
 
 qulonglong TradingController::requestNasTickCatalog(

@@ -108,6 +108,44 @@ class TickDataNode:
         entries.sort(key=lambda item: str(item["tradingDate"]))
         return entries
 
+    def changes(self, since: str = "") -> dict[str, object]:
+        """变更摘要：只扫描根目录下一层日期目录的修改时间，不递归文件。
+        since 为 epoch 毫秒；返回目录总数、最新目录时间与变更目录列表。
+        仅用于提示 catalog 变化，不触发下载或回测。"""
+        since_ms = 0
+        if since:
+            try:
+                since_ms = int(since)
+            except ValueError:
+                return {
+                    "schemaVersion": 1,
+                    "error": "since must be epoch milliseconds",
+                }
+        changed: list[dict[str, object]] = []
+        latest = 0
+        total = 0
+        for child in self.root.iterdir():
+            if not child.is_dir() or not DATE_RE.fullmatch(child.name):
+                continue
+            total += 1
+            try:
+                modified_ms = int(child.stat().st_mtime * 1000)
+            except OSError:
+                continue
+            if modified_ms > since_ms:
+                changed.append({
+                    "tradingDate": child.name,
+                    "modifiedAt": modified_ms,
+                })
+            latest = max(latest, modified_ms)
+        changed.sort(key=lambda item: str(item["tradingDate"]))
+        return {
+            "schemaVersion": 1,
+            "totalDirectories": total,
+            "latestDirectoryAt": latest,
+            "changedDirectories": changed,
+        }
+
     def manifest(self, symbols: list[str], start: str, end: str) -> list[dict[str, object]]:
         if not symbols or len(symbols) > MAX_MANIFEST_SYMBOLS:
             raise ValueError("invalid_symbol_count")
@@ -190,6 +228,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.authorized():
             self.json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
+        if parsed.path == "/v1/changes":
+            since = parse_qs(parsed.query).get("since", [""])[0]
+            self.json_response(HTTPStatus.OK, self.node.changes(since))
             return
         if parsed.path == "/v1/catalog":
             query = parse_qs(parsed.query)
