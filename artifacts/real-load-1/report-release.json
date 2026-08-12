@@ -1,0 +1,72 @@
+{
+    "archive": {
+        "elapsedMilliseconds": 1,
+        "resultId": "c0440e3a-e83b-4480-b307-01854c5aeb63"
+    },
+    "backtest": {
+        "completed": 1,
+        "dataVersion": "sha256:06433d97173e129c08c2198ee3968302fd304eeeb5a2206af911fbd842e29d8e",
+        "datasetVersion": "sha256:23fe962fb25efe8637e6e7fc71072087df6bdef8a0cc9d53ec3a7d5491819103",
+        "elapsedMilliseconds": 25,
+        "errors": [
+        ],
+        "failed": 0,
+        "requested": 1,
+        "succeeded": 1
+    },
+    "bars": 200,
+    "barsWritten": 716,
+    "databaseBytes": 3555328,
+    "databasePath": "C:/Users/NINGMEI/AppData/Local/Temp/pptrader_real_load_probe-LGMiyD/real-load.db",
+    "date": "2026-08-12",
+    "failedFiles": 0,
+    "identity": {
+        "datasetVersion": "sha256:23fe962fb25efe8637e6e7fc71072087df6bdef8a0cc9d53ec3a7d5491819103",
+        "dayCount": 3,
+        "derivedBarCount": 716,
+        "rawTickCount": 12464,
+        "staleDayCount": 0
+    },
+    "loadElapsedMilliseconds": 983,
+    "perFile": [
+        {
+            "bars": 238,
+            "candleDatabaseMilliseconds": 2,
+            "linesRead": 4423,
+            "parseMilliseconds": 356,
+            "rawDatabaseMilliseconds": 33,
+            "skippedRecords": 12,
+            "symbol": "600519",
+            "tradingDate": "2026-08-05",
+            "validRecords": 4411
+        },
+        {
+            "bars": 239,
+            "candleDatabaseMilliseconds": 2,
+            "linesRead": 4000,
+            "parseMilliseconds": 302,
+            "rawDatabaseMilliseconds": 30,
+            "skippedRecords": 11,
+            "symbol": "600519",
+            "tradingDate": "2026-08-06",
+            "validRecords": 3989
+        },
+        {
+            "bars": 239,
+            "candleDatabaseMilliseconds": 2,
+            "linesRead": 4069,
+            "parseMilliseconds": 310,
+            "rawDatabaseMilliseconds": 31,
+            "skippedRecords": 4,
+            "symbol": "600519",
+            "tradingDate": "2026-08-07",
+            "validRecords": 4064
+        }
+    ],
+    "schemaInitMilliseconds": 73,
+    "stagingRoot": "C:\\Users\\NINGMEI\\AppData\\Local\\PPTrader\\PPTrader\\cache\\nas-tick-staging",
+    "symbols": [
+        "600519"
+    ],
+    "ticksWritten": 12464
+}

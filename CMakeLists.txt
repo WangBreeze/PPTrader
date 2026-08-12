@@ -502,6 +502,59 @@ if(BUILD_TESTING)
     target_link_libraries(pptrader_nas_sync_capacity PRIVATE
         Qt6::Core Qt6::Network Qt6::Sql)
 
+    qt_add_executable(pptrader_real_load_probe
+        tools/real_load_backtest_probe.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/BatchBacktestTypes.cpp
+        src/domain/BatchBacktestTypes.h
+        src/domain/CrossSectionalTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/LocalHistoryTypes.cpp
+        src/domain/LocalHistoryTypes.h
+        src/domain/MarketTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
+        src/services/BacktestEngine.cpp
+        src/services/BacktestEngine.h
+        src/services/BatchBacktestService.cpp
+        src/services/BatchBacktestService.h
+        src/services/CustomStrategyStore.h
+        src/services/IndicatorEngine.cpp
+        src/services/IndicatorEngine.h
+        src/services/LocalDataStore.h
+        src/services/RawTickCandleAggregator.cpp
+        src/services/RawTickCandleAggregator.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
+        src/services/TickDataCsvImporter.cpp
+        src/services/TickDataCsvImporter.h
+        src/strategy/BacktestStrategy.cpp
+        src/strategy/BacktestStrategy.h
+        src/strategy/BacktestStrategyRegistry.cpp
+        src/strategy/BacktestStrategyRegistry.h
+        src/strategy/BollingerMeanReversionStrategy.cpp
+        src/strategy/BollingerMeanReversionStrategy.h
+        src/strategy/MacdTrendStrategy.cpp
+        src/strategy/MacdTrendStrategy.h
+        src/strategy/RsiMeanReversionStrategy.cpp
+        src/strategy/RsiMeanReversionStrategy.h
+        src/strategy/SmaCrossoverStrategy.cpp
+        src/strategy/SmaCrossoverStrategy.h
+        src/strategy/Strategy.h
+    )
+    target_include_directories(pptrader_real_load_probe PRIVATE src)
+    target_link_libraries(pptrader_real_load_probe PRIVATE Qt6::Core Qt6::Sql)
+
     qt_add_executable(tst_trading_account
         tests/tst_trading_account.cpp
         src/domain/MarketTypes.h
