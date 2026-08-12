@@ -22,3 +22,4 @@ artifacts/**/*.db
 artifacts/**/*.db-wal
 artifacts/**/*.db-shm
 artifacts/**/staging/
+artifacts/**/*.bak

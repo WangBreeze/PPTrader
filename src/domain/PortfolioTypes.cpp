@@ -10,6 +10,10 @@ bool PortfolioDefinition::isValid(QString *error) const
         if (error) *error = QStringLiteral("组合 ID 与腿列表不能为空");
         return false;
     }
+    if (periodSeconds <= 0 || periodSeconds > 86400) {
+        if (error) *error = QStringLiteral("组合周期必须在 1–86400 秒之间");
+        return false;
+    }
     if (initialCapital <= 0.0 || commissionRate < 0.0 || commissionRate > 0.1
         || slippageRate < 0.0 || slippageRate > 0.1 || lotSize <= 0
         || rebalanceEveryTradingDays < 1 || maximumLegWeight <= 0.0
@@ -45,6 +49,7 @@ QVariantMap PortfolioDefinition::toVariantMap() const
     return {{QStringLiteral("portfolioId"), portfolioId},
             {QStringLiteral("name"), name},
             {QStringLiteral("legs"), legList},
+            {QStringLiteral("periodSeconds"), periodSeconds},
             {QStringLiteral("rebalanceEveryTradingDays"),
              rebalanceEveryTradingDays},
             {QStringLiteral("initialCapital"), initialCapital},
@@ -62,6 +67,26 @@ QVector<Instrument> PortfolioDefinition::instruments() const
     result.reserve(legs.size());
     for (const PortfolioLeg &leg : legs) result.append(leg.instrument);
     return result;
+}
+
+QVariantMap PortfolioArchiveSummary::toVariantMap() const
+{
+    return {{QStringLiteral("resultId"), resultId},
+            {QStringLiteral("portfolioId"), portfolioId},
+            {QStringLiteral("name"), name},
+            {QStringLiteral("completedAt"), completedAt},
+            {QStringLiteral("symbols"), symbols},
+            {QStringLiteral("legCount"), legCount},
+            {QStringLiteral("periodSeconds"), periodSeconds},
+            {QStringLiteral("barCount"), barCount},
+            {QStringLiteral("datasetVersions"), datasetVersions},
+            {QStringLiteral("initialCapital"), summary.initialCapital},
+            {QStringLiteral("finalEquity"), summary.finalEquity},
+            {QStringLiteral("totalReturnPercent"), summary.totalReturnPercent},
+            {QStringLiteral("maxDrawdownPercent"), summary.maxDrawdownPercent},
+            {QStringLiteral("sharpeRatio"), summary.sharpeRatio},
+            {QStringLiteral("totalCommission"), summary.totalCommission},
+            {QStringLiteral("totalTrades"), summary.totalTrades}};
 }
 
 } // namespace pp

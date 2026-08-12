@@ -146,6 +146,7 @@ PortfolioResult PortfolioBacktestEngine::run(
         if (error) *error = QStringLiteral("组合腿没有共同交易日");
         return result;
     }
+    result.periodSeconds = periodSeconds;
 
     double cash = definition.initialCapital;
     double totalCommission = 0.0;

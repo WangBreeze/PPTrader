@@ -1,0 +1,88 @@
+{
+    "archiveElapsedMilliseconds": 0,
+    "archived": true,
+    "bars": 200,
+    "date": "2026-08-13",
+    "engineElapsedMilliseconds": 0,
+    "equityPoints": 1,
+    "finalEquity": 999501.7012113202,
+    "legs": [
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:16b23529763bb852b1f1328926d4e3adff57897be627785fa09ac11248be2284",
+            "dayCount": 1,
+            "rawTickCount": 4554,
+            "symbol": "000001"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:019faa7d45eac70d2969773c737adb101581181eb43aa2b08ed5f13a063c8cac",
+            "dayCount": 1,
+            "rawTickCount": 3979,
+            "symbol": "000002"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:6a34acbf23cd2644bc7070bc27f7411998a924b0d2a43fd3b6b0dbea57e3c914",
+            "dayCount": 1,
+            "rawTickCount": 2147,
+            "symbol": "000006"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:a21d3461ecad0280abdbd6b6dbe0dafac6a6d6e8d906ef4c6ec684a88d89db51",
+            "dayCount": 1,
+            "rawTickCount": 1837,
+            "symbol": "000007"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:b9db696c4f16135c4f55e5eaaa3eaed502799b0fbdb878be5f9c37098793e767",
+            "dayCount": 1,
+            "rawTickCount": 1997,
+            "symbol": "000008"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:05bd7d66dc2d776314d38919a5e0a89e9610116c42b58e1bf6a192c353bf7c5a",
+            "dayCount": 1,
+            "rawTickCount": 4331,
+            "symbol": "000009"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:92ee4f0ef3a11789f9598f2430eded420fec6cacfe7f98d59084024b0adca027",
+            "dayCount": 1,
+            "rawTickCount": 914,
+            "symbol": "000010"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:e7f814efe03ad853da67b6ab7c03c21c72ecbc7638b0964a7952d3d37b191d61",
+            "dayCount": 1,
+            "rawTickCount": 2549,
+            "symbol": "000011"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:8e30122900e2a8262225dcb92ffd96ac58cc1c91e8aa4c26884ff97ddae13957",
+            "dayCount": 1,
+            "rawTickCount": 3193,
+            "symbol": "000012"
+        },
+        {
+            "bars": 200,
+            "datasetVersion": "sha256:9cbc3eda615d1257be8735958db733d2c21d85105a64b2599a5b7e880f2bff56",
+            "dayCount": 1,
+            "rawTickCount": 2214,
+            "symbol": "000014"
+        }
+    ],
+    "maxDrawdownPercent": 0.049829878867976365,
+    "periodSeconds": 60,
+    "resultId": "f0b63536-d9f2-4090-a640-390b987a826a",
+    "sharpeRatio": 0,
+    "totalCommission": 299.00318868,
+    "totalReturnPercent": -0.04982987886797963,
+    "trades": 10
+}

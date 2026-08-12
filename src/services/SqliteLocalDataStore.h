@@ -4,6 +4,7 @@
 #include "services/CustomStrategyStore.h"
 #include "services/StrategyExecutionStore.h"
 #include "domain/BatchBacktestTypes.h"
+#include "domain/PortfolioTypes.h"
 #include "domain/TickDataImportTypes.h"
 #include "domain/RawTradeTypes.h"
 
@@ -93,6 +94,12 @@ public:
     QVector<BatchBacktestRunSummary> loadBatchBacktestRuns(int limit = 20);
     QVector<BatchBacktestRunItem> loadBatchBacktestRunItems(
         const QString &runId);
+    bool savePortfolioBacktestArchive(
+        const PortfolioArchiveRecord &record);
+    QVector<PortfolioArchiveSummary> loadPortfolioBacktestArchiveSummaries(
+        int limit = 50);
+    std::optional<PortfolioArchiveRecord> loadPortfolioBacktestArchive(
+        const QString &resultId);
     bool saveBacktestArchive(const BacktestArchiveRecord &record) override;
     QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() override;
     std::optional<BacktestArchiveRecord> loadBacktestArchive(

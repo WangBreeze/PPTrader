@@ -21,7 +21,7 @@ namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 4;
+constexpr int kCurrentDatabaseSchemaVersion = 5;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -342,6 +342,20 @@ bool SqliteLocalDataStore::migrateSchema()
             if (!history.exec()) {
                 m_database.rollback();
                 emitSqlError(QStringLiteral("记录全库 v4 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 5) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(5, 'portfolio_backtest_archive', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-portfolio-archive-v5"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v5 迁移历史"));
                 return false;
             }
         }
@@ -1861,6 +1875,308 @@ QVector<BatchBacktestRunItem> SqliteLocalDataStore::loadBatchBacktestRunItems(
     return result;
 }
 
+namespace {
+
+QString positionsToJson(const QVector<PortfolioPosition> &positions)
+{
+    QJsonArray array;
+    for (const PortfolioPosition &position : positions) {
+        array.append(QJsonObject{
+            {QStringLiteral("symbol"), position.instrument.symbol},
+            {QStringLiteral("name"), position.instrument.name},
+            {QStringLiteral("quantity"), position.quantity},
+            {QStringLiteral("lastPrice"), position.lastPrice},
+            {QStringLiteral("marketValue"), position.marketValue},
+            {QStringLiteral("weight"), position.weight}});
+    }
+    return QString::fromUtf8(
+        QJsonDocument(array).toJson(QJsonDocument::Compact));
+}
+
+QVector<PortfolioPosition> positionsFromJson(const QString &json)
+{
+    QVector<PortfolioPosition> result;
+    const QJsonArray array = QJsonDocument::fromJson(json.toUtf8()).array();
+    for (const QJsonValue &value : array) {
+        const QJsonObject object = value.toObject();
+        PortfolioPosition position;
+        position.instrument.symbol =
+            object.value(QStringLiteral("symbol")).toString();
+        position.instrument.name =
+            object.value(QStringLiteral("name")).toString();
+        position.quantity =
+            object.value(QStringLiteral("quantity")).toDouble();
+        position.lastPrice =
+            object.value(QStringLiteral("lastPrice")).toDouble();
+        position.marketValue =
+            object.value(QStringLiteral("marketValue")).toDouble();
+        position.weight =
+            object.value(QStringLiteral("weight")).toDouble();
+        result.append(position);
+    }
+    return result;
+}
+
+QString stringListToJson(const QStringList &values)
+{
+    QJsonArray array;
+    for (const QString &value : values) array.append(value);
+    return QString::fromUtf8(
+        QJsonDocument(array).toJson(QJsonDocument::Compact));
+}
+
+QStringList stringListFromJson(const QString &json)
+{
+    QStringList result;
+    const QJsonArray array = QJsonDocument::fromJson(json.toUtf8()).array();
+    for (const QJsonValue &value : array) result.append(value.toString());
+    return result;
+}
+
+} // namespace
+
+bool SqliteLocalDataStore::savePortfolioBacktestArchive(
+    const PortfolioArchiveRecord &record)
+{
+    const PortfolioResult &result = record.result;
+    if (record.resultId.trimmed().isEmpty() || !record.completedAt.isValid()
+        || !result.definition.isValid() || result.equityCurve.isEmpty()) {
+        emit writeFailed(QStringLiteral("组合回测结果身份不完整，未写入归档"));
+        return false;
+    }
+    if (!m_database.transaction()) {
+        emitSqlError(QStringLiteral("开始组合回测结果归档事务"));
+        return false;
+    }
+    auto fail = [this](const QString &operation, const QSqlQuery &query) {
+        m_database.rollback();
+        emit writeFailed(QStringLiteral("%1失败：%2")
+                             .arg(operation, query.lastError().text()));
+        return false;
+    };
+
+    QSqlQuery resultQuery(m_database);
+    resultQuery.prepare(QStringLiteral(
+        "insert into portfolio_backtest_results(result_id, portfolio_id, name, "
+        "completed_at_utc, definition_json, leg_count, period_seconds, bar_count, "
+        "dataset_versions_json, initial_capital, final_equity, total_return_percent, "
+        "max_drawdown_percent, sharpe_ratio, total_commission, total_trades) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    resultQuery.addBindValue(record.resultId);
+    resultQuery.addBindValue(result.definition.portfolioId);
+    resultQuery.addBindValue(result.definition.name);
+    resultQuery.addBindValue(record.completedAt.toUTC().toString(Qt::ISODateWithMs));
+    resultQuery.addBindValue(compactJson(result.definition.toVariantMap()));
+    resultQuery.addBindValue(result.definition.legs.size());
+    resultQuery.addBindValue(result.periodSeconds);
+    resultQuery.addBindValue(result.equityCurve.size());
+    resultQuery.addBindValue(stringListToJson(result.datasetVersions));
+    resultQuery.addBindValue(result.summary.initialCapital);
+    resultQuery.addBindValue(result.summary.finalEquity);
+    resultQuery.addBindValue(result.summary.totalReturnPercent);
+    resultQuery.addBindValue(result.summary.maxDrawdownPercent);
+    resultQuery.addBindValue(result.summary.sharpeRatio);
+    resultQuery.addBindValue(result.summary.totalCommission);
+    resultQuery.addBindValue(result.summary.totalTrades);
+    if (!resultQuery.exec()) return fail(QStringLiteral("写入组合回测结果"), resultQuery);
+
+    QSqlQuery equityQuery(m_database);
+    equityQuery.prepare(QStringLiteral(
+        "insert into portfolio_equity_points(result_id, sequence_no, timestamp_utc, "
+        "equity, cash, positions_json) values(?, ?, ?, ?, ?, ?)"));
+    for (int index = 0; index < result.equityCurve.size(); ++index) {
+        const PortfolioBar &bar = result.equityCurve.at(index);
+        equityQuery.bindValue(0, record.resultId);
+        equityQuery.bindValue(1, index);
+        equityQuery.bindValue(2, bar.timestamp.toUTC().toString(Qt::ISODateWithMs));
+        equityQuery.bindValue(3, bar.equity);
+        equityQuery.bindValue(4, bar.cash);
+        equityQuery.bindValue(5, positionsToJson(bar.positions));
+        if (!equityQuery.exec()) return fail(QStringLiteral("写入组合权益曲线"), equityQuery);
+    }
+
+    QSqlQuery tradeQuery(m_database);
+    tradeQuery.prepare(QStringLiteral(
+        "insert into portfolio_trades(result_id, sequence_no, symbol, name, market, venue, "
+        "timestamp_utc, side, quantity, price, commission, amount, reason) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    for (int index = 0; index < result.trades.size(); ++index) {
+        const PortfolioTrade &trade = result.trades.at(index);
+        tradeQuery.bindValue(0, record.resultId);
+        tradeQuery.bindValue(1, index);
+        tradeQuery.bindValue(2, trade.instrument.symbol);
+        tradeQuery.bindValue(3, trade.instrument.name);
+        tradeQuery.bindValue(4, static_cast<int>(trade.instrument.market));
+        tradeQuery.bindValue(5, trade.instrument.venue);
+        tradeQuery.bindValue(6, trade.timestamp.toUTC().toString(Qt::ISODateWithMs));
+        tradeQuery.bindValue(7, trade.side);
+        tradeQuery.bindValue(8, trade.quantity);
+        tradeQuery.bindValue(9, trade.price);
+        tradeQuery.bindValue(10, trade.commission);
+        tradeQuery.bindValue(11, trade.amount);
+        tradeQuery.bindValue(12, trade.reason);
+        if (!tradeQuery.exec()) return fail(QStringLiteral("写入组合回测成交"), tradeQuery);
+    }
+
+    if (!m_database.commit()) {
+        m_database.rollback();
+        emitSqlError(QStringLiteral("提交组合回测结果归档事务"));
+        return false;
+    }
+    return true;
+}
+
+QVector<PortfolioArchiveSummary>
+SqliteLocalDataStore::loadPortfolioBacktestArchiveSummaries(int limit)
+{
+    QVector<PortfolioArchiveSummary> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select result_id, portfolio_id, name, completed_at_utc, leg_count, "
+        "period_seconds, bar_count, dataset_versions_json, initial_capital, "
+        "final_equity, total_return_percent, max_drawdown_percent, sharpe_ratio, "
+        "total_commission, total_trades from portfolio_backtest_results "
+        "order by completed_at_utc desc, result_id desc limit ?"));
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取组合回测归档列表"));
+        return result;
+    }
+    while (query.next()) {
+        PortfolioArchiveSummary summary;
+        summary.resultId = query.value(0).toString();
+        summary.portfolioId = query.value(1).toString();
+        summary.name = query.value(2).toString();
+        summary.completedAt = QDateTime::fromString(
+            query.value(3).toString(), Qt::ISODateWithMs);
+        summary.legCount = query.value(4).toInt();
+        summary.periodSeconds = query.value(5).toInt();
+        summary.barCount = query.value(6).toInt();
+        summary.datasetVersions =
+            stringListFromJson(query.value(7).toString());
+        summary.summary.initialCapital = query.value(8).toDouble();
+        summary.summary.finalEquity = query.value(9).toDouble();
+        summary.summary.totalReturnPercent = query.value(10).toDouble();
+        summary.summary.maxDrawdownPercent = query.value(11).toDouble();
+        summary.summary.sharpeRatio = query.value(12).toDouble();
+        summary.summary.totalCommission = query.value(13).toDouble();
+        summary.summary.totalTrades = query.value(14).toInt();
+        result.append(summary);
+    }
+    return result;
+}
+
+std::optional<PortfolioArchiveRecord>
+SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
+{
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select portfolio_id, name, completed_at_utc, definition_json, "
+        "dataset_versions_json from portfolio_backtest_results where result_id = ?"));
+    query.addBindValue(resultId);
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取组合回测归档身份"));
+        return std::nullopt;
+    }
+    if (!query.next()) return std::nullopt;
+
+    PortfolioArchiveRecord record;
+    record.resultId = resultId;
+    record.completedAt = QDateTime::fromString(
+        query.value(2).toString(), Qt::ISODateWithMs);
+    PortfolioDefinition &definition = record.result.definition;
+    definition.portfolioId = query.value(0).toString();
+    definition.name = query.value(1).toString();
+    const QVariantMap definitionMap = QJsonDocument::fromJson(
+        query.value(3).toString().toUtf8()).object().toVariantMap();
+    const QVariantList legList = definitionMap.value(QStringLiteral("legs")).toList();
+    for (const QVariant &value : legList) {
+        const QVariantMap legMap = value.toMap();
+        PortfolioLeg leg;
+        leg.instrument.symbol =
+            legMap.value(QStringLiteral("symbol")).toString();
+        leg.instrument.name =
+            legMap.value(QStringLiteral("name")).toString();
+        leg.targetWeight =
+            legMap.value(QStringLiteral("targetWeight")).toDouble();
+    definition.legs.append(leg);
+    }
+    definition.periodSeconds =
+        definitionMap.value(QStringLiteral("periodSeconds")).toInt();
+    record.result.periodSeconds = definition.periodSeconds;
+    definition.rebalanceEveryTradingDays =
+        definitionMap.value(QStringLiteral("rebalanceEveryTradingDays")).toInt();
+    definition.initialCapital =
+        definitionMap.value(QStringLiteral("initialCapital")).toDouble();
+    definition.commissionRate =
+        definitionMap.value(QStringLiteral("commissionRate")).toDouble();
+    definition.slippageRate =
+        definitionMap.value(QStringLiteral("slippageRate")).toDouble();
+    definition.lotSize =
+        definitionMap.value(QStringLiteral("lotSize")).toInt();
+    definition.tPlusOne =
+        definitionMap.value(QStringLiteral("tPlusOne")).toBool();
+    definition.maximumLegWeight =
+        definitionMap.value(QStringLiteral("maximumLegWeight")).toDouble();
+    definition.maximumActiveLegs =
+        definitionMap.value(QStringLiteral("maximumActiveLegs")).toInt();
+    record.result.datasetVersions =
+        stringListFromJson(query.value(4).toString());
+
+    QSqlQuery equityQuery(m_database);
+    equityQuery.prepare(QStringLiteral(
+        "select timestamp_utc, equity, cash, positions_json "
+        "from portfolio_equity_points where result_id = ? order by sequence_no asc"));
+    equityQuery.addBindValue(resultId);
+    if (!equityQuery.exec()) {
+        emitSqlError(QStringLiteral("读取组合权益曲线"));
+        return std::nullopt;
+    }
+    while (equityQuery.next()) {
+        PortfolioBar bar;
+        bar.timestamp = QDateTime::fromString(
+            equityQuery.value(0).toString(), Qt::ISODateWithMs);
+        bar.equity = equityQuery.value(1).toDouble();
+        bar.cash = equityQuery.value(2).toDouble();
+        bar.positions =
+            positionsFromJson(equityQuery.value(3).toString());
+        record.result.equityCurve.append(bar);
+    }
+    if (record.result.equityCurve.isEmpty()) {
+        emit writeFailed(QStringLiteral(
+            "组合回测归档 %1 缺少权益曲线，拒绝恢复").arg(resultId));
+        return std::nullopt;
+    }
+
+    QSqlQuery tradeQuery(m_database);
+    tradeQuery.prepare(QStringLiteral(
+        "select symbol, name, market, venue, timestamp_utc, side, quantity, price, "
+        "commission, amount, reason from portfolio_trades "
+        "where result_id = ? order by sequence_no asc"));
+    tradeQuery.addBindValue(resultId);
+    if (!tradeQuery.exec()) {
+        emitSqlError(QStringLiteral("读取组合回测成交"));
+        return std::nullopt;
+    }
+    while (tradeQuery.next()) {
+        PortfolioTrade trade;
+        trade.instrument = {tradeQuery.value(0).toString(),
+                            tradeQuery.value(1).toString(),
+                            static_cast<Market>(tradeQuery.value(2).toInt()),
+                            tradeQuery.value(3).toString()};
+        trade.timestamp = QDateTime::fromString(
+            tradeQuery.value(4).toString(), Qt::ISODateWithMs);
+        trade.side = tradeQuery.value(5).toString();
+        trade.quantity = tradeQuery.value(6).toDouble();
+        trade.price = tradeQuery.value(7).toDouble();
+        trade.commission = tradeQuery.value(8).toDouble();
+        trade.amount = tradeQuery.value(9).toDouble();
+        trade.reason = tradeQuery.value(10).toString();
+        record.result.trades.append(trade);
+    }
+    return record;
+}
+
 bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &record)
 {
     const BacktestConfig &config = record.result.config;
@@ -2896,7 +3212,37 @@ bool SqliteLocalDataStore::ensureSchema()
             "foreign key(run_id) references batch_backtest_runs(run_id) on delete cascade)"),
         QStringLiteral(
             "create index if not exists idx_batch_backtest_run_items_status "
-            "on batch_backtest_run_items(run_id, status, symbol)")
+            "on batch_backtest_run_items(run_id, status, symbol)"),
+        QStringLiteral(
+            "create table if not exists portfolio_backtest_results("
+            "result_id text primary key, portfolio_id text not null, name text not null, "
+            "completed_at_utc text not null, definition_json text not null, "
+            "leg_count integer not null, period_seconds integer not null, "
+            "bar_count integer not null, dataset_versions_json text not null default '[]', "
+            "initial_capital real not null, final_equity real not null, "
+            "total_return_percent real not null, max_drawdown_percent real not null, "
+            "sharpe_ratio real not null, total_commission real not null, "
+            "total_trades integer not null)"),
+        QStringLiteral(
+            "create index if not exists idx_portfolio_results_completed "
+            "on portfolio_backtest_results(completed_at_utc desc, result_id desc)"),
+        QStringLiteral(
+            "create table if not exists portfolio_equity_points("
+            "result_id text not null, sequence_no integer not null, "
+            "timestamp_utc text not null, equity real not null, cash real not null, "
+            "positions_json text not null default '[]', primary key(result_id, sequence_no), "
+            "foreign key(result_id) references portfolio_backtest_results(result_id) "
+            "on delete cascade)"),
+        QStringLiteral(
+            "create table if not exists portfolio_trades("
+            "result_id text not null, sequence_no integer not null, "
+            "symbol text not null, name text not null, market integer not null, "
+            "venue text not null, timestamp_utc text not null, side text not null, "
+            "quantity real not null, price real not null, commission real not null, "
+            "amount real not null, reason text not null, "
+            "primary key(result_id, sequence_no), "
+            "foreign key(result_id) references portfolio_backtest_results(result_id) "
+            "on delete cascade)")
     };
 
     for (const QString &statement : statements) {

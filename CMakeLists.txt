@@ -74,6 +74,10 @@ qt_add_executable(PPTrader
     src/models/OrderListModel.h
     src/models/PositionListModel.cpp
     src/models/PositionListModel.h
+    src/models/PortfolioArchiveListModel.cpp
+    src/models/PortfolioArchiveListModel.h
+    src/models/PortfolioTradeListModel.cpp
+    src/models/PortfolioTradeListModel.h
     src/models/SignalListModel.cpp
     src/models/SignalListModel.h
     src/models/StockSearchModel.cpp
@@ -135,6 +139,8 @@ qt_add_executable(PPTrader
     src/services/MootdxMarketDataProvider.h
     src/services/PortfolioBacktestEngine.cpp
     src/services/PortfolioBacktestEngine.h
+    src/services/PortfolioBacktestService.cpp
+    src/services/PortfolioBacktestService.h
     src/services/NasDataNodeClient.cpp
     src/services/NasDataNodeClient.h
     src/services/NasSyncStateStore.cpp
@@ -327,6 +333,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_sqlite_local_data_store
         tests/tst_sqlite_local_data_store.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/app/WorkspaceInstrumentSelectionState.cpp
@@ -393,6 +401,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_batch_backtest
         tests/tst_batch_backtest.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -475,6 +485,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(pptrader_nas_sync_capacity
         tools/nas_sync_capacity_probe.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -508,6 +520,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(pptrader_real_load_probe
         tools/real_load_backtest_probe.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -558,6 +572,38 @@ if(BUILD_TESTING)
     )
     target_include_directories(pptrader_real_load_probe PRIVATE src)
     target_link_libraries(pptrader_real_load_probe PRIVATE Qt6::Core Qt6::Sql)
+
+    qt_add_executable(pptrader_portfolio_backtest_probe
+        tools/portfolio_backtest_probe.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/CrossSectionalTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/LocalHistoryTypes.cpp
+        src/domain/LocalHistoryTypes.h
+        src/domain/MarketTypes.h
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
+        src/services/CustomStrategyStore.h
+        src/services/LocalDataStore.h
+        src/services/PortfolioBacktestEngine.cpp
+        src/services/PortfolioBacktestEngine.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
+    )
+    target_include_directories(pptrader_portfolio_backtest_probe PRIVATE src)
+    target_link_libraries(pptrader_portfolio_backtest_probe PRIVATE Qt6::Core Qt6::Sql)
 
     qt_add_executable(tst_trading_account
         tests/tst_trading_account.cpp
@@ -637,6 +683,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_market_snapshot_contract
         tests/tst_market_snapshot_contract.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/CrossSectionalTypes.h
@@ -683,6 +731,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_local_candle_series
         tests/tst_local_candle_series.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -721,6 +771,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_backtest_dataset_identity
         tests/tst_backtest_dataset_identity.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -751,6 +803,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_backtest_dataset_service
         tests/tst_backtest_dataset_service.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -799,6 +853,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_custom_strategy
         tests/tst_custom_strategy.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/app/CustomStrategyWorkspacePolicy.cpp
@@ -858,8 +914,42 @@ if(BUILD_TESTING)
     target_include_directories(tst_portfolio_backtest PRIVATE src)
     target_link_libraries(tst_portfolio_backtest PRIVATE Qt6::Core Qt6::Test)
 
+    qt_add_executable(tst_portfolio_backtest_store
+        tests/tst_portfolio_backtest_store.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/CrossSectionalTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/LocalHistoryTypes.cpp
+        src/domain/LocalHistoryTypes.h
+        src/domain/MarketTypes.h
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
+        src/services/CustomStrategyStore.h
+        src/services/LocalDataStore.h
+        src/services/PortfolioBacktestEngine.cpp
+        src/services/PortfolioBacktestEngine.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
+    )
+    target_include_directories(tst_portfolio_backtest_store PRIVATE src)
+    target_link_libraries(tst_portfolio_backtest_store PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+
     qt_add_executable(tst_tickdata_csv_import
         tests/tst_tickdata_csv_import.cpp
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/domain/BacktestDatasetTypes.cpp
         src/domain/BacktestDatasetTypes.h
         src/domain/BacktestTypes.h
@@ -951,12 +1041,13 @@ if(BUILD_TESTING)
     add_test(NAME custom_strategy COMMAND tst_custom_strategy)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)
     add_test(NAME portfolio_backtest COMMAND tst_portfolio_backtest)
+    add_test(NAME portfolio_backtest_store COMMAND tst_portfolio_backtest_store)
     add_test(NAME tickdata_csv_import COMMAND tst_tickdata_csv_import)
     add_test(NAME nas_data_node COMMAND tst_nas_data_node)
     add_test(NAME historical_provider_router COMMAND tst_historical_provider_router)
     add_test(NAME realtime_provider_router COMMAND tst_realtime_provider_router)
 
-    set_tests_properties(market_session sqlite_local_data_store backtest_engine batch_backtest trading_account strategy_execution exchange_rules cross_sectional market_snapshot_contract cross_section_plot_data cross_section_performance custom_strategy workspace_instrument_selection tickdata_csv_import nas_data_node historical_provider_router realtime_provider_router local_candle_series backtest_dataset_identity backtest_dataset_service portfolio_backtest PROPERTIES
+    set_tests_properties(market_session sqlite_local_data_store backtest_engine batch_backtest trading_account strategy_execution exchange_rules cross_sectional market_snapshot_contract cross_section_plot_data cross_section_performance custom_strategy workspace_instrument_selection tickdata_csv_import nas_data_node historical_provider_router realtime_provider_router local_candle_series backtest_dataset_identity backtest_dataset_service portfolio_backtest portfolio_backtest_store PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
     )
 endif()

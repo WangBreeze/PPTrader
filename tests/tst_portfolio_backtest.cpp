@@ -51,6 +51,7 @@ PortfolioDefinition equalWeightDefinition(const QString &first,
         {instrumentFor(first), 0.0},
         {instrumentFor(second), 0.0}
     };
+    definition.periodSeconds = 60;
     definition.initialCapital = 1000000.0;
     definition.commissionRate = 0.0;
     definition.slippageRate = 0.0;
@@ -207,6 +208,7 @@ void PortfolioBacktestTest::weightsRespectMaximumLegWeight()
     const QVector<QDate> days{QDate(2026, 1, 5)};
     PortfolioDefinition definition;
     definition.portfolioId = QStringLiteral("portfolio_cap");
+    definition.periodSeconds = 60;
     definition.initialCapital = 1000000.0;
     definition.maximumLegWeight = 0.6;
     definition.legs = {

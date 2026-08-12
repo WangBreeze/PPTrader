@@ -13,6 +13,9 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QRegularExpression>
 #include <QPointer>
 #include <QSettings>
@@ -88,6 +91,61 @@ QString periodText(int periodSeconds)
     if (periodSeconds % 3600 == 0) return QStringLiteral("%1h").arg(periodSeconds / 3600);
     if (periodSeconds % 60 == 0) return QStringLiteral("%1m").arg(periodSeconds / 60);
     return QStringLiteral("%1s").arg(periodSeconds);
+}
+
+QVector<EquityPoint> portfolioEquityPoints(const PortfolioResult &result)
+{
+    QVector<EquityPoint> points;
+    double peak = result.definition.initialCapital;
+    for (const PortfolioBar &bar : result.equityCurve) {
+        EquityPoint point;
+        point.timestamp = bar.timestamp;
+        point.cash = bar.cash;
+        point.positionValue = bar.equity - bar.cash;
+        point.equity = bar.equity;
+        peak = std::max(peak, bar.equity);
+        point.drawdownPercent = peak > 0.0
+            ? (peak - bar.equity) / peak * 100.0 : 0.0;
+        points.append(point);
+    }
+    return points;
+}
+
+PortfolioDefinition portfolioDefinitionFromMap(const QVariantMap &map)
+{
+    PortfolioDefinition definition;
+    definition.portfolioId =
+        map.value(QStringLiteral("portfolioId")).toString();
+    definition.name = map.value(QStringLiteral("name")).toString();
+    definition.periodSeconds =
+        map.value(QStringLiteral("periodSeconds")).toInt();
+    definition.rebalanceEveryTradingDays =
+        map.value(QStringLiteral("rebalanceEveryTradingDays")).toInt();
+    definition.initialCapital =
+        map.value(QStringLiteral("initialCapital")).toDouble();
+    definition.commissionRate =
+        map.value(QStringLiteral("commissionRate")).toDouble();
+    definition.slippageRate =
+        map.value(QStringLiteral("slippageRate")).toDouble();
+    definition.lotSize = map.value(QStringLiteral("lotSize")).toInt();
+    definition.tPlusOne = map.value(QStringLiteral("tPlusOne")).toBool();
+    definition.maximumLegWeight =
+        map.value(QStringLiteral("maximumLegWeight")).toDouble();
+    definition.maximumActiveLegs =
+        map.value(QStringLiteral("maximumActiveLegs")).toInt();
+    const QVariantList legs = map.value(QStringLiteral("legs")).toList();
+    for (const QVariant &value : legs) {
+        const QVariantMap legMap = value.toMap();
+        PortfolioLeg leg;
+        leg.instrument.symbol =
+            legMap.value(QStringLiteral("symbol")).toString();
+        leg.instrument.name =
+            legMap.value(QStringLiteral("name")).toString();
+        leg.targetWeight =
+            legMap.value(QStringLiteral("targetWeight")).toDouble();
+        definition.legs.append(leg);
+    }
+    return definition;
 }
 
 } // namespace
@@ -264,6 +322,15 @@ TradingController::TradingController(QObject *parent)
                 }
                 emit batchBacktestStateChanged();
             });
+    connect(&m_portfolioBacktestService, &PortfolioBacktestService::completed,
+            this, &TradingController::handlePortfolioBacktestCompleted);
+    connect(&m_portfolioBacktestService, &PortfolioBacktestService::failed,
+            this, [this](quint64 requestId, const QString &message) {
+        if (requestId != m_portfolioBacktestRequestId) return;
+        m_portfolioBacktestError = message;
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测失败");
+        emit portfolioBacktestStateChanged();
+    });
     connect(&m_strategyEngine, &StrategyEngine::strategySignalGenerated,
             this, &TradingController::handleStrategySignal);
     connect(&m_strategyEngine, &StrategyEngine::strategyCountChanged, this, &TradingController::strategyStateChanged);
@@ -493,6 +560,7 @@ TradingController::TradingController(QObject *parent)
         refreshBacktestArchiveList();
         reloadTickDataImportRunHistory();
         recoverBatchBacktestRuns();
+        refreshPortfolioBacktestArchiveList();
         if (!m_tickWriter.start(databasePath)) {
             setStatusText(QStringLiteral("后台 Tick 写入服务启动失败，将使用同步写入"));
         }
@@ -507,6 +575,9 @@ TradingController::TradingController(QObject *parent)
         }
         if (!m_backtestDatasetService.start(databasePath)) {
             setStatusText(QStringLiteral("回测数据集准备服务启动失败"));
+        }
+        if (!m_portfolioBacktestService.start(databasePath)) {
+            setStatusText(QStringLiteral("组合回测服务启动失败"));
         }
         emit storageStateChanged();
     }
@@ -1551,6 +1622,7 @@ bool TradingController::relocateStorage(const QString &pathOrUrl)
     m_asyncLocalCandleQueryService.stop();
     m_asyncLiveDayCandleQueryService.stop();
     m_backtestDatasetService.stop();
+    m_portfolioBacktestService.stop();
     m_dataStore.close();
     m_storageReady = false;
     m_storageRelocationRunning = true;
@@ -1590,8 +1662,9 @@ bool TradingController::restartStorageServices(const QString &databasePath)
     const bool localSeriesReady = m_asyncLocalCandleQueryService.start(databasePath);
     const bool liveSeriesReady = m_asyncLiveDayCandleQueryService.start(databasePath);
     const bool datasetReady = m_backtestDatasetService.start(databasePath);
+    const bool portfolioReady = m_portfolioBacktestService.start(databasePath);
     if (!tickWriterReady || !snapshotReady || !localSeriesReady
-        || !liveSeriesReady || !datasetReady) {
+        || !liveSeriesReady || !datasetReady || !portfolioReady) {
         setStatusText(QStringLiteral("数据库已切换，但部分后台存储服务启动失败"));
     }
     return true;
@@ -2591,6 +2664,202 @@ void TradingController::recoverBatchBacktestRuns()
 QVariantList TradingController::batchBacktestRunHistory() const
 {
     return m_batchBacktestRunHistory;
+}
+
+qulonglong TradingController::runPortfolioBacktest(
+    const QString &portfolioJson, int barCount)
+{
+    m_portfolioBacktestError.clear();
+    emit portfolioBacktestStateChanged();
+    if (!m_storageReady) {
+        m_portfolioBacktestError = QStringLiteral("本地 SQLite 数据库不可用");
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
+        emit portfolioBacktestStateChanged();
+        return 0;
+    }
+    if (m_portfolioBacktestService.isRunning() || batchBacktestRunning()
+        || backtestRunning()) {
+        m_portfolioBacktestError = QStringLiteral("已有回测任务正在运行");
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
+        emit portfolioBacktestStateChanged();
+        return 0;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        portfolioJson.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        m_portfolioBacktestError = QStringLiteral("组合定义 JSON 无效");
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
+        emit portfolioBacktestStateChanged();
+        return 0;
+    }
+    const PortfolioDefinition definition = portfolioDefinitionFromMap(
+        document.object().toVariantMap());
+    QString validationError;
+    if (!definition.isValid(&validationError) || barCount < 2) {
+        m_portfolioBacktestError = validationError.isEmpty()
+            ? QStringLiteral("回测根数必须大于 1") : validationError;
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
+        emit portfolioBacktestStateChanged();
+        return 0;
+    }
+
+    ++m_portfolioBacktestRequestId;
+    if (m_portfolioBacktestRequestId == 0) ++m_portfolioBacktestRequestId;
+    m_displayedPortfolioResult.reset();
+    m_selectedPortfolioArchiveId.clear();
+    m_portfolioEquityCurveModel.clear();
+    m_portfolioTradeModel.clear();
+    m_portfolioBacktestStatusText = QStringLiteral(
+        "组合回测准备中：%1 腿 · %2").arg(definition.legs.size()).arg(definition.name);
+    if (!m_portfolioBacktestService.request(
+            m_portfolioBacktestRequestId, definition, barCount,
+            m_aShareUniverse)) {
+        m_portfolioBacktestError = QStringLiteral("组合回测服务不可用");
+        m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
+        emit portfolioBacktestStateChanged();
+        return 0;
+    }
+    emit portfolioBacktestStateChanged();
+    return m_portfolioBacktestRequestId;
+}
+
+void TradingController::cancelPortfolioBacktest()
+{
+    if (!m_portfolioBacktestService.isRunning()) return;
+    m_portfolioBacktestService.cancel();
+    m_portfolioBacktestStatusText = QStringLiteral("正在取消组合回测…");
+    emit portfolioBacktestStateChanged();
+}
+
+void TradingController::handlePortfolioBacktestCompleted(
+    quint64 requestId, const PortfolioResult &result)
+{
+    if (requestId != m_portfolioBacktestRequestId) return;
+    m_displayedPortfolioResult = result;
+    m_displayedPortfolioCompletedAt = QDateTime::currentDateTimeUtc();
+    m_selectedPortfolioArchiveId.clear();
+    m_portfolioEquityCurveModel.loadPoints(portfolioEquityPoints(result));
+    m_portfolioTradeModel.loadTrades(result.trades);
+    m_portfolioBacktestError.clear();
+    m_portfolioBacktestStatusText = QStringLiteral(
+        "组合回测完成：收益 %1%，%2 笔调仓")
+        .arg(result.summary.totalReturnPercent, 0, 'f', 2)
+        .arg(result.summary.totalTrades);
+    if (m_storageReady) {
+        PortfolioArchiveRecord archive;
+        archive.resultId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        archive.completedAt = m_displayedPortfolioCompletedAt;
+        archive.result = result;
+        if (m_dataStore.savePortfolioBacktestArchive(archive)) {
+            m_selectedPortfolioArchiveId = archive.resultId;
+            refreshPortfolioBacktestArchiveList();
+        } else {
+            m_portfolioBacktestError = QStringLiteral(
+                "组合结果未保存：SQLite 归档写入失败");
+        }
+    }
+    emit portfolioBacktestStateChanged();
+}
+
+bool TradingController::loadPortfolioBacktestArchive(const QString &resultId)
+{
+    m_portfolioArchiveError.clear();
+    m_portfolioArchiveLoading = true;
+    emit portfolioBacktestStateChanged();
+    const auto record = m_dataStore.loadPortfolioBacktestArchive(resultId);
+    m_portfolioArchiveLoading = false;
+    if (!record) {
+        m_portfolioArchiveError = QStringLiteral(
+            "组合归档加载失败或不存在：%1").arg(resultId);
+        emit portfolioBacktestStateChanged();
+        return false;
+    }
+    m_displayedPortfolioResult = record->result;
+    m_displayedPortfolioCompletedAt = record->completedAt;
+    m_selectedPortfolioArchiveId = record->resultId;
+    m_portfolioEquityCurveModel.loadPoints(
+        portfolioEquityPoints(record->result));
+    m_portfolioTradeModel.loadTrades(record->result.trades);
+    emit portfolioBacktestStateChanged();
+    return true;
+}
+
+void TradingController::refreshPortfolioBacktestArchiveList()
+{
+    m_portfolioArchiveModel.loadSummaries(m_storageReady
+        ? m_dataStore.loadPortfolioBacktestArchiveSummaries(50)
+        : QVector<PortfolioArchiveSummary>{});
+    emit portfolioBacktestStateChanged();
+}
+
+bool TradingController::portfolioBacktestRunning() const
+{
+    return m_portfolioBacktestService.isRunning();
+}
+
+QString TradingController::portfolioBacktestStatusText() const
+{
+    return m_portfolioBacktestStatusText;
+}
+
+QString TradingController::portfolioBacktestError() const
+{
+    return m_portfolioBacktestError;
+}
+
+QVariantMap TradingController::portfolioResultConfiguration() const
+{
+    if (!m_displayedPortfolioResult) return {};
+    const PortfolioResult &result = *m_displayedPortfolioResult;
+    QVariantMap map = result.definition.toVariantMap();
+    map.insert(QStringLiteral("completedAt"), m_displayedPortfolioCompletedAt);
+    map.insert(QStringLiteral("barCount"), result.equityCurve.size());
+    map.insert(QStringLiteral("datasetVersions"),
+               QVariant(result.datasetVersions));
+    map.insert(QStringLiteral("finalEquity"), result.summary.finalEquity);
+    map.insert(QStringLiteral("totalReturnPercent"),
+               result.summary.totalReturnPercent);
+    map.insert(QStringLiteral("maxDrawdownPercent"),
+               result.summary.maxDrawdownPercent);
+    map.insert(QStringLiteral("sharpeRatio"), result.summary.sharpeRatio);
+    map.insert(QStringLiteral("totalCommission"),
+               result.summary.totalCommission);
+    map.insert(QStringLiteral("totalTrades"), result.summary.totalTrades);
+    map.insert(QStringLiteral("archived"),
+               !m_selectedPortfolioArchiveId.isEmpty());
+    map.insert(QStringLiteral("resultId"), m_selectedPortfolioArchiveId);
+    return map;
+}
+
+QAbstractItemModel *TradingController::portfolioEquityCurveModel()
+{
+    return &m_portfolioEquityCurveModel;
+}
+
+QAbstractItemModel *TradingController::portfolioTradeModel()
+{
+    return &m_portfolioTradeModel;
+}
+
+QAbstractItemModel *TradingController::portfolioArchiveModel()
+{
+    return &m_portfolioArchiveModel;
+}
+
+int TradingController::portfolioArchiveCount() const
+{
+    return m_portfolioArchiveModel.count();
+}
+
+bool TradingController::portfolioArchiveLoading() const
+{
+    return m_portfolioArchiveLoading;
+}
+
+QString TradingController::portfolioArchiveError() const
+{
+    return m_portfolioArchiveError;
 }
 
 void TradingController::clearBacktestResult()

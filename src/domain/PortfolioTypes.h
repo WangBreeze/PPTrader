@@ -18,6 +18,7 @@ struct PortfolioDefinition {
     QString portfolioId;
     QString name;
     QVector<PortfolioLeg> legs;
+    int periodSeconds = 0;
     int rebalanceEveryTradingDays = 1;
     double initialCapital = 1000000.0;
     double commissionRate = 0.0003;
@@ -60,13 +61,37 @@ struct PortfolioTrade {
 
 struct PortfolioResult {
     PortfolioDefinition definition;
+    int periodSeconds = 0;
     QStringList datasetVersions;
     PerformanceSummary summary;
     QVector<PortfolioBar> equityCurve;
     QVector<PortfolioTrade> trades;
 };
 
+struct PortfolioArchiveSummary {
+    QString resultId;
+    QString portfolioId;
+    QString name;
+    QDateTime completedAt;
+    QStringList symbols;
+    int legCount = 0;
+    int periodSeconds = 0;
+    int barCount = 0;
+    QStringList datasetVersions;
+    PerformanceSummary summary;
+
+    QVariantMap toVariantMap() const;
+};
+
+struct PortfolioArchiveRecord {
+    QString resultId;
+    QDateTime completedAt;
+    PortfolioResult result;
+};
+
 } // namespace pp
 
 Q_DECLARE_METATYPE(pp::PortfolioDefinition)
 Q_DECLARE_METATYPE(pp::PortfolioResult)
+Q_DECLARE_METATYPE(pp::PortfolioArchiveSummary)
+Q_DECLARE_METATYPE(pp::PortfolioArchiveRecord)

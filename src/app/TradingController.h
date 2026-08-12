@@ -13,6 +13,8 @@
 #include "models/ExecutionListModel.h"
 #include "models/OrderListModel.h"
 #include "models/PositionListModel.h"
+#include "models/PortfolioArchiveListModel.h"
+#include "models/PortfolioTradeListModel.h"
 #include "models/SignalListModel.h"
 #include "models/StockSearchModel.h"
 #include "models/StrategyListModel.h"
@@ -30,6 +32,7 @@
 #include "services/NasSyncStateStore.h"
 #include "services/NasTickCacheManager.h"
 #include "services/NasTickSyncQueue.h"
+#include "services/PortfolioBacktestService.h"
 #include "services/CrossSectionalIndicatorEngine.h"
 #include "services/HistoricalDataService.h"
 #include "services/HistoricalDataProviderRouter.h"
@@ -161,6 +164,27 @@ class TradingController final : public QObject {
                NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(QVariantList batchBacktestRunHistory READ batchBacktestRunHistory
                NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(bool portfolioBacktestRunning READ portfolioBacktestRunning
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(QString portfolioBacktestStatusText READ portfolioBacktestStatusText
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(QString portfolioBacktestError READ portfolioBacktestError
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(QVariantMap portfolioResultConfiguration
+               READ portfolioResultConfiguration
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(QAbstractItemModel *portfolioEquityCurveModel
+               READ portfolioEquityCurveModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *portfolioTradeModel
+               READ portfolioTradeModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *portfolioArchiveModel
+               READ portfolioArchiveModel CONSTANT)
+    Q_PROPERTY(int portfolioArchiveCount READ portfolioArchiveCount
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(bool portfolioArchiveLoading READ portfolioArchiveLoading
+               NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(QString portfolioArchiveError READ portfolioArchiveError
+               NOTIFY portfolioBacktestStateChanged)
     Q_PROPERTY(QString brokerName READ brokerName CONSTANT)
     Q_PROPERTY(bool brokerLoggedIn READ brokerLoggedIn NOTIFY brokerStateChanged)
     Q_PROPERTY(QString tradingError READ tradingError NOTIFY tradingStateChanged)
@@ -513,6 +537,7 @@ public:
     bool backtestResultArchived() const;
     bool backtestResultHistoricalSnapshot() const;
     bool batchBacktestRunning() const;
+    bool portfolioBacktestRunning() const;
     qulonglong batchBacktestRequestId() const;
     int batchBacktestRequestedCount() const;
     int batchBacktestCompletedCount() const;
@@ -522,6 +547,15 @@ public:
     QString batchBacktestStatusText() const;
     QString batchBacktestError() const;
     QVariantList batchBacktestRunHistory() const;
+    QString portfolioBacktestStatusText() const;
+    QString portfolioBacktestError() const;
+    QVariantMap portfolioResultConfiguration() const;
+    QAbstractItemModel *portfolioEquityCurveModel();
+    QAbstractItemModel *portfolioTradeModel();
+    QAbstractItemModel *portfolioArchiveModel();
+    int portfolioArchiveCount() const;
+    bool portfolioArchiveLoading() const;
+    QString portfolioArchiveError() const;
     QString brokerName() const;
     bool brokerLoggedIn() const;
     QString tradingError() const;
@@ -752,6 +786,11 @@ public:
     Q_INVOKABLE void cancelLocalBatchBacktest();
     Q_INVOKABLE QString archiveBatchBacktestItem(const QString &symbol);
     Q_INVOKABLE QString resumeBatchBacktest(const QString &runId);
+    Q_INVOKABLE qulonglong runPortfolioBacktest(const QString &portfolioJson,
+                                                int barCount);
+    Q_INVOKABLE void cancelPortfolioBacktest();
+    Q_INVOKABLE bool loadPortfolioBacktestArchive(const QString &resultId);
+    Q_INVOKABLE void refreshPortfolioBacktestArchiveList();
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
@@ -847,6 +886,7 @@ signals:
     void backtestArchiveStateChanged();
     void backtestConfigurationChanged();
     void batchBacktestStateChanged();
+    void portfolioBacktestStateChanged();
     void customStrategyStateChanged();
     void statusTextChanged();
     void stockSearchTextChanged();
@@ -912,6 +952,8 @@ private:
         quint64 requestId, const BacktestDatasetIdentity &identity,
         const QVector<Candle> &candles);
     void handleBacktestDatasetFailed(quint64 requestId, const QString &message);
+    void handlePortfolioBacktestCompleted(
+        quint64 requestId, const PortfolioResult &result);
     void handleHistoryKline(quint64 requestId, const QVector<Candle> &candles, bool fromCache);
     void handleHistoryError(quint64 requestId, const QString &message);
     void handleOrderChanged(const Order &order);
@@ -973,6 +1015,9 @@ private:
     EquityCurveListModel m_equityCurveModel;
     BacktestArchiveListModel m_backtestArchiveModel;
     BatchBacktestResultListModel m_batchBacktestModel;
+    EquityCurveListModel m_portfolioEquityCurveModel;
+    PortfolioTradeListModel m_portfolioTradeModel;
+    PortfolioArchiveListModel m_portfolioArchiveModel;
     OrderListModel m_orderModel;
     ExecutionListModel m_executionModel;
     PositionListModel m_positionModel;
@@ -1005,6 +1050,7 @@ private:
     TickDataCsvImportService m_tickDataCsvImportService;
     BacktestEngine m_backtest;
     BatchBacktestService m_batchBacktestService;
+    PortfolioBacktestService m_portfolioBacktestService;
     BacktestStrategyRegistry m_backtestStrategyRegistry;
     CustomStrategyValidator m_customStrategyValidator;
     CustomStrategyCompiler m_customStrategyCompiler;
@@ -1092,6 +1138,14 @@ private:
     QString m_activeBatchBacktestRunId;
     BatchBacktestRunSummary m_activeBatchBacktestRun;
     QVariantList m_batchBacktestRunHistory;
+    quint64 m_portfolioBacktestRequestId = 0;
+    QString m_portfolioBacktestStatusText = QStringLiteral("未运行");
+    QString m_portfolioBacktestError;
+    std::optional<PortfolioResult> m_displayedPortfolioResult;
+    QDateTime m_displayedPortfolioCompletedAt;
+    bool m_portfolioArchiveLoading = false;
+    QString m_portfolioArchiveError;
+    QString m_selectedPortfolioArchiveId;
     QString m_backtestInstrumentSelectionError;
     QString m_localCandleSeriesSymbol;
     QString m_localCandleSeriesFrequency;
