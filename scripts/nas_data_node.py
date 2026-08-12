@@ -38,9 +38,31 @@ def sha256_file(path: Path) -> str:
 
 
 class TickDataNode:
-    def __init__(self, root: Path, token: str) -> None:
+    def __init__(self, root: Path, token: str, token_file: str = "") -> None:
         self.root = root.resolve(strict=True)
-        self.token = token
+        self.token_file = token_file
+        self.environment_token = token
+        self.reload_tokens()
+
+    def reload_tokens(self) -> None:
+        """重建有效 Token 集合：环境 Token 始终保留，文件内容整体替换，
+        使被撤销的旧 Token 在文件更新后立即失效。每次鉴权前调用。"""
+        tokens: set[str] = set()
+        if self.environment_token:
+            tokens.add(self.environment_token)
+        if not self.token_file:
+            self.tokens = tokens
+            return
+        path = Path(self.token_file)
+        if path.is_file():
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    value = line.strip()
+                    if value:
+                        tokens.add(value)
+            except OSError:
+                pass
+        self.tokens = tokens
 
     def tick_path(self, symbol: str, trading_date: str) -> Path | None:
         if not SYMBOL_RE.fullmatch(symbol) or not DATE_RE.fullmatch(trading_date):
@@ -149,11 +171,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def authorized(self) -> bool:
-        if not self.node.token:
+        self.node.reload_tokens()
+        if not self.node.tokens:
             return True
         supplied = self.headers.get("Authorization", "")
-        expected = f"Bearer {self.node.token}"
-        return hmac.compare_digest(supplied, expected)
+        for token in self.node.tokens:
+            if hmac.compare_digest(supplied, f"Bearer {token}"):
+                return True
+        return False
 
     def do_HEAD(self) -> None:
         self.do_GET()
@@ -267,10 +292,11 @@ def main() -> int:
     if not root.is_dir():
         parser.error("--root must be an existing directory")
     token = os.environ.get("PPTRADER_NAS_TOKEN", "")
-    if args.bind not in {"127.0.0.1", "::1", "localhost"} and not token:
-        parser.error("PPTRADER_NAS_TOKEN is required for non-loopback binding")
+    token_file = os.environ.get("PPTRADER_NAS_TOKEN_FILE", "")
+    if args.bind not in {"127.0.0.1", "::1", "localhost"} and not token and not token_file:
+        parser.error("PPTRADER_NAS_TOKEN or PPTRADER_NAS_TOKEN_FILE is required for non-loopback binding")
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    server.node = TickDataNode(root, token)  # type: ignore[attr-defined]
+    server.node = TickDataNode(root, token, token_file)  # type: ignore[attr-defined]
     if bool(args.cert) != bool(args.key):
         parser.error("--cert and --key must be supplied together")
     if args.cert:

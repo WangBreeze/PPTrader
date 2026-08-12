@@ -13,6 +13,8 @@ data/pptrader.db*
 /cbm-admin-install.ps1
 /hwinfo-report.ps1
 /sensors.ps1
+/cleanup-admin.ps1
+/cleanup-result.txt
 
 # Python 缓存
 __pycache__/

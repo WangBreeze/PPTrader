@@ -10,6 +10,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSet>
+#include <QTimer>
 #include <QUrlQuery>
 
 namespace pp {
@@ -172,6 +173,11 @@ bool NasDataNodeClient::setEndpoint(const QUrl &endpoint, QString *error)
 
 QUrl NasDataNodeClient::endpoint() const { return m_endpoint; }
 void NasDataNodeClient::setBearerToken(const QByteArray &token) { m_bearerToken = token; }
+void NasDataNodeClient::setBearerTokenProvider(
+    const BearerTokenProvider &provider)
+{
+    m_bearerTokenProvider = provider;
+}
 
 QNetworkRequest NasDataNodeClient::requestFor(const QUrl &url) const
 {
@@ -180,9 +186,27 @@ QNetworkRequest NasDataNodeClient::requestFor(const QUrl &url) const
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setRawHeader("Accept", "application/json");
-    if (!m_bearerToken.isEmpty())
-        request.setRawHeader("Authorization", QByteArray("Bearer ") + m_bearerToken);
+    const QByteArray token = m_bearerTokenProvider
+        ? m_bearerTokenProvider() : m_bearerToken;
+    if (!token.isEmpty())
+        request.setRawHeader("Authorization", QByteArray("Bearer ") + token);
     return request;
+}
+
+bool NasDataNodeClient::retryUnauthorized(
+    quint64 requestId, QNetworkReply *reply, const std::function<void()> &resend)
+{
+    if (!m_bearerTokenProvider) return false;
+    const int statusCode = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (statusCode != 401) return false;
+    if (m_retryCounts.value(requestId, 0) >= 1) return false;
+    m_replies.remove(requestId);
+    m_downloads.remove(requestId);
+    m_retryCounts.insert(requestId, m_retryCounts.value(requestId, 0) + 1);
+    QTimer::singleShot(0, this, [this, requestId, resend]() { resend(); });
+    reply->deleteLater();
+    return true;
 }
 
 QUrl NasDataNodeClient::resolve(const QString &path) const
@@ -197,6 +221,9 @@ bool NasDataNodeClient::requestHealth(quint64 requestId)
     if (requestId == 0 || m_endpoint.isEmpty() || m_replies.contains(requestId)) return false;
     QNetworkReply *reply = m_network.get(requestFor(resolve(QStringLiteral("v1/health"))));
     m_replies.insert(requestId, reply);
+    m_resenders.insert(requestId, [this, requestId]() {
+        requestHealth(requestId);
+    });
     connect(reply, &QNetworkReply::finished, this,
             [this, requestId, reply]() { finishHealth(requestId, reply); });
     return true;
@@ -216,6 +243,9 @@ bool NasDataNodeClient::requestCatalog(quint64 requestId, const QString &symbol,
     url.setQuery(query);
     QNetworkReply *reply = m_network.get(requestFor(url));
     m_replies.insert(requestId, reply);
+    m_resenders.insert(requestId, [this, requestId, symbol, startDate, endDate]() {
+        requestCatalog(requestId, symbol, startDate, endDate);
+    });
     connect(reply, &QNetworkReply::finished, this,
             [this, requestId, reply]() { finishCatalog(requestId, reply, 1, 2 * 1024 * 1024); });
     return true;
@@ -249,6 +279,10 @@ bool NasDataNodeClient::requestManifest(quint64 requestId,
     request.setTransferTimeout(5 * 60 * 1000);
     QNetworkReply *reply = m_network.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     m_replies.insert(requestId, reply);
+    m_resenders.insert(requestId,
+        [this, requestId, symbols, startDate, endDate]() {
+            requestManifest(requestId, symbols, startDate, endDate);
+        });
     connect(reply, &QNetworkReply::finished, this, [this, requestId, reply, symbols]() {
         finishCatalog(requestId, reply, symbols.size(), 16 * 1024 * 1024);
     });
@@ -318,6 +352,9 @@ bool NasDataNodeClient::downloadTickFile(quint64 requestId,
     QNetworkReply *reply = m_network.get(request);
     m_replies.insert(requestId, reply);
     m_downloads.insert(requestId, state);
+    m_resenders.insert(requestId, [this, requestId, entry, localRoot]() {
+        downloadTickFile(requestId, entry, localRoot);
+    });
     connect(reply, &QNetworkReply::readyRead, this, [reply, state]() {
         const QByteArray bytes = reply->readAll();
         if (bytes.isEmpty()) return;
@@ -342,6 +379,9 @@ void NasDataNodeClient::cancel(quint64 requestId)
 
 void NasDataNodeClient::finishHealth(quint64 requestId, QNetworkReply *reply)
 {
+    const auto resender = m_resenders.value(requestId);
+    if (resender && retryUnauthorized(requestId, reply, resender)) return;
+    m_resenders.remove(requestId);
     m_replies.remove(requestId);
     QString version;
     QString error;
@@ -357,6 +397,9 @@ void NasDataNodeClient::finishHealth(quint64 requestId, QNetworkReply *reply)
 void NasDataNodeClient::finishCatalog(quint64 requestId, QNetworkReply *reply,
                                       int requestedSymbols, int maximumPayloadBytes)
 {
+    const auto resender = m_resenders.value(requestId);
+    if (resender && retryUnauthorized(requestId, reply, resender)) return;
+    m_resenders.remove(requestId);
     m_replies.remove(requestId);
     NasCatalogResult result;
     const QByteArray payload = reply->readAll();
@@ -373,6 +416,9 @@ void NasDataNodeClient::finishDownload(
     quint64 requestId, QNetworkReply *reply,
     const std::shared_ptr<DownloadState> &state)
 {
+    const auto resender = m_resenders.value(requestId);
+    if (resender && retryUnauthorized(requestId, reply, resender)) return;
+    m_resenders.remove(requestId);
     const QByteArray trailing = reply->readAll();
     if (!trailing.isEmpty()) {
         state->hash->addData(trailing);

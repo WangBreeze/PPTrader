@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QUrl>
 
+#include <functional>
 #include <memory>
 
 class QCryptographicHash;
@@ -26,6 +27,8 @@ public:
     bool setEndpoint(const QUrl &endpoint, QString *error = nullptr);
     QUrl endpoint() const;
     void setBearerToken(const QByteArray &token);
+    using BearerTokenProvider = std::function<QByteArray()>;
+    void setBearerTokenProvider(const BearerTokenProvider &provider);
 
     bool requestHealth(quint64 requestId);
     bool requestCatalog(quint64 requestId, const QString &symbol,
@@ -47,6 +50,8 @@ private:
     struct DownloadState;
     QNetworkRequest requestFor(const QUrl &url) const;
     QUrl resolve(const QString &path) const;
+    bool retryUnauthorized(quint64 requestId, QNetworkReply *reply,
+                           const std::function<void()> &resend);
     void finishCatalog(quint64 requestId, QNetworkReply *reply,
                        int requestedSymbols, int maximumPayloadBytes);
     void finishHealth(quint64 requestId, QNetworkReply *reply);
@@ -56,8 +61,11 @@ private:
     QNetworkAccessManager m_network;
     QUrl m_endpoint;
     QByteArray m_bearerToken;
+    BearerTokenProvider m_bearerTokenProvider;
     QHash<quint64, QNetworkReply *> m_replies;
     QHash<quint64, std::shared_ptr<DownloadState>> m_downloads;
+    QHash<quint64, std::function<void()>> m_resenders;
+    QHash<quint64, int> m_retryCounts;
 };
 
 } // namespace pp

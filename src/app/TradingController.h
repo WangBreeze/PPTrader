@@ -1105,6 +1105,8 @@ private:
     QHash<quint64, int> m_nasDownloadIndexByRequestId;
     QHash<int, qint64> m_nasDownloadStartedAtMilliseconds;
     QVector<int> m_nasImportQueue;
+    QByteArray m_nasBearerToken;
+    qint64 m_nasTokenFileLastModified = 0;
     qint64 m_nasDataNodeReceivedBytes = 0;
     qint64 m_nasDataNodeExpectedBytes = 0;
     qint64 m_nasManifestElapsedMilliseconds = 0;

@@ -23,6 +23,8 @@
 
 ## 本次完成
 
+- 完成 H4.2 NAS Token 轮换：客户端支持 `PPTRADER_NAS_TOKEN_FILE` 热重载（每次请求前按 mtime 重读，环境 Token 兼容兜底）与 401 自动重试一次；节点端 `PPTRADER_NAS_TOKEN_FILE` 每行一个 Token、鉴权前重建集合（撤销的旧 Token 立即失效，环境 Token 始终有效）。`tst_nas_data_node` 新增热重载与 401 自愈用例（9/9），Python 节点脚本 Token 重建逻辑验证通过。
+
 - 完成 H4.1b NAS 下载 Range 断点续传：客户端改为写 `.part` 暂存文件，中断/网络失败保留部分字节，重试时携带 `Range: bytes=N-` 续传（服务器不支持时自动从头并清理）；完成后按 catalog 大小与 SHA-256 整体校验并原子改名提交，缓存命中语义不变。FakeNasServer 支持 206/Content-Range 与中断模拟，`tst_nas_data_node` 新增中断→续传→完整校验用例（8/8 通过）。
 
 - 完成 H4.1 并发下载与多活动同步队列：`NasTickSyncQueue` 支持一次取一批 Ready 项并多活动推进（下载并行、导入串行），`TradingController` NAS 同步按 `PPTRADER_NAS_DOWNLOAD_CONCURRENCY`（默认 4）并行下载、独立 requestId 门控、串行事务导入；真实 100 档热缓存复验 21.58s → 18.60s（约 14%），冷缓存预期收益更高。`nas_sync_capacity` 探针支持 `--concurrency`。

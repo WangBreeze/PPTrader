@@ -474,7 +474,27 @@ TradingController::TradingController(QObject *parent)
     if (configuredConcurrency > 0 && configuredConcurrency <= 16) {
         m_nasMaxConcurrentDownloads = configuredConcurrency;
     }
-    m_nasDataNodeClient.setBearerToken(qgetenv("PPTRADER_NAS_TOKEN"));
+    const QString tokenFilePath =
+        qEnvironmentVariable("PPTRADER_NAS_TOKEN_FILE");
+    if (!tokenFilePath.isEmpty()) {
+        m_nasDataNodeClient.setBearerTokenProvider(
+            [this, tokenFilePath]() {
+                const QFileInfo info(tokenFilePath);
+                const qint64 modified = info.exists()
+                    ? info.lastModified().toMSecsSinceEpoch() : 0;
+                if (modified != m_nasTokenFileLastModified) {
+                    m_nasTokenFileLastModified = modified;
+                    QFile file(tokenFilePath);
+                    if (file.open(QIODevice::ReadOnly)) {
+                        m_nasBearerToken = file.readAll().trimmed();
+                    }
+                }
+                if (!m_nasBearerToken.isEmpty()) return m_nasBearerToken;
+                return qgetenv("PPTRADER_NAS_TOKEN");
+            });
+    } else {
+        m_nasDataNodeClient.setBearerToken(qgetenv("PPTRADER_NAS_TOKEN"));
+    }
     const QString savedNasEndpoint = QSettings().value(
         QStringLiteral("nas/endpoint")).toString();
     QString nasEndpointError;

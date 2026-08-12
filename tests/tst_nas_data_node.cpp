@@ -34,6 +34,8 @@ public:
     int manifestRequests = 0;
     int downloadRequests = 0;
     bool authorized = true;
+    bool enforceAuthorization = false;
+    QByteArray lastAuthorization;
     bool resumeSupported = true;
     int failAfterBytes = -1;
 
@@ -59,6 +61,21 @@ protected:
             authorized = authorized && request.contains(
                 "Authorization: " + expectedAuthorization + "\r\n");
             const QByteArray firstLine = request.left(request.indexOf("\r\n"));
+            const QRegularExpression authExpression(
+                QStringLiteral("Authorization: ([^\r\n]+)"),
+                QRegularExpression::CaseInsensitiveOption);
+            const QRegularExpressionMatch authMatch = authExpression.match(
+                QString::fromLatin1(request.left(headerEnd)));
+            if (authMatch.hasMatch()) {
+                lastAuthorization = authMatch.captured(1).toLatin1();
+            }
+            if (enforceAuthorization
+                && lastAuthorization != expectedAuthorization) {
+                socket->write(httpResponse(
+                    401, "application/json", "{\"error\":\"unauthorized\"}"));
+                socket->disconnectFromHost();
+                return;
+            }
             if (firstLine.contains("POST /v1/manifest ")) {
                 ++manifestRequests;
                 const QByteArray digest = QCryptographicHash::hash(
@@ -182,6 +199,7 @@ private slots:
     void catalogDownloadChecksumAndCacheReuse();
     void controlledManifestRequestAndQueue();
     void resumeDownloadAfterInterruption();
+    void tokenRotationHotReloadAndRetry();
     void multiDayQueueFailureResumeAndCancellation();
     void persistedQueueRecoveryAndCacheRetention();
 };
@@ -344,6 +362,65 @@ void NasDataNodeTest::resumeDownloadAfterInterruption()
     QFile file(resumed.localFilePath);
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), server.tickData);
+}
+
+void NasDataNodeTest::tokenRotationHotReloadAndRetry()
+{
+    FakeNasServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    server.enforceAuthorization = true;
+    server.expectedAuthorization = QByteArray("Bearer alpha");
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString tokenPath = directory.filePath(QStringLiteral("token.txt"));
+    {
+        QFile tokenFile(tokenPath);
+        QVERIFY(tokenFile.open(QIODevice::WriteOnly));
+        tokenFile.write("alpha\n");
+    }
+
+    NasDataNodeClient client;
+    QString error;
+    QVERIFY(client.setEndpoint(QUrl(QStringLiteral("http://127.0.0.1:%1/")
+                                        .arg(server.serverPort())), &error));
+    client.setBearerTokenProvider([tokenPath]() {
+        QFile file(tokenPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            return file.readAll().trimmed();
+        }
+        return QByteArray{};
+    });
+
+    QSignalSpy healthSpy(&client, &NasDataNodeClient::healthReady);
+    QVERIFY(client.requestHealth(1));
+    QTRY_COMPARE_WITH_TIMEOUT(healthSpy.count(), 1, 5000);
+    QVERIFY(healthSpy.takeFirst().at(1).toBool());
+    QCOMPARE(server.lastAuthorization, QByteArray("Bearer alpha"));
+
+    // 文件热重载：不重建客户端，下一请求自动使用新 Token。
+    server.expectedAuthorization = QByteArray("Bearer beta");
+    {
+        QFile tokenUpdate(tokenPath);
+        QVERIFY(tokenUpdate.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        tokenUpdate.write("beta\n");
+    }
+    QVERIFY(client.requestHealth(2));
+    QTRY_COMPARE_WITH_TIMEOUT(healthSpy.count(), 1, 5000);
+    QVERIFY(healthSpy.takeFirst().at(1).toBool());
+    QCOMPARE(server.lastAuthorization, QByteArray("Bearer beta"));
+
+    // 401 自愈：首次携带旧 Token 被拒，重试时使用新 Token 成功。
+    server.expectedAuthorization = QByteArray("Bearer gamma");
+    int providerCalls = 0;
+    client.setBearerTokenProvider([&providerCalls]() {
+        return providerCalls++ == 0
+            ? QByteArray("old") : QByteArray("gamma");
+    });
+    QVERIFY(client.requestHealth(3));
+    QTRY_COMPARE_WITH_TIMEOUT(healthSpy.count(), 1, 5000);
+    QVERIFY(healthSpy.takeFirst().at(1).toBool());
+    QCOMPARE(server.lastAuthorization, QByteArray("Bearer gamma"));
 }
 
 void NasDataNodeTest::multiDayQueueFailureResumeAndCancellation()

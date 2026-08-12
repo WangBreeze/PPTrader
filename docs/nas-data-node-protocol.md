@@ -21,6 +21,12 @@ catalog 的 `schemaVersion` 当前为 `1`。每个条目包含 `symbol`、`tradi
 
 推荐生产部署使用 NAS 反向代理终止 TLS、系统服务管理进程，并把访问令牌交给操作系统凭据注入。服务日志不得记录 Authorization、查询参数、仓库绝对路径或文件内容。
 
+### Token 轮换（H4.2）
+
+- 客户端：`PPTRADER_NAS_TOKEN`（环境变量）保持兼容；新增 `PPTRADER_NAS_TOKEN_FILE`（每次请求前按文件修改时间热重载，内容 trim 后整体作为 Token）。收到 401 时自动重新加载 Token 并重试一次，仍失败才报错。
+- 节点端：`PPTRADER_NAS_TOKEN` 环境 Token 始终有效；新增 `PPTRADER_NAS_TOKEN_FILE`，文件每行一个有效 Token，**每次鉴权前重建集合**（文件更新后旧 Token 立即失效，环境 Token 保留）。运维可在重叠期把新旧 Token 同时写入文件，再移除旧 Token，实现不停机轮换。
+- Token 文件路径只来自运行环境，文件内容、路径与轮换状态不写入 SQLite、日志或文档。
+
 ## systemd 用户服务部署
 
 仓库提供 `deploy/systemd/pptrader-nas-node.service` 通用模板。虚拟机基线已经把节点脚本安装到用户本地目录，并启用该用户服务；节点只监听 `127.0.0.1`，实际仓库根目录和端口仅写入目标机的 `%h/.config/pptrader/nas-node.env`，不进入源码或文档。`loginctl enable-linger` 已用于保证没有交互登录时用户服务仍可恢复。
