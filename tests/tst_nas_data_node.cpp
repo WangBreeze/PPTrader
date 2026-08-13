@@ -37,6 +37,7 @@ public:
     bool enforceAuthorization = false;
     QByteArray lastAuthorization;
     bool resumeSupported = true;
+    bool compressSupported = true;
     int failAfterBytes = -1;
 
 protected:
@@ -109,6 +110,11 @@ protected:
                 socket->write(httpResponse(200, "application/json", body));
             } else if (firstLine.contains("/v1/ticks/600519/20260807")) {
                 ++downloadRequests;
+                const bool wantsCompression = compressSupported
+                    && QString::fromLatin1(request.left(headerEnd)).contains(
+                        QRegularExpression(
+                            QStringLiteral("Accept-Encoding:[^\r\n]*zlib"),
+                            QRegularExpression::CaseInsensitiveOption));
                 QByteArray payload = tickData;
                 qint64 start = 0;
                 const QRegularExpression rangeExpression(
@@ -120,7 +126,14 @@ protected:
                     start = rangeMatch.captured(1).toLongLong();
                 }
                 QByteArray response;
-                if (start > 0 && resumeSupported) {
+                if (wantsCompression && start == 0) {
+                    const QByteArray compressed = qCompress(tickData);
+                    response = QByteArray("HTTP/1.1 200 OK\r\n")
+                        + "Content-Type: text/csv\r\n"
+                        + "X-PPTrader-Encoding: zlib\r\n"
+                        + "Content-Length: " + QByteArray::number(compressed.size())
+                        + "\r\nConnection: close\r\n\r\n" + compressed;
+                } else if (start > 0 && resumeSupported) {
                     payload = payload.mid(start);
                     response = QByteArray("HTTP/1.1 206 Partial Content\r\n")
                         + "Content-Type: text/csv\r\n"
@@ -206,6 +219,7 @@ class NasDataNodeTest final : public QObject {
 private slots:
     void endpointPolicy();
     void catalogDownloadChecksumAndCacheReuse();
+    void compressedDownloadDecompressesAndVerifies();
     void controlledManifestRequestAndQueue();
     void resumeDownloadAfterInterruption();
     void tokenRotationHotReloadAndRetry();
@@ -325,9 +339,62 @@ void NasDataNodeTest::catalogDownloadChecksumAndCacheReuse()
     QCOMPARE(server.downloadRequests, 1);
 }
 
+void NasDataNodeTest::compressedDownloadDecompressesAndVerifies()
+{
+    FakeNasServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    NasDataNodeClient client;
+    QString error;
+    QVERIFY(client.setEndpoint(QUrl(QStringLiteral("http://127.0.0.1:%1/")
+                                        .arg(server.serverPort())), &error));
+    client.setBearerToken("test-token");
+
+    QSignalSpy catalogSpy(&client, &NasDataNodeClient::catalogReady);
+    QVERIFY(client.requestCatalog(1, QStringLiteral("600519"),
+                                  QDate(2026, 8, 7), QDate(2026, 8, 7)));
+    QTRY_COMPARE_WITH_TIMEOUT(catalogSpy.count(), 1, 5000);
+    const NasCatalogResult catalog =
+        qvariant_cast<NasCatalogResult>(catalogSpy.takeFirst().at(1));
+    QVERIFY2(catalog.succeeded, qPrintable(catalog.error));
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QSignalSpy downloadSpy(&client, &NasDataNodeClient::downloadReady);
+    QVERIFY(client.downloadTickFile(2, catalog.entries.first(), directory.path()));
+    QTRY_COMPARE_WITH_TIMEOUT(downloadSpy.count(), 1, 5000);
+    NasDownloadResult download =
+        qvariant_cast<NasDownloadResult>(downloadSpy.takeFirst().at(1));
+    QVERIFY2(download.succeeded, qPrintable(download.error));
+    QVERIFY(!download.fromCache);
+    QCOMPARE(download.receivedBytes, server.tickData.size());
+    QFile file(download.localFilePath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), server.tickData);
+    QCOMPARE(server.downloadRequests, 1);
+
+    QVERIFY(client.downloadTickFile(3, catalog.entries.first(), directory.path()));
+    QCOMPARE(downloadSpy.count(), 1);
+    download = qvariant_cast<NasDownloadResult>(downloadSpy.takeFirst().at(1));
+    QVERIFY(download.succeeded);
+    QVERIFY(download.fromCache);
+    QCOMPARE(server.downloadRequests, 1);
+
+    server.compressSupported = false;
+    QTemporaryDir plainDirectory;
+    QVERIFY(plainDirectory.isValid());
+    QVERIFY(client.downloadTickFile(4, catalog.entries.first(), plainDirectory.path()));
+    QTRY_COMPARE_WITH_TIMEOUT(downloadSpy.count(), 1, 5000);
+    download = qvariant_cast<NasDownloadResult>(downloadSpy.takeFirst().at(1));
+    QVERIFY2(download.succeeded, qPrintable(download.error));
+    QFile plainFile(download.localFilePath);
+    QVERIFY(plainFile.open(QIODevice::ReadOnly));
+    QCOMPARE(plainFile.readAll(), server.tickData);
+}
+
 void NasDataNodeTest::resumeDownloadAfterInterruption()
 {
     FakeNasServer server;
+    server.compressSupported = false;
     QVERIFY(server.listen(QHostAddress::LocalHost, 0));
     NasDataNodeClient client;
     QString error;

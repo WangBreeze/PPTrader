@@ -42,7 +42,7 @@
 ### H4：生产 NAS 能力
 
 - 由反向代理提供 HTTPS 与认证轮换；增加健康监控、审计、备份和容量告警。
-- 评估 Parquet/Zstd、断点续传状态机和变更通知。通知只提示 catalog 变化，不自动下载或运行回测。
+- 已实现：Range 断点续传、Token 轮换、变更摘要（H4.1–H4.3）与 zlib 压缩传输（全新下载协商 `Accept-Encoding: zlib`，零新依赖）。剩余：Parquet/pyarrow 二进制解析、WebSocket 变更通知、真正的分块断点续传状态机。通知只提示 catalog 变化，不自动下载或运行回测。
 
 ## 验收规则
 

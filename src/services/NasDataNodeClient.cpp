@@ -124,6 +124,8 @@ struct NasDataNodeClient::DownloadState {
     qint64 receivedBytes = 0;
     qint64 resumeOffset = 0;
     bool writeFailed = false;
+    bool compressed = false;
+    QByteArray compressedBuffer;
 };
 
 NasDataNodeClient::NasDataNodeClient(QObject *parent)
@@ -367,6 +369,8 @@ bool NasDataNodeClient::downloadTickFile(quint64 requestId,
     }
     QNetworkRequest request = requestFor(resolve(entry.downloadPath));
     request.setRawHeader("Accept", "text/csv");
+    if (state->resumeOffset == 0)
+        request.setRawHeader("Accept-Encoding", "zlib");
     if (state->resumeOffset > 0) {
         request.setRawHeader("Range", QByteArray("bytes=")
                                  + QByteArray::number(state->resumeOffset)
@@ -381,6 +385,16 @@ bool NasDataNodeClient::downloadTickFile(quint64 requestId,
     connect(reply, &QNetworkReply::readyRead, this, [reply, state]() {
         const QByteArray bytes = reply->readAll();
         if (bytes.isEmpty()) return;
+        if (!state->compressed
+            && reply->hasRawHeader("X-PPTrader-Encoding")
+            && reply->rawHeader("X-PPTrader-Encoding").trimmed().toLower()
+                == QByteArray("zlib")) {
+            state->compressed = true;
+        }
+        if (state->compressed) {
+            state->compressedBuffer.append(bytes);
+            return;
+        }
         state->hash->addData(bytes);
         state->receivedBytes += bytes.size();
         if (state->file->write(bytes) != bytes.size()) state->writeFailed = true;
@@ -484,18 +498,32 @@ void NasDataNodeClient::finishDownload(
     const auto resender = m_resenders.value(requestId);
     if (resender && retryUnauthorized(requestId, reply, resender)) return;
     m_resenders.remove(requestId);
-    const QByteArray trailing = reply->readAll();
-    if (!trailing.isEmpty()) {
-        state->hash->addData(trailing);
-        state->receivedBytes += trailing.size();
-        if (state->file->write(trailing) != trailing.size()) state->writeFailed = true;
-    }
-    m_replies.remove(requestId);
-    m_downloads.remove(requestId);
     NasDownloadResult result;
     result.entry = state->entry;
     result.localRoot = state->localRoot;
     result.localFilePath = state->localFilePath;
+    const QByteArray trailing = reply->readAll();
+    if (!trailing.isEmpty()) {
+        if (state->compressed) {
+            state->compressedBuffer.append(trailing);
+        } else {
+            state->hash->addData(trailing);
+            state->receivedBytes += trailing.size();
+            if (state->file->write(trailing) != trailing.size()) state->writeFailed = true;
+        }
+    }
+    if (state->compressed && reply->error() == QNetworkReply::NoError) {
+        const QByteArray decoded = qUncompress(state->compressedBuffer);
+        if (decoded.isEmpty() && !state->compressedBuffer.isEmpty()) {
+            result.error = QStringLiteral("NAS 下载解压失败");
+        } else {
+            state->hash->addData(decoded);
+            state->receivedBytes = decoded.size();
+            if (state->file->write(decoded) != decoded.size()) state->writeFailed = true;
+        }
+    }
+    m_replies.remove(requestId);
+    m_downloads.remove(requestId);
     result.receivedBytes = state->receivedBytes;
     const int statusCode = reply->attribute(
         QNetworkRequest::HttpStatusCodeAttribute).toInt();

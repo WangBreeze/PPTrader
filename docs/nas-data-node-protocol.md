@@ -31,9 +31,11 @@ catalog 的 `schemaVersion` 当前为 `1`。每个条目包含 `symbol`、`tradi
 
 `GET /v1/changes?since=<epoch 毫秒>`：只扫描根目录下一层日期目录的修改时间，不递归文件，不下载、不触发回测。返回 `schemaVersion`、`totalDirectories`、`latestDirectoryAt` 与 `changedDirectories`（按日期升序）。客户端 `requestNasNodeChanges()` 显式轮询，QML"检查节点更新"按钮展示目录总数、最近时间与变更数量；它只提示变化，不自动同步。
 
-### 压缩传输评估（Parquet/Zstd，后续项）
+### 压缩传输（已实现，zlib）
 
-当前瓶颈是解析与写库，传输占比约 20%（热缓存约 9%）。Zstd 压缩 CSV 方案预计把冷缓存传输段从 8.6 s 降至 2–3 s，但解析 21.6 s 不变，100 档端到端预计 43 s → 30–35 s。需要新增 `zstandard` Python 依赖与节点端预压缩/客户端解压桥；若引入二进制批量解析（pyarrow），解析段可进一步下降，但改动面更大。建议在并发下载与断点续传稳定后按需实施。
+为保持节点 Python 标准库与 Qt 客户端零新依赖，先落地 zlib 压缩（而非 Zstd）：客户端在**全新完整下载**时发送 `Accept-Encoding: zlib`；节点把原始 CSV 用 `zlib.compress` 压缩，并按 4 字节大端原始长度 + zlib 流返回，响应头带 `X-PPTrader-Encoding: zlib`、`X-Original-Size` 与 `X-Content-SHA256`。客户端收到后 `qUncompress` 解压，仍按 catalog 的 `size` 与 `sha256` 整体校验后原子提交，缓存命中语义不变。带 `Range` 的续传请求不压缩，走原 206 路径。
+
+验证：`tst_nas_data_node` 新增压缩下载→解压→校验→缓存复用，以及关闭压缩后的兼容回退用例（11/11）；Python 节点本地端到端校验通过（144000 字节 CSV 压缩到 564 字节，大小/摘要/内容全部一致）。真实生产吞吐与耗时留待虚拟机复验。已知取舍：压缩下载若在网络层中断不会写入 `.part`，重试会重新压缩下载，不复用字节续传；局域网场景可接受。二进制批量解析（pyarrow）与 WebSocket 变更通知仍为后续项。
 
 ## systemd 用户服务部署
 

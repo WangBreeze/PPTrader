@@ -14,6 +14,8 @@ import json
 import os
 import re
 import ssl
+import struct
+import zlib
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -304,6 +306,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             start = int(match.group(1))
+        accepts = [part.strip().lower() for part in self.headers.get("Accept-Encoding", "").split(",")]
+        if start == 0 and "zlib" in accepts:
+            with path.open("rb") as stream:
+                original = stream.read()
+            compressed = zlib.compress(original, 9)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/csv")
+            self.send_header("X-PPTrader-Encoding", "zlib")
+            self.send_header("ETag", f'"sha256:{digest}"')
+            self.send_header("X-Content-SHA256", digest)
+            self.send_header("X-Original-Size", str(size))
+            self.send_header("Content-Length", str(len(compressed) + 4))
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            self.wfile.write(struct.pack(">I", size) + compressed)
+            return
         status = HTTPStatus.PARTIAL_CONTENT if start else HTTPStatus.OK
         self.send_response(status)
         self.send_header("Content-Type", "text/csv")
