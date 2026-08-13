@@ -23,6 +23,8 @@
 
 ## 本次完成
 
+- 完成 NAS 节点摘要缓存：`nas_data_node.py` 按 `(mtime_ns, size)` 缓存文件 SHA-256，`/v1/catalog` 与 `/v1/manifest` 复用缓存避免对同一文件重复哈希；`/v1/health` 新增 `digestCacheEntries`/`digestCacheHits` 统计（客户端只读 version，向后兼容）。Python 节点本地端到端校验：连续两次 catalog 后命中 1 次、摘要一致。
+
 - 完成自定义策略 DSL v2 信号输出配置：新增可选顶层 `signal`（仅 v2），`priceMode` 支持 `triggerClose`（默认，v1 行为不变）与 `nextOpen`（触发后下一根 K 线开盘价成交）。`CustomBacktestStrategy` 增加挂起入场状态，`nextOpen` 在下一 Bar 开盘价发出买入信号并以该开盘价为持仓参考价；`tst_custom_strategy` 新增两模式成交价对比与 v1 拒绝用例（14/14）。对应设计稿 26:58 的“信号输出：价格 = 下一根开盘价”。
 
 - 完成 NAS 传输压缩（zlib，零新依赖）：客户端全新下载发送 `Accept-Encoding: zlib`，节点 `nas_data_node.py` 返回 4 字节原始长度 + `zlib.compress` 体并带 `X-PPTrader-Encoding: zlib`；客户端 `qUncompress` 解压后仍按 catalog `size`/`sha256` 整体校验并原子提交，`Range` 续传路径保持不压缩。`tst_nas_data_node` 新增压缩下载→解压→校验→缓存复用与关闭压缩回退用例（11/11）；Python 节点本地端到端校验通过（144000 字节 CSV → 564 字节，大小/摘要/内容全对）。真实虚拟机吞吐复验与 pyarrow 二进制解析、WebSocket 变更通知、分块续传仍为后续项。协议与路线图已同步。

@@ -44,6 +44,8 @@ class TickDataNode:
         self.root = root.resolve(strict=True)
         self.token_file = token_file
         self.environment_token = token
+        self._digest_cache: dict[Path, tuple[int, int, str]] = {}
+        self._digest_cache_hits = 0
         self.reload_tokens()
 
     def reload_tokens(self) -> None:
@@ -76,6 +78,29 @@ class TickDataNode:
             return None
         return candidate if candidate.is_file() else None
 
+    def digest_cached(self, path: Path) -> str:
+        """按 (mtime_ns, size) 缓存文件 SHA-256，避免 manifest/catalog 重复哈希。"""
+        try:
+            stat = path.stat()
+        except OSError:
+            return sha256_file(path)
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = self._digest_cache.get(path)
+        if cached is not None and cached[0] == key[0] and cached[1] == key[1]:
+            self._digest_cache_hits += 1
+            return cached[2]
+        digest = sha256_file(path)
+        self._digest_cache[path] = (key[0], key[1], digest)
+        return digest
+
+    def health(self) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "version": SERVER_VERSION,
+            "digestCacheEntries": len(self._digest_cache),
+            "digestCacheHits": self._digest_cache_hits,
+        }
+
     def catalog(self, symbol: str, start: str, end: str) -> list[dict[str, object]]:
         if not SYMBOL_RE.fullmatch(symbol):
             return []
@@ -96,7 +121,7 @@ class TickDataNode:
             path = self.tick_path(symbol, name)
             if path is not None:
                 stat = path.stat()
-                digest = sha256_file(path)
+                digest = self.digest_cached(path)
                 entries.append({
                     "symbol": symbol,
                     "tradingDate": current.isoformat(),
@@ -173,7 +198,7 @@ class TickDataNode:
                 if path is None:
                     continue
                 stat = path.stat()
-                digest = sha256_file(path)
+                digest = self.digest_cached(path)
                 entries.append({
                     "symbol": symbol,
                     "tradingDate": current.isoformat(),
@@ -226,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/v1/health":
-            self.json_response(HTTPStatus.OK, {"status": "ok", "version": SERVER_VERSION})
+            self.json_response(HTTPStatus.OK, self.node.health())
             return
         if not self.authorized():
             self.json_response(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})

@@ -8,7 +8,7 @@ NAS 数据节点是 PPTrader 与局域网原始 Tick 仓库之间的只读传输
 
 ## HTTP v1 契约
 
-- `GET /v1/health`：返回服务状态与协议版本。
+- `GET /v1/health`：返回服务状态、协议版本与摘要缓存统计（`digestCacheEntries`/`digestCacheHits`）。节点按 `(mtime_ns, size)` 缓存文件 SHA-256，manifest/catalog 复用不重复哈希；客户端只读 `version`，额外字段向后兼容。
 - `GET /v1/catalog?symbol=600519&start=20260801&end=20260807`：返回确定日期范围内实际存在的文件清单。
 - `POST /v1/manifest`：接收显式代码数组与最多 31 天日期范围，返回受控多代码文件清单；最多 6000 个代码、12000 个条目。
 - `GET /v1/ticks/600519/20260807`：下载单代码单交易日文件，支持 `Range`、`ETag` 和 `Accept-Ranges`。
