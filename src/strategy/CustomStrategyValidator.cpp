@@ -155,7 +155,8 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
         QStringLiteral("market"), QStringLiteral("executionScope"),
         QStringLiteral("createdAt"), QStringLiteral("updatedAt"),
         QStringLiteral("parameters"), QStringLiteral("position"), QStringLiteral("risk"),
-        QStringLiteral("entry"), QStringLiteral("exit"), QStringLiteral("series")
+        QStringLiteral("entry"), QStringLiteral("exit"), QStringLiteral("series"),
+        QStringLiteral("signal")
     };
     if (!hasOnlyKeys(input, allowedTopLevel, QStringLiteral("策略定义"), error)) return false;
     const int schemaVersion = input.value(QStringLiteral("schemaVersion")).toInt(-1);
@@ -165,6 +166,25 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
     const bool v2 = schemaVersion == 2;
     if (input.contains(QStringLiteral("series")) && !v2) {
         return fail(error, QStringLiteral("series 需要 schemaVersion=2"));
+    }
+    if (input.contains(QStringLiteral("signal")) && !v2) {
+        return fail(error, QStringLiteral("signal 需要 schemaVersion=2"));
+    }
+    if (v2 && input.contains(QStringLiteral("signal"))) {
+        if (!input.value(QStringLiteral("signal")).isObject()) {
+            return fail(error, QStringLiteral("signal 必须是对象"));
+        }
+        const QJsonObject signal = input.value(QStringLiteral("signal")).toObject();
+        if (!hasOnlyKeys(signal, {QStringLiteral("priceMode")},
+                         QStringLiteral("signal"), error)) {
+            return false;
+        }
+        const QString priceMode = signal.value(QStringLiteral("priceMode"))
+            .toString(QStringLiteral("triggerClose"));
+        if (priceMode != QStringLiteral("triggerClose")
+            && priceMode != QStringLiteral("nextOpen")) {
+            return fail(error, QStringLiteral("signal.priceMode 仅支持 triggerClose/nextOpen"));
+        }
     }
 
     CustomStrategyDefinition result;

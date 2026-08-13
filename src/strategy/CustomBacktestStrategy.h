@@ -34,6 +34,7 @@ private:
     QVector<std::optional<double>> m_previousLeft;
     QVector<std::optional<double>> m_previousRight;
     bool m_hasPosition = false;
+    bool m_pendingEntry = false;
     double m_entryReferencePrice = 0.0;
     QDate m_entryTradingDate;
     int m_holdingBars = 0;

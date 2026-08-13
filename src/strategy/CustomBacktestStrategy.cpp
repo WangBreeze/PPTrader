@@ -88,26 +88,41 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
 
     static const QTimeZone shanghaiTimeZone("Asia/Shanghai");
     const QDate tradingDate = candle.startTime.toTimeZone(shanghaiTimeZone).date();
-    auto emitSignal = [&](SignalSide side, const QString &reason) {
+    auto emitSignal = [&](SignalSide side, const QString &reason, double price) {
         TradeSignal signal;
         signal.instrument = candle.instrument;
         signal.timestamp = candle.startTime;
         signal.side = side;
-        signal.price = candle.close;
+        signal.price = price;
         signal.volume = candle.volume;
         signal.reason = QStringLiteral("自定义策略 %1 v%2 · %3")
             .arg(m_plan.name).arg(m_plan.version).arg(reason);
         emit signalGenerated(signal);
     };
 
+    if (m_pendingEntry) {
+        m_pendingEntry = false;
+        m_hasPosition = true;
+        m_entryReferencePrice = candle.open;
+        m_entryTradingDate = tradingDate;
+        m_holdingBars = 0;
+        m_pendingExitReason.clear();
+        emitSignal(SignalSide::Buy,
+                   QStringLiteral("进入条件成立（下一根开盘价成交）"), candle.open);
+    }
+
     if (!m_hasPosition) {
         if (!entry.value_or(false)) return;
+        if (m_plan.signalPriceMode == CustomSignalPriceMode::NextOpen) {
+            m_pendingEntry = true;
+            return;
+        }
         m_hasPosition = true;
         m_entryReferencePrice = candle.close;
         m_entryTradingDate = tradingDate;
         m_holdingBars = 0;
         m_pendingExitReason.clear();
-        emitSignal(SignalSide::Buy, QStringLiteral("进入条件成立"));
+        emitSignal(SignalSide::Buy, QStringLiteral("进入条件成立"), candle.close);
         return;
     }
 
@@ -115,7 +130,7 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
     if (!m_pendingExitReason.isEmpty() && tradingDate > m_entryTradingDate) {
         const QString reason = m_pendingExitReason
             + QStringLiteral("（T+1 延迟执行）");
-        emitSignal(SignalSide::Sell, reason);
+        emitSignal(SignalSide::Sell, reason, candle.close);
         m_hasPosition = false;
         m_entryReferencePrice = 0.0;
         m_entryTradingDate = {};
@@ -146,7 +161,7 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
         return;
     }
 
-    emitSignal(SignalSide::Sell, exitReason);
+    emitSignal(SignalSide::Sell, exitReason, candle.close);
     m_hasPosition = false;
     m_entryReferencePrice = 0.0;
     m_entryTradingDate = {};
@@ -160,6 +175,7 @@ void CustomBacktestStrategy::reset()
     m_previousLeft.fill(std::nullopt);
     m_previousRight.fill(std::nullopt);
     m_hasPosition = false;
+    m_pendingEntry = false;
     m_entryReferencePrice = 0.0;
     m_entryTradingDate = {};
     m_holdingBars = 0;

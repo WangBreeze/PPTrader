@@ -79,6 +79,7 @@ v2 在 v1 基础上新增三项能力，v1 文档保持原语义不变（v1 仍�
    也可以只在条件操作数上写 `alias`（内联别名），两种方式共用同一别名命名空间，别名必须唯一且匹配 `^[a-z][A-Za-z0-9_]{0,31}$`。
 2. 新增指标白名单：`ROC`（period 2–500，按百分比输出 `(close - close[N]) / close[N] * 100`）、`VWAP`（按 Asia/Shanghai 交易会话累计典型价 × 成交量 / 累计成交量）、`PP_FLOW`（价量趋势 PVT，累计 `Σ (close - prevClose) / prevClose * volume`）。
 3. 编译器在编译条件前先注册全部 `series` 与内联别名，允许条件前向引用后面才定义的序列。
+4. 可选 `signal` 输出配置：`{"priceMode": "triggerClose" | "nextOpen"}`，默认 `triggerClose`（触发 Bar 收盘价成交，v1 行为不变）；`nextOpen` 表示入场信号在触发后下一根 K 线的开盘价成交。
 
 约束与 v1 保持一致：`market` 仍仅支持 `A股`、`executionScope` 仍为 `backtest_only`、T+1 强制开启；新指标只允许出现在 v2 文档中。
 

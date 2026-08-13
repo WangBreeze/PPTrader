@@ -26,6 +26,7 @@ private slots:
     void v2SupportsAliasedSeriesAndNewIndicators();
     void v2SupportsTopLevelSeries();
     void v1RejectsV2OnlySyntax();
+    void nextOpenSignalFillPrice();
     void buildsPreviewSeriesAndSignals();
     void compilesCrossConditionsAndResetsDeterministically();
     void validatesCompilesAndExecutesPositionRiskRules();
@@ -675,6 +676,83 @@ void CustomStrategyTest::v2SupportsTopLevelSeries()
     QJsonObject v1WithSeries = validDocument();
     v1WithSeries.insert(QStringLiteral("series"), QJsonArray{});
     QVERIFY(!validator.validate(v1WithSeries, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("schemaVersion=2")));
+}
+
+void CustomStrategyTest::nextOpenSignalFillPrice()
+{
+    Instrument instrument;
+    instrument.symbol = QStringLiteral("600519");
+    instrument.market = Market::AShare;
+    auto candle = [&](const QDate &date, const QTime &time, double open, double close) {
+        Candle value;
+        value.instrument = instrument;
+        value.startTime = QDateTime(date, time, Qt::UTC);
+        value.open = open;
+        value.close = close;
+        value.high = std::max(open, close) + 1.0;
+        value.low = std::min(open, close) - 1.0;
+        value.volume = 1000.0;
+        return value;
+    };
+    auto makeDocument = [](const QString &priceMode) {
+        QJsonObject document = validDocument();
+        document.insert(QStringLiteral("schemaVersion"), 2);
+        document.insert(QStringLiteral("parameters"), QJsonArray{});
+        document.insert(QStringLiteral("signal"), QJsonObject{
+            {QStringLiteral("priceMode"), priceMode}});
+        document.insert(QStringLiteral("entry"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("gt")},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 100.0}}}});
+        document.insert(QStringLiteral("exit"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("lt")},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 50.0}}}});
+        return document;
+    };
+
+    CustomStrategyValidator validator;
+    CustomStrategyCompiler compiler;
+    QString error;
+
+    CustomStrategyDefinition nextOpenDefinition;
+    QVERIFY2(validator.validate(makeDocument(QStringLiteral("nextOpen")),
+                                &nextOpenDefinition, &error), qPrintable(error));
+    const auto nextOpenPlan = compiler.compile(nextOpenDefinition, {}, &error);
+    QVERIFY2(nextOpenPlan.has_value(), qPrintable(error));
+    CustomBacktestStrategy nextOpenStrategy(*nextOpenPlan);
+    qRegisterMetaType<TradeSignal>();
+    QSignalSpy nextOpenSpy(&nextOpenStrategy, &Strategy::signalGenerated);
+    const QDate date(2026, 5, 4);
+    nextOpenStrategy.onCandle(candle(date, QTime(2, 0), 96.0, 98.0));
+    nextOpenStrategy.onCandle(candle(date, QTime(2, 5), 99.0, 102.0));
+    nextOpenStrategy.onCandle(candle(date, QTime(2, 10), 105.0, 110.0));
+    QCOMPARE(nextOpenSpy.count(), 1);
+    const TradeSignal nextOpenSignal =
+        nextOpenSpy.at(0).at(0).value<TradeSignal>();
+    QCOMPARE(nextOpenSignal.price, 105.0);
+    QCOMPARE(nextOpenSignal.timestamp,
+             QDateTime(date, QTime(2, 10), Qt::UTC));
+
+    CustomStrategyDefinition triggerCloseDefinition;
+    QVERIFY2(validator.validate(makeDocument(QStringLiteral("triggerClose")),
+                                &triggerCloseDefinition, &error), qPrintable(error));
+    const auto triggerClosePlan = compiler.compile(triggerCloseDefinition, {}, &error);
+    QVERIFY2(triggerClosePlan.has_value(), qPrintable(error));
+    CustomBacktestStrategy triggerCloseStrategy(*triggerClosePlan);
+    QSignalSpy triggerCloseSpy(&triggerCloseStrategy, &Strategy::signalGenerated);
+    triggerCloseStrategy.onCandle(candle(date, QTime(2, 0), 96.0, 98.0));
+    triggerCloseStrategy.onCandle(candle(date, QTime(2, 5), 99.0, 102.0));
+    QCOMPARE(triggerCloseSpy.count(), 1);
+    const TradeSignal triggerCloseSignal =
+        triggerCloseSpy.at(0).at(0).value<TradeSignal>();
+    QCOMPARE(triggerCloseSignal.price, 102.0);
+
+    QJsonObject v1WithSignal = validDocument();
+    v1WithSignal.insert(QStringLiteral("signal"), QJsonObject{
+        {QStringLiteral("priceMode"), QStringLiteral("nextOpen")}});
+    QVERIFY(!validator.validate(v1WithSignal, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("schemaVersion=2")));
 }
 

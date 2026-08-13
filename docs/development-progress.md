@@ -23,6 +23,8 @@
 
 ## 本次完成
 
+- 完成自定义策略 DSL v2 信号输出配置：新增可选顶层 `signal`（仅 v2），`priceMode` 支持 `triggerClose`（默认，v1 行为不变）与 `nextOpen`（触发后下一根 K 线开盘价成交）。`CustomBacktestStrategy` 增加挂起入场状态，`nextOpen` 在下一 Bar 开盘价发出买入信号并以该开盘价为持仓参考价；`tst_custom_strategy` 新增两模式成交价对比与 v1 拒绝用例（14/14）。对应设计稿 26:58 的“信号输出：价格 = 下一根开盘价”。
+
 - 完成 NAS 传输压缩（zlib，零新依赖）：客户端全新下载发送 `Accept-Encoding: zlib`，节点 `nas_data_node.py` 返回 4 字节原始长度 + `zlib.compress` 体并带 `X-PPTrader-Encoding: zlib`；客户端 `qUncompress` 解压后仍按 catalog `size`/`sha256` 整体校验并原子提交，`Range` 续传路径保持不压缩。`tst_nas_data_node` 新增压缩下载→解压→校验→缓存复用与关闭压缩回退用例（11/11）；Python 节点本地端到端校验通过（144000 字节 CSV → 564 字节，大小/摘要/内容全对）。真实虚拟机吞吐复验与 pyarrow 二进制解析、WebSocket 变更通知、分块续传仍为后续项。协议与路线图已同步。
 
 - 完成自定义策略 DSL v2 与向导第 3 步（指标组合）：`schemaVersion=2` 新增顶层 `series` 命名序列/别名引用（也支持操作数内联 `alias`，前向引用允许）与三个指标 `ROC`（百分比变动）、`VWAP`（Asia/Shanghai 会话累计）、`PP_FLOW`（价量趋势 PVT）；v1 文档语义保持不变并拒绝 v2 语法。新增只读预览服务 `CustomStrategyPreviewService` 与 `TradingController.customStrategyPreview()`（本地最近 K 线重放，返回指标序列 + B/S 信号，不写库）。`tst_custom_strategy` 扩展至 13 项（别名/顶层 series/新指标数值/会话重置/预览/ v1 拒绝），全量 CTest 22/22、`all_qmllint` 通过。QML 新增 `CustomStrategyWizard`：八步向导壳（第 3 步完整实现）、已选指标卡片（别名/周期/显示/移除/添加白名单）、入场/出场条件构建器（序列/字段/常量、七种比较符）、右侧组合预览（Canvas K 线 + 指标线叠加 + B/S 标记 + 命中详情 + 执行摘要）、前端草稿暂存（Qt.labs.settings），并与现有 JSON 工作台双模式并存（向导生成 DSL v2 JSON → 校验/保存/回测）。设计稿依据 Figma 节点 26:58。

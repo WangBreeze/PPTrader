@@ -343,6 +343,11 @@ std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
     plan.rules.takeProfitPercent = risk.value(QStringLiteral("takeProfitPercent")).toDouble(0.0);
     plan.rules.maximumHoldingBars = risk.value(QStringLiteral("maximumHoldingBars")).toInt(0);
     plan.rules.tPlusOne = risk.value(QStringLiteral("tPlusOne")).toBool(true);
+    const QString priceMode = validated.document.value(QStringLiteral("signal"))
+        .toObject().value(QStringLiteral("priceMode"))
+        .toString(QStringLiteral("triggerClose"));
+    plan.signalPriceMode = priceMode == QStringLiteral("nextOpen")
+        ? CustomSignalPriceMode::NextOpen : CustomSignalPriceMode::TriggerClose;
     PlanBuilder builder(normalized, &plan, validated.schemaVersion == 2, error);
     if (validated.schemaVersion == 2) {
         builder.preRegisterSeries(

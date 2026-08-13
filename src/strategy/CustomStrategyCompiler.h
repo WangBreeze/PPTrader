@@ -12,6 +12,7 @@ namespace pp {
 enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma,
                                  Roc, Vwap, PpFlow };
 enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator };
+enum class CustomSignalPriceMode { TriggerClose, NextOpen };
 enum class CustomConditionOp {
     And, Or, Not, Greater, GreaterOrEqual, Less, LessOrEqual, Equal,
     CrossesAbove, CrossesBelow
@@ -66,6 +67,7 @@ struct CompiledCustomStrategy {
     int exitCondition = -1;
     int minimumWarmupBars = 1;
     CompiledCustomRules rules;
+    CustomSignalPriceMode signalPriceMode = CustomSignalPriceMode::TriggerClose;
 };
 
 class CustomStrategyCompiler {
