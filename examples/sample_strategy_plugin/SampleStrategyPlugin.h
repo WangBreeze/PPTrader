@@ -18,6 +18,7 @@ public:
     QString pluginName() const override;
     int pluginVersion() const override;
     QString pluginDescription() const override;
+    QVector<PluginParameterSpec> parameterSchema() const override;
 
     Strategy *createStrategy(const QVariantMap &config,
                              QObject *parent = nullptr) const override;

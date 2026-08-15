@@ -175,6 +175,13 @@ void StrategyPluginTest::loadsRealPluginAndCreatesStrategy()
     QCOMPARE(plugin->pluginId(), QStringLiteral("pp.sample.threshold"));
     QCOMPARE(plugin->pluginApiVersion(), QStringLiteral("pp.StrategyPlugin/1.0"));
 
+    const QVector<PluginParameterSpec> schema = plugin->parameterSchema();
+    QCOMPARE(schema.size(), 1);
+    QCOMPARE(schema.first().key, QStringLiteral("threshold"));
+    QCOMPARE(schema.first().type, QStringLiteral("real"));
+    QCOMPARE(schema.first().defaultValue.toDouble(), 100.0);
+    QVERIFY(schema.first().toVariantMap().contains(QStringLiteral("displayName")));
+
     QVariantMap config;
     config.insert(QStringLiteral("symbol"), QStringLiteral("600519"));
     config.insert(QStringLiteral("threshold"), 100.0);

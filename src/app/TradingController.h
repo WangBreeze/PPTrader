@@ -931,6 +931,7 @@ public:
     Q_INVOKABLE bool loadStrategyPlugin(const QString &fileName);
     Q_INVOKABLE bool unloadStrategyPlugin(const QString &pluginId);
     Q_INVOKABLE QVariantList loadedStrategyPlugins() const;
+    Q_INVOKABLE QVariantList strategyPluginParameterSchema(const QString &pluginId) const;
     Q_INVOKABLE bool activateStrategyPluginStrategy(const QString &pluginId,
                                                     const QVariantMap &config);
     Q_INVOKABLE void setStrategyPluginDirectory(const QString &path);

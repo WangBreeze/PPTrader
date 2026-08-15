@@ -4740,6 +4740,19 @@ QVariantList TradingController::loadedStrategyPlugins() const
     return result;
 }
 
+QVariantList TradingController::strategyPluginParameterSchema(const QString &pluginId) const
+{
+    QVariantList result;
+    StrategyPlugin *plugin = m_strategyPluginManager.plugin(pluginId);
+    if (!plugin) return result;
+    const QVector<PluginParameterSpec> specs = plugin->parameterSchema();
+    result.reserve(specs.size());
+    for (const PluginParameterSpec &spec : specs) {
+        result.append(spec.toVariantMap());
+    }
+    return result;
+}
+
 bool TradingController::activateStrategyPluginStrategy(const QString &pluginId,
                                                        const QVariantMap &config)
 {
