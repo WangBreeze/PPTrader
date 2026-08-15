@@ -197,6 +197,8 @@ qt_add_executable(PPTrader
     src/strategy/CustomBacktestStrategy.h
     src/strategy/CrossSectionalIndicatorRuntime.cpp
     src/strategy/CrossSectionalIndicatorRuntime.h
+    src/strategy/CrossSectionalCustomStrategy.cpp
+    src/strategy/CrossSectionalCustomStrategy.h
     src/strategy/CustomIndicatorRuntime.cpp
     src/strategy/CustomIndicatorRuntime.h
     src/strategy/CustomStrategyCompiler.cpp
@@ -941,8 +943,21 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_cross_sectional_backtest
         tests/tst_cross_sectional_backtest.cpp
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/MarketTypes.h
+        src/services/AlignedBarSeries.cpp
+        src/services/AlignedBarSeries.h
         src/strategy/CrossSectionalIndicatorRuntime.cpp
         src/strategy/CrossSectionalIndicatorRuntime.h
+        src/strategy/CrossSectionalCustomStrategy.cpp
+        src/strategy/CrossSectionalCustomStrategy.h
+        src/strategy/CustomStrategyCompiler.cpp
+        src/strategy/CustomStrategyCompiler.h
+        src/strategy/CustomStrategyValidator.cpp
+        src/strategy/CustomStrategyValidator.h
+        src/strategy/CustomIndicatorRuntime.cpp
+        src/strategy/CustomIndicatorRuntime.h
     )
     target_include_directories(tst_cross_sectional_backtest PRIVATE src)
     target_link_libraries(tst_cross_sectional_backtest PRIVATE Qt6::Core Qt6::Test)

@@ -1,5 +1,11 @@
 #include "strategy/CrossSectionalIndicatorRuntime.h"
+#include "strategy/CrossSectionalCustomStrategy.h"
+#include "strategy/CustomStrategyCompiler.h"
+#include "strategy/CustomStrategyValidator.h"
+#include "domain/CustomStrategyTypes.h"
 
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QTest>
 
 #include <cmath>
@@ -15,7 +21,19 @@ private slots:
     void percentileMapsTopToLowest();
     void meanAndMedianScalars();
     void emptyInputReturnsEmpty();
+    void strategySelectsTopNByCrossRank();
 };
+
+static Candle makeBar(const QString &symbol, double close)
+{
+    Candle candle;
+    candle.instrument.symbol = symbol;
+    candle.startTime = QDateTime(QDate(2026, 8, 1), QTime(9, 30));
+    candle.periodSeconds = 60;
+    candle.open = candle.high = candle.low = candle.close = close;
+    candle.volume = 1000.0;
+    return candle;
+}
 
 void CrossSectionalBacktestTest::rankSortsDescendingWithStableTies()
 {
@@ -86,6 +104,65 @@ void CrossSectionalBacktestTest::emptyInputReturnsEmpty()
     QVERIFY(CrossSectionalIndicatorRuntime::percentile({}).isEmpty());
     QCOMPARE(CrossSectionalIndicatorRuntime::mean({}), 0.0);
     QCOMPARE(CrossSectionalIndicatorRuntime::median({}), 0.0);
+}
+
+void CrossSectionalBacktestTest::strategySelectsTopNByCrossRank()
+{
+    QJsonObject document;
+    document.insert(QStringLiteral("schemaVersion"), 3);
+    document.insert(QStringLiteral("strategyId"), QStringLiteral("custom_cross_test"));
+    document.insert(QStringLiteral("version"), 1);
+    document.insert(QStringLiteral("name"), QStringLiteral("横截面测试"));
+    document.insert(QStringLiteral("author"), QStringLiteral("Qt Test"));
+    document.insert(QStringLiteral("market"), QStringLiteral("A股"));
+    document.insert(QStringLiteral("executionScope"), QStringLiteral("backtest_only"));
+    document.insert(QStringLiteral("createdAt"), QStringLiteral("2026-08-15T00:00:00.000Z"));
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("universe"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("explicit")},
+        {QStringLiteral("symbols"), QJsonArray{QStringLiteral("600001"),
+                                               QStringLiteral("600002"),
+                                               QStringLiteral("600003")}}});
+    document.insert(QStringLiteral("crossIndicators"), QJsonArray{
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("close_rank")},
+                    {QStringLiteral("indicator"), QStringLiteral("RANK")},
+                    {QStringLiteral("of"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}}}});
+    // 选 rank 最小的 2 只（即 close 最大的 2 只）。
+    document.insert(QStringLiteral("selection"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("topN")},
+        {QStringLiteral("rankBy"), QStringLiteral("close_rank")},
+        {QStringLiteral("count"), 2},
+        {QStringLiteral("ascending"), true}});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gte")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("value"), 1}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 1}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("value"), 1}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0}}}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+
+    CrossSectionalCustomStrategy strategy(*plan);
+    AlignedBarFrame frame;
+    frame.timestamp = QDateTime(QDate(2026, 8, 1), QTime(9, 30));
+    frame.bars.insert(QStringLiteral("600001"), makeBar(QStringLiteral("600001"), 10.0));
+    frame.bars.insert(QStringLiteral("600002"), makeBar(QStringLiteral("600002"), 30.0));
+    frame.bars.insert(QStringLiteral("600003"), makeBar(QStringLiteral("600003"), 20.0));
+
+    const CrossSectionalFrameResult result = strategy.evaluateFrame(frame);
+    QCOMPARE(result.targetWeights.size(), 2);
+    QVERIFY(result.targetWeights.contains(QStringLiteral("600002")));
+    QVERIFY(result.targetWeights.contains(QStringLiteral("600003")));
+    QVERIFY(!result.targetWeights.contains(QStringLiteral("600001")));
+    QVERIFY(qAbs(result.targetWeights.value(QStringLiteral("600002")) - 0.5) < 1e-9);
 }
 
 } // namespace pp
