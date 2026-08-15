@@ -1,6 +1,6 @@
 # PPTrader 开发进度
 
-最后更新：2026-08-14
+最后更新：2026-08-15
 
 ## 当前阶段
 
@@ -24,6 +24,10 @@
 | 新版界面 | 三页常驻主工作台；主页双选择器与真实交易日/本地历史双 K 线；策略页支持内置/自定义模式及严格本地回测；全市场页支持 Scene Graph 批量散点 |
 
 ## 本次完成
+
+- 完成多股自定义回测阶段 1（单只闭环加固）：抽取 `PortfolioExecutor`（`equity()`/`positions()`/`rebalance()`，封装先卖后买、整手、费用、滑点、T+1 与缺报价 stale），`PortfolioBacktestEngine` 改用后结果字节级不变（`tst_portfolio_backtest` 回归通过）。新增 `AlignedBarSeries` 对齐帧序列：按 `startTime` 对齐成帧、周期不一致拒绝、缺失标的标 `absent`、`replayBar()` 只读逐帧回放。
+
+- 完成阶段 2.1 多股对齐前向填充：`AlignedBarSeries::forwardFillClose()` 返回该帧（含）之前最近 bar 的 close，缺 bar 帧用更早 bar 前向填充并标 `stale`，首 bar 之前或未知标的返回空；预计算逐帧最近 bar 索引表使查询 O(1)。`tst_aligned_bar_series` 12/12。
 
 - 完成 H3C.4 缺日逐日估值：`PortfolioBacktestEngine` 从首个共同交易日起遍历各腿观测日期并集，缺报价持仓沿用最近收盘并标记 `priceStale`；缺腿日只输出权益、不成交、不推进共同交易日调仓时钟。归档持仓 JSON 向后兼容保存 stale 标记，控制器向 QML 暴露 `staleValuationPointCount` 与 `valuationCalendar=observed_union`，组合面板明确显示缺日报价估值点数。Qt Test 覆盖缺日权益、调仓时钟和归档恢复。
 
