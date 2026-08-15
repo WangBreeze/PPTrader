@@ -46,6 +46,9 @@
 #include "services/TickDataCsvImporter.h"
 #include "services/TickDataBatchPlanner.h"
 #include "services/TencentMinuteBarService.h"
+#include "services/DesktopNotificationService.h"
+#include "services/NotificationDispatcher.h"
+#include "services/WebhookNotificationService.h"
 #include "strategy/DefaultSignalExecutionPolicy.h"
 #include "strategy/CustomStrategyValidator.h"
 #include "strategy/CustomStrategyCompiler.h"
@@ -894,6 +897,11 @@ public:
                                                   int lotSize);
     Q_INVOKABLE QVariantMap strategyExecutionConfiguration(const QString &strategyId) const;
     Q_INVOKABLE QVariantList strategyExecutionConfigurations() const;
+    Q_INVOKABLE QVariantMap notificationSettings() const;
+    Q_INVOKABLE bool configureNotifications(bool desktopEnabled, bool webhookEnabled,
+                                            const QString &webhookUrl, bool notifySignal,
+                                            bool notifyApproval, bool notifyOrderSubmitted,
+                                            bool notifyExecutionRejected, bool notifyIntentExpired);
     Q_INVOKABLE bool requestMarketSnapshot(const QDateTime &requestedTime);
     Q_INVOKABLE bool requestMarketSnapshotAt(const QString &marketTime);
     Q_INVOKABLE bool requestLatestMarketSnapshot();
@@ -949,6 +957,7 @@ signals:
     void riskLimitsChanged();
     void strategyExecutionStateChanged();
     void strategyExecutionConfigChanged(const QString &strategyId);
+    void notificationSettingsChanged();
     void crossSectionalFrameUpdated(const pp::FactorFrame &frame);
     void marketSnapshotChanged();
     void snapshotQueryStateChanged();
@@ -961,6 +970,8 @@ private:
     QVector<Instrument> buildMarketUniverse() const;
     Instrument findInstrument(const QString &symbol) const;
     void initializeRealtimeStrategies();
+    void restoreNotificationSettings();
+    void persistNotificationSettings() const;
     void restartLiveIfRunning();
     void setStatusText(const QString &text);
     void setBacktestStatus(const QString &text, const QString &error = {});
@@ -1109,6 +1120,9 @@ private:
     FixedAmountPositionSizer m_positionSizer;
     DefaultSignalExecutionPolicy m_executionPolicy;
     StrategyExecutionCoordinator m_strategyExecutionCoordinator;
+    DesktopNotificationService m_desktopNotifications;
+    WebhookNotificationService m_webhookNotifications;
+    NotificationDispatcher m_notificationDispatcher;
     StrategyEngine m_strategyEngine;
     WorkspaceInstrumentSelectionState m_workspaceInstrumentSelections;
     InstrumentListModel m_instrumentModel;

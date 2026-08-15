@@ -159,7 +159,13 @@ qt_add_executable(PPTrader
     src/services/NasTickCacheManager.h
     src/services/NasTickSyncQueue.cpp
     src/services/NasTickSyncQueue.h
+    src/services/DesktopNotificationService.cpp
+    src/services/DesktopNotificationService.h
+    src/services/NotificationDispatcher.cpp
+    src/services/NotificationDispatcher.h
     src/services/NotificationService.h
+    src/services/WebhookNotificationService.cpp
+    src/services/WebhookNotificationService.h
     src/services/OrderSubmissionPort.h
     src/services/PreTradeRiskService.cpp
     src/services/PreTradeRiskService.h
@@ -671,6 +677,20 @@ if(BUILD_TESTING)
     target_include_directories(tst_strategy_execution PRIVATE src)
     target_link_libraries(tst_strategy_execution PRIVATE Qt6::Core Qt6::Test)
 
+    qt_add_executable(tst_notification_service
+        tests/tst_notification_service.cpp
+        src/domain/MarketTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TradingTypes.h
+        src/services/NotificationService.h
+        src/services/NotificationDispatcher.cpp
+        src/services/NotificationDispatcher.h
+        src/services/WebhookNotificationService.cpp
+        src/services/WebhookNotificationService.h
+    )
+    target_include_directories(tst_notification_service PRIVATE src)
+    target_link_libraries(tst_notification_service PRIVATE Qt6::Core Qt6::Network Qt6::Test)
+
     qt_add_executable(tst_exchange_rules
         tests/tst_exchange_rules.cpp
         src/domain/MarketTypes.h
@@ -1113,6 +1133,7 @@ if(BUILD_TESTING)
     add_test(NAME batch_backtest COMMAND tst_batch_backtest)
     add_test(NAME trading_account COMMAND tst_trading_account)
     add_test(NAME strategy_execution COMMAND tst_strategy_execution)
+    add_test(NAME notification_service COMMAND tst_notification_service)
     add_test(NAME exchange_rules COMMAND tst_exchange_rules)
     add_test(NAME cross_sectional COMMAND tst_cross_sectional)
     add_test(NAME market_snapshot_contract COMMAND tst_market_snapshot_contract)

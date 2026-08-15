@@ -368,6 +368,9 @@ TradingController::TradingController(QObject *parent)
     });
     connect(&m_tradingAccount, &TradingAccountService::operationFailed,
             this, &TradingController::handleTradingError);
+    m_notificationDispatcher.registerChannel(&m_desktopNotifications);
+    m_notificationDispatcher.registerChannel(&m_webhookNotifications);
+    restoreNotificationSettings();
     connect(&m_strategyExecutionCoordinator, &StrategyExecutionCoordinator::intentUpdated,
             this, [this](const StrategyOrderIntent &intent) {
                 m_strategyIntentModel.upsertIntent(intent);
@@ -377,16 +380,19 @@ TradingController::TradingController(QObject *parent)
             this, [this](const StrategyOrderIntent &intent) {
                 emit strategyExecutionStateChanged();
                 setStatusText(QStringLiteral("策略订单已提交：%1").arg(intent.orderId));
+                m_notificationDispatcher.notifyOrderSubmitted(intent);
             });
     connect(&m_strategyExecutionCoordinator, &StrategyExecutionCoordinator::approvalRequired,
-            this, [this](const StrategyOrderIntent &) {
+            this, [this](const StrategyOrderIntent &intent) {
                 emit strategyExecutionStateChanged();
                 setStatusText(QStringLiteral("策略信号等待人工审批"));
+                m_notificationDispatcher.notifyApprovalRequired(intent);
             });
     connect(&m_strategyExecutionCoordinator, &StrategyExecutionCoordinator::executionRejected,
             this, [this](const StrategyOrderIntent &intent) {
                 emit strategyExecutionStateChanged();
                 if (!intent.message.isEmpty()) setStatusText(intent.message);
+                m_notificationDispatcher.notifyExecutionRejected(intent);
             });
     connect(&m_tickWriter, &AsyncTickWriter::batchWritten, this, [this](int tickCount) {
         m_persistedTickCount += tickCount;
@@ -4505,6 +4511,77 @@ QVariantList TradingController::strategyExecutionConfigurations() const
     return result;
 }
 
+QVariantMap TradingController::notificationSettings() const
+{
+    const NotificationSettings settings = m_notificationDispatcher.settings();
+    QVariantMap map;
+    map.insert(QStringLiteral("desktopEnabled"), settings.desktopEnabled);
+    map.insert(QStringLiteral("webhookEnabled"), settings.webhookEnabled);
+    map.insert(QStringLiteral("webhookUrl"), settings.webhookUrl);
+    map.insert(QStringLiteral("notifySignal"), settings.notifySignal);
+    map.insert(QStringLiteral("notifyApproval"), settings.notifyApproval);
+    map.insert(QStringLiteral("notifyOrderSubmitted"), settings.notifyOrderSubmitted);
+    map.insert(QStringLiteral("notifyExecutionRejected"), settings.notifyExecutionRejected);
+    map.insert(QStringLiteral("notifyIntentExpired"), settings.notifyIntentExpired);
+    return map;
+}
+
+bool TradingController::configureNotifications(bool desktopEnabled, bool webhookEnabled,
+                                               const QString &webhookUrl, bool notifySignal,
+                                               bool notifyApproval, bool notifyOrderSubmitted,
+                                               bool notifyExecutionRejected, bool notifyIntentExpired)
+{
+    NotificationSettings settings;
+    settings.desktopEnabled = desktopEnabled;
+    settings.webhookEnabled = webhookEnabled;
+    settings.webhookUrl = webhookUrl.trimmed();
+    settings.notifySignal = notifySignal;
+    settings.notifyApproval = notifyApproval;
+    settings.notifyOrderSubmitted = notifyOrderSubmitted;
+    settings.notifyExecutionRejected = notifyExecutionRejected;
+    settings.notifyIntentExpired = notifyIntentExpired;
+
+    m_notificationDispatcher.setSettings(settings);
+    m_webhookNotifications.setWebhookUrl(settings.webhookUrl);
+    persistNotificationSettings();
+    emit notificationSettingsChanged();
+    setStatusText(QStringLiteral("通知设置已更新（桌面 %1，Webhook %2）")
+        .arg(settings.desktopEnabled ? QStringLiteral("开") : QStringLiteral("关"),
+             settings.webhookEnabled ? QStringLiteral("开") : QStringLiteral("关")));
+    return true;
+}
+
+void TradingController::restoreNotificationSettings()
+{
+    NotificationSettings settings;
+    QSettings store;
+    settings.desktopEnabled = store.value(QStringLiteral("notifications/desktopEnabled"), false).toBool();
+    settings.webhookEnabled = store.value(QStringLiteral("notifications/webhookEnabled"), false).toBool();
+    settings.webhookUrl = store.value(QStringLiteral("notifications/webhookUrl"), QString{}).toString();
+    settings.notifySignal = store.value(QStringLiteral("notifications/notifySignal"), true).toBool();
+    settings.notifyApproval = store.value(QStringLiteral("notifications/notifyApproval"), true).toBool();
+    settings.notifyOrderSubmitted = store.value(QStringLiteral("notifications/notifyOrderSubmitted"), true).toBool();
+    settings.notifyExecutionRejected = store.value(QStringLiteral("notifications/notifyExecutionRejected"), true).toBool();
+    settings.notifyIntentExpired = store.value(QStringLiteral("notifications/notifyIntentExpired"), true).toBool();
+    m_notificationDispatcher.setSettings(settings);
+    m_webhookNotifications.setWebhookUrl(settings.webhookUrl);
+}
+
+void TradingController::persistNotificationSettings() const
+{
+    const NotificationSettings settings = m_notificationDispatcher.settings();
+    QSettings store;
+    store.setValue(QStringLiteral("notifications/desktopEnabled"), settings.desktopEnabled);
+    store.setValue(QStringLiteral("notifications/webhookEnabled"), settings.webhookEnabled);
+    store.setValue(QStringLiteral("notifications/webhookUrl"), settings.webhookUrl);
+    store.setValue(QStringLiteral("notifications/notifySignal"), settings.notifySignal);
+    store.setValue(QStringLiteral("notifications/notifyApproval"), settings.notifyApproval);
+    store.setValue(QStringLiteral("notifications/notifyOrderSubmitted"), settings.notifyOrderSubmitted);
+    store.setValue(QStringLiteral("notifications/notifyExecutionRejected"), settings.notifyExecutionRejected);
+    store.setValue(QStringLiteral("notifications/notifyIntentExpired"), settings.notifyIntentExpired);
+    store.sync();
+}
+
 bool TradingController::requestMarketSnapshot(const QDateTime &requestedTime)
 {
     m_followLatestSnapshot = false;
@@ -4920,6 +4997,7 @@ void TradingController::handleRealtimeSignal(const TradeSignal &signal)
 void TradingController::handleStrategySignal(const QString &strategyId, const TradeSignal &signal)
 {
     handleRealtimeSignal(signal);
+    m_notificationDispatcher.notifySignal(signal);
     m_strategyExecutionCoordinator.processSignal(strategyId, signal);
 }
 
