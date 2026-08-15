@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成插件参数 schema：`StrategyPlugin` 接口新增 `parameterSchema()`（`PluginParameterSpec` key/displayName/type/defaultValue/min/max/step），示例插件声明 `threshold`（real，默认 100，范围 1–10000），`TradingController` 暴露 `strategyPluginParameterSchema(pluginId)` 供 UI 动态生成参数表单；`tst_strategy_plugin` 增补 schema 断言（8 用例），CTest 30/30。QML 动态参数表单待插件管理 UI 按 Figma 稿实现时一并落地。
+
 - 完成文件日志系统：`LogService` 单例（分级 Debug/Info/Warning/Error、按大小滚动保留有限备份、线程安全、QTextStream UTF-8），`TradingController` 启动配置日志到 `应用目录/logs/pptrader.log`（5MB × 3 备份），`setStatusText` 同步写 Info 日志；新增 `tst_log_service`（5 用例：写入分级/按大小滚动/重新配置切路径），CTest 30/30。已实测启动日志与状态日志正确落盘（UTF-8）。
 
 - 完成回测参数网格扫描/优化：① `BacktestEvaluator`（同步回测评估器，与 `BacktestEngine` 共享开/平仓、滑点/手续费、权益曲线、摘要算法，供批量场景使用）；② `ParameterGridScanner`（笛卡尔积展开 + 逐组合编译/回测 + 按收益率降序，组合上限与取消支持）；③ `ParameterGridBacktestService`（独立线程异步跑扫描，completed/failed + cancel）；④ `TradingController` 接入 `runParameterGridBacktest/cancelParameterGridBacktest/parameterGridRunning/Error/Results`；⑤ `ParameterGridPanel` QML（策略/标的/周期/根数 + 两个参数轴 key=候选值 + 结果表格）挂到策略页自定义模式。新增 `tst_parameter_grid_scanner`（6 用例：笛卡尔积/排序/超限/空轴），CTest 29/29，`all_qmllint` 通过，主程序加载无 QML 错误。
