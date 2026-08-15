@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成向导步骤 6/7/8 说明页与 8 步导航：① 步骤 6 执行与审批、步骤 7 回测验证、步骤 8 发布与运行三页说明面板（标注当前 executionScope 为 backtest_only、回测验证能力已就绪、可发布到回测）；② 左侧步骤栏 03–08 均可点击切换，进度条与「步骤 N / 8」文案随 activeStep 动态更新；③ 底部「上一步 / 下一步」按钮在 8 步内顺序导航，第 8 步显示「完成：生成 JSON」并切换到 JSON 模式保存 DSL v2。`all_qmllint` 通过，主程序加载无 QML 错误，CTest 24/24。
+
 - 完成单股回测 UI 增强：① 样本窗日期选择（策略页回测配置区起始/结束日期 + 应用/清除，`setBacktestSampleWindow`/`clearBacktestSampleWindow` 接口）；② 向导步骤 5 仓位与风控面板（仓位类型 fixedPercent/fixedAmount、固定金额、最大持仓市值占比、止损止盈、最大持仓 Bar，`buildJson` 生成 position/risk 字段，步骤导航可切换第 3/5 步）。`all_qmllint` 通过，CTest 24/24。
 
 - 完成向导步骤 7 回测验证：`BacktestConfig` 支持样本窗（`sampleFrom`/`sampleTo`，`BacktestEngine` 回测前过滤），新增验证记录（`saveValidationRun` 保存当前回测摘要、`validationRuns` 列表按收益率降序且 ≤10 条、`loadValidationRun` 恢复样本窗供重跑），回测入口统一接线 pending 样本窗。验证记录已 SQLite 持久化（schema v7，`backtest_validation_runs` 表），启动自动加载。
