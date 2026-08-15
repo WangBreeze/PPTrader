@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成阶段 2.3 横截面指标运行时：`CrossSectionalIndicatorRuntime` 提供 `rank`（1-based，同值按 symbol 稳定排序）、`zscore`（总体标准差）、`percentile`（最高值 1.0）、`mean`/`median` 纯函数，口径与 `AShareRelativeStrengthIndicator` 一致。新增 `tst_cross_sectional_backtest` 覆盖排名并列/升序、总体标准差 Z-Score、分位数、均值中位数与空输入（7/7）。
+
 - 完成阶段 2.2 DSL v3：新增 `schemaVersion=3` 顶层 `universe`（explicit 代码列表）、`crossIndicators`（RANK/ZSCORE/PERCENTILE/MEAN/MEDIAN/PEER，`of` 支持 field 或单标的指标，PEER 引用指定标的字段）与 `selection`（topN 按横截面指标排序）；条件新增 `{"cross":"alias"}` 横截面操作数；`position.type` 支持 `equalWeight`。`CompiledCustomStrategy` 携带 `universeSymbols/crossIndicators/selection`，`CompiledCustomOperand` 新增 `Cross` 类型。`tst_custom_strategy` 新增 v3 编译与非法语法用例（17/17）。
 
 - 完成多股自定义回测阶段 1（单只闭环加固）：抽取 `PortfolioExecutor`（`equity()`/`positions()`/`rebalance()`，封装先卖后买、整手、费用、滑点、T+1 与缺报价 stale），`PortfolioBacktestEngine` 改用后结果字节级不变（`tst_portfolio_backtest` 回归通过）。新增 `AlignedBarSeries` 对齐帧序列：按 `startTime` 对齐成帧、周期不一致拒绝、缺失标的标 `absent`、`replayBar()` 只读逐帧回放。
