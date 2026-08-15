@@ -18,6 +18,8 @@ public:
     QString displayName() const override;
     int minimumWarmupBars() const override;
     double positionFraction() const override;
+    double positionAmount() const override;
+    double maxPositionPercent() const override;
     int strategyVersion() const override;
     QVariantMap normalizedParameters() const override;
     QVariantMap ruleSnapshot() const override;

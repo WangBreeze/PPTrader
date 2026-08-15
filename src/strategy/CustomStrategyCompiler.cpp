@@ -353,6 +353,8 @@ QString CompiledCustomIndicator::cacheKey() const
 QVariantMap CompiledCustomRules::toVariantMap() const
 {
     return {{QStringLiteral("positionFraction"), positionFraction},
+            {QStringLiteral("positionAmount"), positionAmount},
+            {QStringLiteral("maxPositionPercent"), maxPositionPercent},
             {QStringLiteral("stopLossPercent"), stopLossPercent},
             {QStringLiteral("takeProfitPercent"), takeProfitPercent},
             {QStringLiteral("maximumHoldingBars"), maximumHoldingBars},
@@ -401,12 +403,19 @@ std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
     plan.normalizedParameters = normalized;
     const QJsonObject position = validated.document.value(QStringLiteral("position")).toObject();
     if (!position.isEmpty()) {
-        plan.rules.positionFraction = position.value(QStringLiteral("percent")).toDouble(1.0);
+        const QString positionType = position.value(QStringLiteral("type"))
+            .toString(QStringLiteral("fixedPercent"));
+        if (positionType == QStringLiteral("fixedAmount")) {
+            plan.rules.positionAmount = position.value(QStringLiteral("amount")).toDouble(0.0);
+        } else {
+            plan.rules.positionFraction = position.value(QStringLiteral("percent")).toDouble(1.0);
+        }
     }
     const QJsonObject risk = validated.document.value(QStringLiteral("risk")).toObject();
     plan.rules.stopLossPercent = risk.value(QStringLiteral("stopLossPercent")).toDouble(0.0);
     plan.rules.takeProfitPercent = risk.value(QStringLiteral("takeProfitPercent")).toDouble(0.0);
     plan.rules.maximumHoldingBars = risk.value(QStringLiteral("maximumHoldingBars")).toInt(0);
+    plan.rules.maxPositionPercent = risk.value(QStringLiteral("maxPositionPercent")).toDouble(0.0);
     plan.rules.tPlusOne = risk.value(QStringLiteral("tPlusOne")).toBool(true);
     const QString priceMode = validated.document.value(QStringLiteral("signal"))
         .toObject().value(QStringLiteral("priceMode"))

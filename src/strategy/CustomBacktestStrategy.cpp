@@ -56,6 +56,16 @@ double CustomBacktestStrategy::positionFraction() const
     return m_plan.rules.positionFraction;
 }
 
+double CustomBacktestStrategy::positionAmount() const
+{
+    return m_plan.rules.positionAmount;
+}
+
+double CustomBacktestStrategy::maxPositionPercent() const
+{
+    return m_plan.rules.maxPositionPercent;
+}
+
 int CustomBacktestStrategy::strategyVersion() const
 {
     return m_plan.version;

@@ -68,6 +68,8 @@ struct CompiledCustomCondition {
 
 struct CompiledCustomRules {
     double positionFraction = 1.0;
+    double positionAmount = 0.0;     // fixedAmount 金额（元），0 表示用 fixedPercent
+    double maxPositionPercent = 0.0; // 最大持仓市值占比（%），0 表示无上限
     double stopLossPercent = 0.0;
     double takeProfitPercent = 0.0;
     int maximumHoldingBars = 0;

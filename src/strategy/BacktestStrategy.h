@@ -38,6 +38,8 @@ public:
 
     virtual int minimumWarmupBars() const = 0;
     virtual double positionFraction() const { return 1.0; }
+    virtual double positionAmount() const { return 0.0; }
+    virtual double maxPositionPercent() const { return 0.0; }
     virtual int strategyVersion() const { return 0; }
     virtual QVariantMap normalizedParameters() const { return {}; }
     virtual QVariantMap ruleSnapshot() const { return {}; }

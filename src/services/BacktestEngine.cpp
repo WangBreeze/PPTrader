@@ -171,8 +171,18 @@ void BacktestEngine::openPosition(const TradeSignal &signal, const Candle &candl
     const BacktestConfig &config = m_result.config;
     const double fillPrice = candle.close * (1.0 + std::max(0.0, config.slippageRate));
     const int lotSize = std::max(1, config.lotSize);
-    const double positionFraction = std::clamp(m_strategy->positionFraction(), 0.01, 1.0);
-    const double budget = m_cash * positionFraction;
+    const double fixedAmount = m_strategy->positionAmount();
+    double budget = 0.0;
+    if (fixedAmount > 0.0) {
+        budget = std::min(fixedAmount, m_cash);
+    } else {
+        const double fraction = std::clamp(m_strategy->positionFraction(), 0.01, 1.0);
+        budget = m_cash * fraction;
+    }
+    const double maxPercent = m_strategy->maxPositionPercent();
+    if (maxPercent > 0.0) {
+        budget = std::min(budget, m_cash * maxPercent / 100.0);
+    }
     const double affordable = budget / (fillPrice * (1.0 + std::max(0.0, config.commissionRate)));
     const double quantity = std::floor(affordable / lotSize) * lotSize;
     if (quantity <= 0.0) {

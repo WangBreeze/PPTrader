@@ -254,8 +254,18 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
             if (!hasOnlyKeys(position, {QStringLiteral("type")}, QStringLiteral("position"), error)) {
                 return false;
             }
+        } else if (positionType == QStringLiteral("fixedAmount")) {
+            if (!hasOnlyKeys(position, {QStringLiteral("type"), QStringLiteral("amount")},
+                             QStringLiteral("position"), error)) {
+                return false;
+            }
+            double amount = 0.0;
+            if (!finiteNumber(position.value(QStringLiteral("amount")), &amount)
+                || amount <= 0.0) {
+                return fail(error, QStringLiteral("position.amount 必须是正数"));
+            }
         } else {
-            return fail(error, QStringLiteral("position.type 仅支持 fixedPercent/equalWeight"));
+            return fail(error, QStringLiteral("position.type 仅支持 fixedPercent/fixedAmount/equalWeight"));
         }
     }
 
@@ -268,7 +278,8 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
                          {QStringLiteral("stopLossPercent"),
                           QStringLiteral("takeProfitPercent"),
                           QStringLiteral("maximumHoldingBars"),
-                          QStringLiteral("tPlusOne")},
+                          QStringLiteral("tPlusOne"),
+                          QStringLiteral("maxPositionPercent")},
                          QStringLiteral("risk"), error)) {
             return false;
         }
@@ -282,6 +293,9 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
         }
         if (!validatePercent(QStringLiteral("takeProfitPercent"), 1000.0)) {
             return fail(error, QStringLiteral("risk.takeProfitPercent 必须在 0–1000 之间"));
+        }
+        if (!validatePercent(QStringLiteral("maxPositionPercent"), 100.0)) {
+            return fail(error, QStringLiteral("risk.maxPositionPercent 必须在 0–100 之间"));
         }
         if (risk.contains(QStringLiteral("maximumHoldingBars"))) {
             double bars = 0.0;

@@ -34,6 +34,7 @@ private slots:
     void enforcesWorkspaceRunAndResultIdentity();
     void v3SupportsUniverseCrossIndicatorsAndSelection();
     void v3RejectsInvalidCrossSyntax();
+    void fixedAmountPositionAndMaxPercentCompile();
 };
 
 static QJsonObject indicator(const QString &name, const QJsonValue &period)
@@ -1088,6 +1089,42 @@ void CustomStrategyTest::v3RejectsInvalidCrossSyntax()
         {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 3}}}});
     QVERIFY(!validator.validate(v3, nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("横截面指标")));
+}
+
+void CustomStrategyTest::fixedAmountPositionAndMaxPercentCompile()
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("position"), QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("fixedAmount")},
+        {QStringLiteral("amount"), 50000}});
+    document.insert(QStringLiteral("risk"), QJsonObject{
+        {QStringLiteral("maxPositionPercent"), 30},
+        {QStringLiteral("stopLossPercent"), 5},
+        {QStringLiteral("tPlusOne"), true}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->rules.positionAmount, 50000.0);
+    QCOMPARE(plan->rules.maxPositionPercent, 30.0);
+    QCOMPARE(plan->rules.positionFraction, 1.0);
+
+    QJsonObject badAmount = document;
+    badAmount.insert(QStringLiteral("position"), QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("fixedAmount")},
+        {QStringLiteral("amount"), 0}});
+    QVERIFY(!validator.validate(badAmount, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("amount")));
+
+    QJsonObject badPercent = document;
+    badPercent.insert(QStringLiteral("risk"), QJsonObject{
+        {QStringLiteral("maxPositionPercent"), 150}});
+    QVERIFY(!validator.validate(badPercent, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("maxPositionPercent")));
 }
 
 } // namespace pp
