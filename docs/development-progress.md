@@ -25,7 +25,7 @@
 
 ## 本次完成
 
-- 完成向导步骤 7 回测验证：`BacktestConfig` 支持样本窗（`sampleFrom`/`sampleTo`，`BacktestEngine` 回测前过滤），新增验证记录（`saveValidationRun` 保存当前回测摘要、`validationRuns` 列表按收益率降序且 ≤10 条、`loadValidationRun` 恢复样本窗供重跑），回测入口统一接线 pending 样本窗。验证记录首版为内存保存，SQLite 持久化留待后续。
+- 完成向导步骤 7 回测验证：`BacktestConfig` 支持样本窗（`sampleFrom`/`sampleTo`，`BacktestEngine` 回测前过滤），新增验证记录（`saveValidationRun` 保存当前回测摘要、`validationRuns` 列表按收益率降序且 ≤10 条、`loadValidationRun` 恢复样本窗供重跑），回测入口统一接线 pending 样本窗。验证记录已 SQLite 持久化（schema v7，`backtest_validation_runs` 表），启动自动加载。
 
 - 补齐单股回测遗留项：① 买卖点悬停提示（`BacktestCandleChart` hover Tooltip 展示生效条件/成交量/价格）；② 仓位风控（`position.type=fixedAmount` + `risk.maxPositionPercent` 封顶，`BacktestEngine::openPosition` 复用 `FixedAmountPositionSizer` 口径，`tst_custom_strategy` 18/18）；③ `replayBacktestBar(index)` 只读逐 Bar 回放接口（返回 K 线 OHLCV + 该 Bar 买卖信号）。样本窗与验证记录留待后续。
 
