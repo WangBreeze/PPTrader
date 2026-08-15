@@ -25,6 +25,7 @@ Item {
     property string stopLossPercent: "0"
     property string takeProfitPercent: "0"
     property string maximumHoldingBars: "0"
+    property string signalPriceMode: "triggerClose"
 
     readonly property var catalog: [
         { name: "SMA", hasPeriod: true },
@@ -178,6 +179,7 @@ Item {
         if (takeProfit > 0) risk.takeProfitPercent = takeProfit
         const holdingBars = Number(root.maximumHoldingBars)
         if (holdingBars > 0) risk.maximumHoldingBars = holdingBars
+        const signal = { priceMode: root.signalPriceMode === "nextOpen" ? "nextOpen" : "triggerClose" }
         return JSON.stringify({
             schemaVersion: 2,
             strategyId: "custom_wizard_draft",
@@ -193,6 +195,7 @@ Item {
             series: series,
             position: position,
             risk: risk,
+            signal: signal,
             entry: entry.length === 1 ? entry[0] : { op: "and", conditions: entry },
             exit: exit.length === 1 ? exit[0] : { op: "and", conditions: exit }
         })
@@ -457,6 +460,8 @@ Item {
                                 onClicked: {
                                     if (modelData.no === "03") {
                                         root.activeStep = 3
+                                    } else if (modelData.no === "04") {
+                                        root.activeStep = 4
                                     } else if (modelData.no === "05") {
                                         root.activeStep = 5
                                     } else if (!modelData.active) {
@@ -1354,6 +1359,87 @@ Item {
                         text: "验证计划         3 年日线 + 90 天 15m"
                         color: theme.textMuted
                         font.family: theme.fontFamily; font.pixelSize: 9
+                    }
+                }
+            }
+        }
+
+        // 步骤 4 面板（信号条件）
+        Rectangle {
+            id: step4Area
+            anchors.left: sidebar.right
+            anchors.right: preview.left
+            anchors.top: topBar.bottom
+            anchors.bottom: footer.top
+            visible: root.activeStep === 4
+            color: theme.bgCanvas
+
+            Flickable {
+                anchors.fill: parent
+                anchors.margins: 24
+                contentWidth: width
+                contentHeight: Math.max(height, 560)
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                    width: parent.width
+                    spacing: 14
+
+                    Text {
+                        width: parent.width
+                        text: "04  信号条件"
+                        color: theme.textPrimary
+                        font.family: theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold
+                    }
+                    Text {
+                        width: parent.width
+                        text: "入场 / 出场条件组已在第 3 步定义；这里配置信号成交价格模式。"
+                        color: theme.textMuted
+                        font.family: theme.fontFamily; font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+
+                    Rectangle {
+                        width: parent.width; height: 76; radius: 8
+                        color: theme.bgPanel; border.color: theme.border
+                        Row {
+                            x: 14; y: 14; spacing: 10
+                            Text { text: "入场条件"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 12; font.weight: Font.Bold }
+                            Text { text: entryConditionsModel.count + " 组"; color: theme.cyan; font.family: theme.fontFamily; font.pixelSize: 11 }
+                            Text { x: 200; text: "出场条件"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 12; font.weight: Font.Bold }
+                            Text { text: exitConditionsModel.count + " 组"; color: theme.cyan; font.family: theme.fontFamily; font.pixelSize: 11 }
+                        }
+                        Text {
+                            x: 14; y: 46; width: parent.width - 28
+                            text: "返回第 3 步可增删条件组；条件使用序列 / 字段 / 常量与七种比较符。"
+                            color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9
+                        }
+                    }
+
+                    Text { text: "信号成交价格"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 13; font.weight: Font.Bold }
+                    Row {
+                        spacing: 8
+                        PpButton {
+                            theme: root.theme; text: "触发 Bar 收盘价（triggerClose）"; visualWidth: 224
+                            active: root.signalPriceMode === "triggerClose"
+                            toolTip: "入场信号在触发那根 K 线收盘价成交（v1 默认）"
+                            onClicked: root.signalPriceMode = "triggerClose"
+                        }
+                        PpButton {
+                            theme: root.theme; text: "下一根开盘价（nextOpen）"; visualWidth: 200
+                            active: root.signalPriceMode === "nextOpen"
+                            toolTip: "入场信号在下一根 K 线开盘价成交"
+                            onClicked: root.signalPriceMode = "nextOpen"
+                        }
+                    }
+                    Text {
+                        width: parent.width
+                        text: "生成的 signal.priceMode 会写入 DSL v2 JSON；切回 JSON 模式可查看并校验。"
+                        color: theme.textMuted
+                        font.family: theme.fontFamily; font.pixelSize: 9
+                        wrapMode: Text.Wrap
                     }
                 }
             }
