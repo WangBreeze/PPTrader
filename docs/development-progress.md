@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成阶段 C 执行审批/通知后端：① 落地 `NotificationService` 抽象重构（`NotificationMessage`/`NotificationEvent`/`NotificationSeverity`）+ `DesktopNotificationService`（QSystemTrayIcon 气泡）+ `WebhookNotificationService`（QNetworkAccessManager POST JSON，transport 可注入）+ `NotificationDispatcher`（通道/事件过滤路由），事件接入策略信号/待审批/订单提交/执行拒绝；② 通知设置（桌面/Webhook URL/逐事件开关）QSettings 持久化 + `configureNotifications`/`notificationSettings` 接口；③ 新增 `CustomExecutionStrategy` 运行时（消费 Candle → 复用 DSL 信号状态机 → TradeSignal，QMutex 线程安全），`StrategyEngine`/`StrategyListModel` 增加 `removeStrategy`，`executionScope` 校验扩展 `mock_execution`，`enableCustomStrategyExecution`/`disableCustomStrategyExecution` 接口打通「自定义策略 → 模拟执行 → StrategyExecutionCoordinator → 模拟账户」；④ 新增 `ExecutionApprovalPanel` QML（审批队列批准/拒绝 + 通知设置）挂到策略页。新增 `tst_notification_service`（6 用例）与 `tst_custom_strategy_execution`（5 用例），CTest 26/26，`all_qmllint` 通过，主程序加载无 QML 错误。
+
 - 完成向导步骤 6/7/8 说明页与 8 步导航：① 步骤 6 执行与审批、步骤 7 回测验证、步骤 8 发布与运行三页说明面板（标注当前 executionScope 为 backtest_only、回测验证能力已就绪、可发布到回测）；② 左侧步骤栏 03–08 均可点击切换，进度条与「步骤 N / 8」文案随 activeStep 动态更新；③ 底部「上一步 / 下一步」按钮在 8 步内顺序导航，第 8 步显示「完成：生成 JSON」并切换到 JSON 模式保存 DSL v2。`all_qmllint` 通过，主程序加载无 QML 错误，CTest 24/24。
 
 - 完成单股回测 UI 增强：① 样本窗日期选择（策略页回测配置区起始/结束日期 + 应用/清除，`setBacktestSampleWindow`/`clearBacktestSampleWindow` 接口）；② 向导步骤 5 仓位与风控面板（仓位类型 fixedPercent/fixedAmount、固定金额、最大持仓市值占比、止损止盈、最大持仓 Bar，`buildJson` 生成 position/risk 字段，步骤导航可切换第 3/5 步）。`all_qmllint` 通过，CTest 24/24。
