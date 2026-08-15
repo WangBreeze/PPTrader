@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成阶段 3.1 多股回测服务：`CrossSectionalBacktestService` 在独立线程编译 DSL v3、逐腿校验数据集身份并读取 `raw_tick_cache_v1` K 线、对齐成帧后运行多股引擎，requestId 门控与取消语义同组合回测服务。`tst_cross_sectional_backtest` 新增服务生命周期与缺数据拒绝用例（10/10）。
+
 - 完成阶段 2.5 多股回测引擎：`CrossSectionalBacktestEngine::run()` 逐帧推进——每帧调 `CrossSectionalCustomStrategy` 产出目标持仓，用 `PortfolioExecutor` 先卖后买调仓，前向填充估值并标 stale，产出 `PortfolioResult`（权益曲线/成交/摘要）。`tst_cross_sectional_backtest` 新增端到端选股回测用例（9/9）。
 
 - 完成阶段 2.4 多股策略：`CrossSectionalCustomStrategy` 每帧求值 DSL v3——每条腿一个 `CustomIndicatorRuntime` 更新单标的指标，`CrossSectionalIndicatorRuntime` 计算横截面指标（含 PEER 引用），按 `selection.topN` 产出等权目标持仓。`tst_cross_sectional_backtest` 新增横截面选股用例（8/8）。
