@@ -1,5 +1,7 @@
 #include "services/PortfolioBacktestEngine.h"
 
+#include "services/PortfolioExecutor.h"
+
 #include <QDate>
 #include <QHash>
 #include <QSet>
@@ -12,15 +14,6 @@
 namespace pp {
 
 namespace {
-
-struct LegState {
-    Instrument instrument;
-    double quantity = 0.0;
-    double lastPrice = 0.0;
-    QDate lastPriceDay;
-    double weight = 0.0;
-    bool boughtToday = false;
-};
 
 QVector<double> normalizedWeights(const PortfolioDefinition &definition,
                                   QString *error)
@@ -89,15 +82,17 @@ PortfolioResult PortfolioBacktestEngine::run(
     if (weights.isEmpty()) return result;
 
     const int legCount = definition.legs.size();
-    QVector<LegState> states(legCount);
+    PortfolioExecutor::ExecutionState execState;
+    execState.legs.resize(legCount);
+    execState.cash = definition.initialCapital;
     QVector<QHash<QDate, QDateTime>> lastBarByDay(legCount);
     QVector<QHash<QDate, double>> closeByDay(legCount);
     int periodSeconds = 0;
     static const QTimeZone shanghai("Asia/Shanghai");
     for (int index = 0; index < legCount; ++index) {
         const PortfolioLeg &leg = definition.legs.at(index);
-        states[index].instrument = leg.instrument;
-        states[index].weight = weights.at(index);
+        execState.legs[index].instrument = leg.instrument;
+        execState.legs[index].weight = weights.at(index);
         const auto found = series.constFind(leg.instrument.symbol);
         if (found == series.constEnd() || found->isEmpty()) {
             if (error) *error = QStringLiteral("组合腿缺少 K 线数据：%1")
@@ -158,8 +153,6 @@ PortfolioResult PortfolioBacktestEngine::run(
         valuationDays.end());
     result.periodSeconds = periodSeconds;
 
-    double cash = definition.initialCapital;
-    double totalCommission = 0.0;
     int commonDayIndex = 0;
     for (const QDate &day : valuationDays) {
         QDateTime barTime;
@@ -167,111 +160,35 @@ PortfolioResult PortfolioBacktestEngine::run(
             if (lastBarByDay.at(index).contains(day)) {
                 const QDateTime time = lastBarByDay.at(index).value(day);
                 const double close = closeByDay.at(index).value(day);
-                states[index].lastPrice = close;
-                states[index].lastPriceDay = day;
+                execState.legs[index].lastPrice = close;
+                execState.legs[index].lastPriceDay = day;
                 if (time.isValid()
                     && (!barTime.isValid() || time > barTime)) {
                     barTime = time;
                 }
             }
-            states[index].boughtToday = false;
+            execState.legs[index].boughtToday = false;
         }
         if (!barTime.isValid()) continue;
 
-        double equity = cash;
-        for (const LegState &state : states) {
-            equity += state.quantity * state.lastPrice;
-        }
+        double equity = PortfolioExecutor::equity(execState);
 
         const bool commonTradingDay = commonDays.contains(day);
         if (commonTradingDay
             && commonDayIndex % definition.rebalanceEveryTradingDays == 0) {
-            // 先卖后买：超配腿按可卖数量卖至目标市值。
-            for (int index = 0; index < legCount; ++index) {
-                LegState &state = states[index];
-                if (state.quantity <= 0.0) continue;
-                const double target = equity * state.weight;
-                const double current = state.quantity * state.lastPrice;
-                if (current <= target) continue;
-                const double fillPrice =
-                    state.lastPrice * (1.0 - definition.slippageRate);
-                const double sellable = state.quantity;
-                const double desired = (current - target) / fillPrice;
-                const int lot = std::max(1, definition.lotSize);
-                const double quantity = std::floor(desired / lot) * lot;
-                if (quantity <= 0.0 || quantity > sellable) continue;
-                const double commission =
-                    fillPrice * quantity * definition.commissionRate;
-                cash += fillPrice * quantity - commission;
-                totalCommission += commission;
-                state.quantity -= quantity;
-                PortfolioTrade trade;
-                trade.instrument = state.instrument;
-                trade.timestamp = barTime;
-                trade.side = QStringLiteral("sell");
-                trade.quantity = quantity;
-                trade.price = fillPrice;
-                trade.commission = commission;
-                trade.amount = fillPrice * quantity;
-                trade.reason = QStringLiteral("组合再平衡卖出");
-                result.trades.append(trade);
-            }
-            // 后买：低配腿用可用现金买至目标市值。
-            for (int index = 0; index < legCount; ++index) {
-                LegState &state = states[index];
-                if (state.weight <= 0.0) continue;
-                const double target = equity * state.weight;
-                const double current = state.quantity * state.lastPrice;
-                if (current >= target) continue;
-                const double fillPrice =
-                    state.lastPrice * (1.0 + definition.slippageRate);
-                const int lot = std::max(1, definition.lotSize);
-                const double spend = std::min(target - current, cash);
-                const double affordable =
-                    spend / (fillPrice * (1.0 + definition.commissionRate));
-                const double quantity = std::floor(affordable / lot) * lot;
-                if (quantity <= 0.0) continue;
-                const double cost = fillPrice * quantity;
-                const double commission = cost * definition.commissionRate;
-                if (cost + commission > cash + 1e-9) continue;
-                cash -= cost + commission;
-                totalCommission += commission;
-                state.quantity += quantity;
-                if (definition.tPlusOne) state.boughtToday = true;
-                PortfolioTrade trade;
-                trade.instrument = state.instrument;
-                trade.timestamp = barTime;
-                trade.side = QStringLiteral("buy");
-                trade.quantity = quantity;
-                trade.price = fillPrice;
-                trade.commission = commission;
-                trade.amount = cost;
-                trade.reason = QStringLiteral("组合再平衡买入");
-                result.trades.append(trade);
-            }
+            PortfolioExecutor::rebalance(execState, equity,
+                definition.slippageRate, definition.commissionRate,
+                definition.lotSize, definition.tPlusOne, barTime,
+                result.trades);
         }
         if (commonTradingDay) ++commonDayIndex;
 
-        equity = cash;
+        equity = PortfolioExecutor::equity(execState);
         PortfolioBar bar;
         bar.timestamp = barTime;
-        for (const LegState &state : states) {
-            equity += state.quantity * state.lastPrice;
-        }
         bar.equity = equity;
-        bar.cash = cash;
-        for (const LegState &state : states) {
-            PortfolioPosition position;
-            position.instrument = state.instrument;
-            position.quantity = state.quantity;
-            position.lastPrice = state.lastPrice;
-            position.marketValue = state.quantity * state.lastPrice;
-            position.weight = equity > 0.0
-                ? position.marketValue / equity : 0.0;
-            position.priceStale = state.quantity > 0.0
-                && state.lastPriceDay.isValid() && state.lastPriceDay < day;
-            bar.positions.append(position);
-        }
+        bar.cash = execState.cash;
+        bar.positions = PortfolioExecutor::positions(execState, day, equity);
         result.equityCurve.append(bar);
     }
 
@@ -284,7 +201,7 @@ PortfolioResult PortfolioBacktestEngine::run(
     summary.finalEquity = result.equityCurve.last().equity;
     summary.totalReturnPercent = summary.initialCapital > 0.0
         ? (summary.finalEquity / summary.initialCapital - 1.0) * 100.0 : 0.0;
-    summary.totalCommission = totalCommission;
+    summary.totalCommission = execState.totalCommission;
     summary.totalTrades = result.trades.size();
     double peak = summary.initialCapital;
     QVector<double> returns;

@@ -141,6 +141,8 @@ qt_add_executable(PPTrader
     src/services/MootdxMarketDataProvider.h
     src/services/PortfolioBacktestEngine.cpp
     src/services/PortfolioBacktestEngine.h
+    src/services/PortfolioExecutor.cpp
+    src/services/PortfolioExecutor.h
     src/services/PortfolioBacktestService.cpp
     src/services/PortfolioBacktestService.h
     src/services/NasDataNodeClient.cpp
@@ -602,6 +604,8 @@ if(BUILD_TESTING)
         src/services/LocalDataStore.h
         src/services/PortfolioBacktestEngine.cpp
         src/services/PortfolioBacktestEngine.h
+        src/services/PortfolioExecutor.cpp
+        src/services/PortfolioExecutor.h
         src/services/SqliteLocalDataStore.cpp
         src/services/SqliteLocalDataStore.h
         src/services/StrategyExecutionStore.h
@@ -916,6 +920,8 @@ if(BUILD_TESTING)
         src/domain/PortfolioTypes.h
         src/services/PortfolioBacktestEngine.cpp
         src/services/PortfolioBacktestEngine.h
+        src/services/PortfolioExecutor.cpp
+        src/services/PortfolioExecutor.h
     )
     target_include_directories(tst_portfolio_backtest PRIVATE src)
     target_link_libraries(tst_portfolio_backtest PRIVATE Qt6::Core Qt6::Test)
@@ -945,6 +951,8 @@ if(BUILD_TESTING)
         src/services/LocalDataStore.h
         src/services/PortfolioBacktestEngine.cpp
         src/services/PortfolioBacktestEngine.h
+        src/services/PortfolioExecutor.cpp
+        src/services/PortfolioExecutor.h
         src/services/SqliteLocalDataStore.cpp
         src/services/SqliteLocalDataStore.h
         src/services/StrategyExecutionStore.h
