@@ -484,7 +484,7 @@ Item {
                         color: root.theme.bgInput; radius: 8; border.color: root.theme.border
                         Text { x: 12; y: 10; text: "成交记录（" + root.controller.backtestTradeModel.count + "）"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
                         ListView {
-                            x: 12; y: 38; width: parent.width - 24; height: parent.height - 50
+                            x: 12; y: 36; width: parent.width - 24; height: parent.height * 0.42 - 40
                             model: root.controller.backtestTradeModel
                             clip: true; spacing: 4; boundsBehavior: Flickable.StopAtBounds
                             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -496,11 +496,56 @@ Item {
                                 required property real netPnl
                                 required property real returnPercent
                                 required property bool profitable
-                                width: ListView.view.width; height: 48; radius: 5
+                                width: ListView.view.width; height: 44; radius: 5
                                 color: index % 2 ? root.theme.bgRaised : "transparent"
-                                Text { x: 8; y: 7; text: symbol + "  " + Qt.formatDateTime(entryTime, "MM-dd") + " → " + Qt.formatDateTime(exitTime, "MM-dd"); color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 9 }
-                                Text { anchors.right: parent.right; anchors.rightMargin: 8; y: 7; text: (profitable ? "+" : "") + netPnl.toFixed(2); color: profitable ? root.theme.green : root.theme.red; font.family: root.theme.fontFamily; font.pixelSize: 9; font.weight: Font.Bold }
-                                Text { x: 8; y: 27; text: "收益率 " + returnPercent.toFixed(2) + "%"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                                Text { x: 8; y: 6; text: symbol + "  " + Qt.formatDateTime(entryTime, "MM-dd") + " → " + Qt.formatDateTime(exitTime, "MM-dd"); color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                                Text { anchors.right: parent.right; anchors.rightMargin: 8; y: 6; text: (profitable ? "+" : "") + netPnl.toFixed(2); color: profitable ? root.theme.green : root.theme.red; font.family: root.theme.fontFamily; font.pixelSize: 9; font.weight: Font.Bold }
+                                Text { x: 8; y: 25; text: "收益率 " + returnPercent.toFixed(2) + "%"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                            }
+                        }
+                        Text { x: 12; y: parent.height * 0.46; text: "验证记录（" + root.controller.validationRuns.length + "）"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
+                        PpButton {
+                            x: 12; y: parent.height * 0.46 + 24; visualWidth: 88; visualHeight: 22
+                            theme: root.theme; text: "存为验证"
+                            available: root.controller.backtestTradeModel.count > 0 && !root.controller.backtestRunning
+                            toolTip: available ? "把当前回测结果保存为验证记录" : "请先完成回测"
+                            onClicked: root.controller.saveValidationRun(
+                                "验证 " + Qt.formatDateTime(new Date(), "MM-dd HH:mm"))
+                        }
+                        ListView {
+                            x: 12; y: parent.height * 0.46 + 52; width: parent.width - 24
+                            height: parent.height * 0.54 - 60
+                            model: root.controller.validationRuns
+                            clip: true; spacing: 4; boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            delegate: Rectangle {
+                                required property int index
+                                required property string name
+                                required property string instrumentSymbol
+                                required property double totalReturnPercent
+                                required property var completedAt
+                                width: ListView.view.width; height: 30; radius: 5
+                                color: index % 2 ? root.theme.bgRaised : "transparent"
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6
+                                    spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: name + " · " + instrumentSymbol + " · "
+                                              + (totalReturnPercent >= 0 ? "+" : "")
+                                              + Number(totalReturnPercent).toFixed(2) + "%"
+                                        color: totalReturnPercent >= 0 ? root.theme.green : root.theme.red
+                                        font.family: root.theme.fontFamily; font.pixelSize: 8
+                                        elide: Text.ElideRight
+                                    }
+                                    PpButton {
+                                        Layout.preferredWidth: 56; Layout.preferredHeight: 20
+                                        theme: root.theme; text: "恢复"
+                                        available: !root.controller.backtestRunning
+                                        toolTip: "恢复该验证的样本窗供重跑"
+                                        onClicked: root.controller.loadValidationRun(index)
+                                    }
+                                }
                             }
                         }
                     }
