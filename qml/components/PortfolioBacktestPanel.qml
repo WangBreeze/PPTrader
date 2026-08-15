@@ -88,7 +88,7 @@ Item {
         }
         Text {
             Layout.fillWidth: true
-            text: "共享资金池 · 等权/固定权重定期再平衡 · 只读取 raw_tick_cache_v1 · 组合级 T+1/整手/费用/滑点"
+            text: "共享资金池 · 观测交易日并集逐日估值 · 共同交易日调仓 · 只读取 raw_tick_cache_v1"
             color: root.theme.textMuted
             font.family: root.theme.fontFamily; font.pixelSize: 9
         }
@@ -237,6 +237,9 @@ Item {
                         + " · Sharpe " + Number(config.sharpeRatio).toFixed(3)
                         + " · 手续费 " + Number(config.totalCommission).toFixed(2)
                         + " · 调仓 " + config.totalTrades + " 笔"
+                        + (Number(config.staleValuationPointCount) > 0
+                           ? " · 缺日报价估值 " + config.staleValuationPointCount + " 点"
+                           : "")
                       : "尚未运行组合回测"
                 color: root.theme.textPrimary; elide: Text.ElideRight
                 font.family: root.theme.fontFamily; font.pixelSize: 9
