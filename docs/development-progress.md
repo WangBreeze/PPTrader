@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成阶段 3.2 多股回测对接：`TradingController` 暴露 `crossSectionalBacktest*` 契约（running/status/error/结果配置/权益曲线/成交模型 + `runCrossSectionalBacktest`/`cancelCrossSectionalBacktest`），新增 `CrossSectionalBacktestPanel` QML 面板（DSL v3 JSON 输入、运行/取消、权益曲线与调仓明细），复用 `PPTheme`/`PpButton`/`BacktestEquityChart` 视觉语言并集成到策略页。`all_qmllint` 通过，主程序加载无 QML 错误。
+
 - 完成阶段 3.1 多股回测服务：`CrossSectionalBacktestService` 在独立线程编译 DSL v3、逐腿校验数据集身份并读取 `raw_tick_cache_v1` K 线、对齐成帧后运行多股引擎，requestId 门控与取消语义同组合回测服务。`tst_cross_sectional_backtest` 新增服务生命周期与缺数据拒绝用例（10/10）。
 
 - 完成阶段 2.5 多股回测引擎：`CrossSectionalBacktestEngine::run()` 逐帧推进——每帧调 `CrossSectionalCustomStrategy` 产出目标持仓，用 `PortfolioExecutor` 先卖后买调仓，前向填充估值并标 stale，产出 `PortfolioResult`（权益曲线/成交/摘要）。`tst_cross_sectional_backtest` 新增端到端选股回测用例（9/9）。
