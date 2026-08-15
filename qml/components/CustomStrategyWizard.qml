@@ -1,7 +1,6 @@
 // qmllint disable unqualified
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import Qt.labs.settings
 
 Item {
@@ -66,7 +65,7 @@ Item {
             signalPeriod: 9,
             output: name === "MACD" ? "histogram" : (name === "BOLLINGER" ? "middle" : ""),
             standardDeviations: 2.0,
-            visible: true,
+            seriesVisible: true,
             seriesColor: color
         }
         seriesModel.append(item)
@@ -81,11 +80,11 @@ Item {
         seriesModel.remove(index, 1)
         for (let i = entryConditionsModel.count - 1; i >= 0; --i) {
             const row = entryConditionsModel.get(i)
-            if (row.left === alias || row.right === alias) entryConditionsModel.remove(i, 1)
+            if (row.leftOperand === alias || row.rightOperand === alias) entryConditionsModel.remove(i, 1)
         }
         for (let i = exitConditionsModel.count - 1; i >= 0; --i) {
             const row = exitConditionsModel.get(i)
-            if (row.left === alias || row.right === alias) exitConditionsModel.remove(i, 1)
+            if (row.leftOperand === alias || row.rightOperand === alias) exitConditionsModel.remove(i, 1)
         }
         root.statusText = "草稿未保存"
         root.saveDraft()
@@ -95,7 +94,7 @@ Item {
     function addCondition() {
         const model = root.activeConditionSide === 0 ? entryConditionsModel : exitConditionsModel
         const alias = seriesModel.count > 0 ? seriesModel.get(0).alias : "close"
-        model.append({ left: "close", op: "gt", right: alias, rightConstant: 0 })
+        model.append({ leftOperand: "close", op: "gt", rightOperand: alias, rightConstant: 0 })
         root.statusText = "草稿未保存"
         root.saveDraft()
         root.previewDirty = true
@@ -122,8 +121,8 @@ Item {
             const row = model.get(i)
             conditions.push({
                 op: row.op,
-                left: root.operandJson(row.leftKind, row.left, 0),
-                right: root.operandJson(row.rightKind, row.right, row.rightConstant)
+                left: root.operandJson(row.leftKind, row.leftOperand, 0),
+                right: root.operandJson(row.rightKind, row.rightOperand, row.rightConstant)
             })
         }
         return conditions
@@ -193,11 +192,27 @@ Item {
         try { parsed = JSON.parse(draftStore.wizardDraft) } catch (e) { return }
         if (!parsed || !Array.isArray(parsed.series)) return
         seriesModel.clear()
-        for (const item of parsed.series) seriesModel.append(item)
+        for (const item of parsed.series) {
+            if (item.visible !== undefined && item.seriesVisible === undefined)
+                item.seriesVisible = item.visible
+            seriesModel.append(item)
+        }
         entryConditionsModel.clear()
-        for (const item of parsed.entry || []) entryConditionsModel.append(item)
+        for (const item of parsed.entry || []) {
+            if (item.left !== undefined && item.leftOperand === undefined)
+                item.leftOperand = item.left
+            if (item.right !== undefined && item.rightOperand === undefined)
+                item.rightOperand = item.right
+            entryConditionsModel.append(item)
+        }
         exitConditionsModel.clear()
-        for (const item of parsed.exit || []) exitConditionsModel.append(item)
+        for (const item of parsed.exit || []) {
+            if (item.left !== undefined && item.leftOperand === undefined)
+                item.leftOperand = item.left
+            if (item.right !== undefined && item.rightOperand === undefined)
+                item.rightOperand = item.right
+            exitConditionsModel.append(item)
+        }
         if (parsed.name) root.draftName = parsed.name
         root.previewDirty = true
     }
@@ -247,12 +262,12 @@ Item {
             root.addIndicator("SMA")
             root.addIndicator("ROC")
             root.addIndicator("PP_FLOW")
-            entryConditionsModel.append({ left: "fast", leftKind: "series", op: "crossesAbove",
-                                          right: "slow", rightKind: "series", rightConstant: 0 })
-            entryConditionsModel.append({ left: "momentum", leftKind: "series", op: "gt",
-                                          right: "", rightKind: "value", rightConstant: 0.8 })
-            exitConditionsModel.append({ left: "momentum", leftKind: "series", op: "lt",
-                                         right: "", rightKind: "value", rightConstant: 0 })
+            entryConditionsModel.append({ leftOperand: "fast", leftKind: "series", op: "crossesAbove",
+                                          rightOperand: "slow", rightKind: "series", rightConstant: 0 })
+            entryConditionsModel.append({ leftOperand: "momentum", leftKind: "series", op: "gt",
+                                          rightOperand: "", rightKind: "value", rightConstant: 0.8 })
+            exitConditionsModel.append({ leftOperand: "momentum", leftKind: "series", op: "lt",
+                                         rightOperand: "", rightKind: "value", rightConstant: 0 })
         }
         root.statusText = "草稿已保存"
     }
@@ -605,7 +620,7 @@ Item {
                                     required property string name
                                     required property string alias
                                     required property int period
-                                    required property bool visible
+                                    required property bool seriesVisible
                                     required property string seriesColor
                                     width: 164; height: 126; radius: 8
                                     color: theme.bgRaised
@@ -672,15 +687,15 @@ Item {
                                             border.color: theme.border
                                             Text {
                                                 anchors.centerIn: parent
-                                                text: card.visible ? "显示 ON" : "显示 OFF"
-                                                color: card.visible ? card.seriesColor : theme.textMuted
+                                                text: card.seriesVisible ? "显示 ON" : "显示 OFF"
+                                                color: card.seriesVisible ? card.seriesColor : theme.textMuted
                                                 font.family: theme.fontFamily; font.pixelSize: 9; font.weight: Font.Medium
                                             }
                                             MouseArea {
                                                 anchors.fill: parent
                                                 onClicked: {
-                                                    seriesModel.setProperty(card.index, "visible",
-                                                                            !card.visible)
+                                                    seriesModel.setProperty(card.index, "seriesVisible",
+                                                                            !card.seriesVisible)
                                                     root.previewDirty = true
                                                 }
                                             }
@@ -805,10 +820,10 @@ Item {
 
                                 delegate: Rectangle {
                                     required property int index
-                                    required property string left
+                                    required property string leftOperand
                                     required property string leftKind
                                     required property string op
-                                    required property string right
+                                    required property string rightOperand
                                     required property string rightKind
                                     required property double rightConstant
                                     width: conditionList.width
@@ -829,12 +844,12 @@ Item {
                                         model: ["close", "open", "high", "low", "volume"].concat(root.seriesNames())
                                         currentIndex: {
                                             const values = ["close", "open", "high", "low", "volume"].concat(root.seriesNames())
-                                            const idx = values.indexOf(parent.left)
+                                            const idx = values.indexOf(parent.leftOperand)
                                             return idx < 0 ? 0 : idx
                                         }
                                         onActivated: {
                                             const values = ["close", "open", "high", "low", "volume"].concat(root.seriesNames())
-                                            root.conditionModel().setProperty(parent.index, "left", values[currentIndex])
+                                            root.conditionModel().setProperty(parent.index, "leftOperand", values[currentIndex])
                                             root.conditionModel().setProperty(parent.index, "leftKind",
                                                 values[currentIndex].length <= 6 ? "field" : "series")
                                             root.previewDirty = true
@@ -915,13 +930,13 @@ Item {
                                         model: root.seriesNames()
                                         currentIndex: {
                                             const values = root.seriesNames()
-                                            const idx = values.indexOf(parent.rightKind === "value" ? "" : parent.right)
+                                            const idx = values.indexOf(parent.rightKind === "value" ? "" : parent.rightOperand)
                                             return idx < 0 ? 0 : idx
                                         }
                                         visible: parent.rightKind !== "value"
                                         onActivated: {
                                             const values = root.seriesNames()
-                                            root.conditionModel().setProperty(parent.index, "right", values[currentIndex])
+                                            root.conditionModel().setProperty(parent.index, "rightOperand", values[currentIndex])
                                             root.conditionModel().setProperty(parent.index, "rightKind", "series")
                                             root.previewDirty = true
                                         }
@@ -969,7 +984,7 @@ Item {
                                         active: parent.rightKind !== "value"
                                         onClicked: {
                                             root.conditionModel().setProperty(parent.index, "rightKind", "value")
-                                            root.conditionModel().setProperty(parent.index, "right", "")
+                                            root.conditionModel().setProperty(parent.index, "rightOperand", "")
                                             root.previewDirty = true
                                         }
                                     }
@@ -1139,7 +1154,7 @@ Item {
                         // 指标序列（各序列独立归一化）
                         const seriesCount = (data.aliases || []).length
                         for (let s = 0; s < seriesCount; ++s) {
-                            if (!root.seriesModel.get(s) || !root.seriesModel.get(s).visible) continue
+                            if (!root.seriesModel.get(s) || !root.seriesModel.get(s).seriesVisible) continue
                             let smin = Infinity, smax = -Infinity
                             const vals = []
                             for (const bar of bars) {
@@ -1218,20 +1233,20 @@ Item {
                         required property int index
                         required property string name
                         required property string alias
-                        required property bool visible
+                        required property bool seriesVisible
                         required property string seriesColor
                         width: 214; height: 32; radius: 6
                         color: theme.bgRaised
                         Text {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
-                            text: "● " + parent.name + (parent.alias ? " (" + parent.alias + ")" : "") + "   " + (parent.visible ? "ON" : "OFF")
-                            color: parent.visible ? parent.seriesColor : theme.textMuted
+                            text: "● " + parent.name + (parent.alias ? " (" + parent.alias + ")" : "") + "   " + (parent.seriesVisible ? "ON" : "OFF")
+                            color: parent.seriesVisible ? parent.seriesColor : theme.textMuted
                             font.family: theme.fontFamily; font.pixelSize: 10; font.weight: Font.Medium
                         }
                         MouseArea {
                             anchors.fill: parent
                             onClicked: {
-                                seriesModel.setProperty(parent.index, "visible", !parent.visible)
+                                seriesModel.setProperty(parent.index, "seriesVisible", !parent.seriesVisible)
                                 root.previewDirty = true
                             }
                         }
