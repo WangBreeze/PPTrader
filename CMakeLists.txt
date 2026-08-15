@@ -117,6 +117,8 @@ qt_add_executable(PPTrader
     src/services/IndicatorEngine.cpp
     src/services/IndicatorEngine.h
     src/services/LocalDataStore.h
+    src/services/LogService.cpp
+    src/services/LogService.h
     src/services/MarketSession.cpp
     src/services/MarketSession.h
     src/services/MarketSnapshotAssembler.cpp
@@ -1029,6 +1031,14 @@ if(BUILD_TESTING)
     target_include_directories(tst_parameter_grid_scanner PRIVATE src)
     target_link_libraries(tst_parameter_grid_scanner PRIVATE Qt6::Core Qt6::Test)
 
+    qt_add_executable(tst_log_service
+        tests/tst_log_service.cpp
+        src/services/LogService.cpp
+        src/services/LogService.h
+    )
+    target_include_directories(tst_log_service PRIVATE src)
+    target_link_libraries(tst_log_service PRIVATE Qt6::Core Qt6::Test)
+
     qt_add_executable(tst_workspace_instrument_selection
         tests/tst_workspace_instrument_selection.cpp
         src/app/WorkspaceInstrumentSelectionState.cpp
@@ -1244,6 +1254,7 @@ if(BUILD_TESTING)
     add_test(NAME custom_strategy COMMAND tst_custom_strategy)
     add_test(NAME custom_strategy_execution COMMAND tst_custom_strategy_execution)
     add_test(NAME parameter_grid_scanner COMMAND tst_parameter_grid_scanner)
+    add_test(NAME log_service COMMAND tst_log_service)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)
     add_test(NAME aligned_bar_series COMMAND tst_aligned_bar_series)
     add_test(NAME cross_sectional_backtest COMMAND tst_cross_sectional_backtest)

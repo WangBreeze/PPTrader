@@ -169,6 +169,10 @@ TradingController::TradingController(QObject *parent)
     m_historyDownloadRouter.addProvider(&m_historyDownloadFetcher);
     m_strategyPluginManager.setPluginDirectory(
         QCoreApplication::applicationDirPath() + QStringLiteral("/strategies"));
+    LogService::instance().configure(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/logs/pptrader.log"),
+        5 * 1024 * 1024, 3);
+    LogService::instance().info(QStringLiteral("app"), QStringLiteral("PPTrader 启动"));
     m_backtestStrategyRegistry.normalizeParameters(
         m_selectedBacktestStrategyId, {}, &m_selectedBacktestParameters, nullptr);
     MootdxMarketDataProvider::warmUpPython();
@@ -5246,6 +5250,7 @@ void TradingController::setStatusText(const QString &text)
 {
     if (m_statusText == text) return;
     m_statusText = text;
+    LogService::instance().info(QStringLiteral("status"), text);
     emit statusTextChanged();
 }
 

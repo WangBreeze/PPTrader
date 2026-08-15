@@ -57,6 +57,7 @@
 #include "strategy/FixedAmountPositionSizer.h"
 #include "plugin/StrategyPluginManager.h"
 #include "services/ParameterGridBacktestService.h"
+#include "services/LogService.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
 
