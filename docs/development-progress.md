@@ -1,10 +1,12 @@
 # PPTrader 开发进度
 
-最后更新：2026-08-13
+最后更新：2026-08-14
 
 ## 当前阶段
 
-阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A、NAS H1A–H1C、H2 回测数据集身份（H2.1–H2.3）、H3B 批量结果按需归档/中断恢复（H3B.1–H3B.3）与 H3C 组合资金回测（H3C.1–H3C.3）已完成。历史 Tick 回测具备单品种闭环、多品种轻量结果矩阵、不可变数据集身份、批量逐项归档与失败项恢复，以及共享资金池的组合定期再平衡回测；NAS 支持用户明确代码清单的受控 manifest、串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。
+阶段 9C、10B、10C、10D v1、10E、10F、历史回测 H3A、NAS H1A–H1C、H2 回测数据集身份（H2.1–H2.3）、H3B 批量结果按需归档/中断恢复（H3B.1–H3B.3）与 H3C 组合资金回测（H3C.1–H3C.4）已完成。历史 Tick 回测具备单品种闭环、多品种轻量结果矩阵、归档型数据集身份、批量逐项归档与失败项恢复，以及共享资金池的组合定期再平衡和观测交易日并集估值；NAS 支持用户明确代码清单的受控 manifest、并发下载/串行事务导入、跨进程计划恢复与显式暂存清理。真实装载基线已验收到 100 只；500 与全市场档按用户决定延期。
+
+状态口径（2026-08-14）：上述“完成”指代码与对应阶段自动/受控验收完成，不等于生产上线。10F 仍缺四小时以上长稳；NAS Range/Token/changes/zlib 仍缺真实节点故障与吞吐复验；H3C 只在共同交易日固定权重调仓，逐日估值覆盖首个共同交易日后的观测日期并集，不包含所有腿同时缺失的未知日期。完整矩阵与代码审查限制见 `docs/documentation-status-2026-08-14.md`。
 
 ## 已完成
 
@@ -12,7 +14,7 @@
 | --- | --- |
 | 工程环境 | Qt 6.4.3、VS2022 x64、CMake Presets 和 VS Code 构建链路 |
 | 行情 | 模拟实时 Tick、mootdx A 股历史 K 线桥接、TickData 原始成交逐行导入、任意周期 K 线缓存、市场交易时段判断 |
-| 策略与回测 | SMA、RSI、MACD、布林带与受限 JSON DSL；严格 Tick 本地回测、交易记录、权益曲线和结果归档；回测数据集不可变身份（事实指纹 SHA-256） |
+| 策略与回测 | SMA、RSI、MACD、布林带与受限 JSON DSL；严格 Tick 本地回测、交易记录、权益曲线和结果归档；回测数据集内容身份（逐日规范化 Tick SHA-256） |
 | 横截面计算 | A 股全市场快照、完整率、因子接口、相对强弱排名/Z-Score/分位数；5000 标的容量基线 |
 | 交易账户 | 委托、成交、持仓、现金、冻结资金、手续费、盈亏核算和启动恢复 |
 | 模拟撮合 | 市价/限价、部分成交、DAY/GTC/IOC/FOK、流动性参与率、到期自动撤单 |
@@ -23,13 +25,17 @@
 
 ## 本次完成
 
+- 完成 H3C.4 缺日逐日估值：`PortfolioBacktestEngine` 从首个共同交易日起遍历各腿观测日期并集，缺报价持仓沿用最近收盘并标记 `priceStale`；缺腿日只输出权益、不成交、不推进共同交易日调仓时钟。归档持仓 JSON 向后兼容保存 stale 标记，控制器向 QML 暴露 `staleValuationPointCount` 与 `valuationCalendar=observed_union`，组合面板明确显示缺日报价估值点数。Qt Test 覆盖缺日权益、调仓时钟和归档恢复。
+
+- 完成自定义策略向导预览的来源隔离：`TradingController.customStrategyPreview()` 改由 `CustomStrategyPreviewService::buildLocalTickPreview()` 读取，SQL 固定限定 `source=raw_tick_cache_v1`，不会混入同品种、同周期的 Provider 研究 K 线，也不会回退网络。只有远端 K 线时返回明确不可用错误。`tst_custom_strategy` 新增多来源与仅远端数据用例。
+
 - 完成 NAS 节点摘要缓存：`nas_data_node.py` 按 `(mtime_ns, size)` 缓存文件 SHA-256，`/v1/catalog` 与 `/v1/manifest` 复用缓存避免对同一文件重复哈希；`/v1/health` 新增 `digestCacheEntries`/`digestCacheHits` 统计（客户端只读 version，向后兼容）。Python 节点本地端到端校验：连续两次 catalog 后命中 1 次、摘要一致。
 
 - 完成自定义策略 DSL v2 信号输出配置：新增可选顶层 `signal`（仅 v2），`priceMode` 支持 `triggerClose`（默认，v1 行为不变）与 `nextOpen`（触发后下一根 K 线开盘价成交）。`CustomBacktestStrategy` 增加挂起入场状态，`nextOpen` 在下一 Bar 开盘价发出买入信号并以该开盘价为持仓参考价；`tst_custom_strategy` 新增两模式成交价对比与 v1 拒绝用例（14/14）。对应设计稿 26:58 的“信号输出：价格 = 下一根开盘价”。
 
 - 完成 NAS 传输压缩（zlib，零新依赖）：客户端全新下载发送 `Accept-Encoding: zlib`，节点 `nas_data_node.py` 返回 4 字节原始长度 + `zlib.compress` 体并带 `X-PPTrader-Encoding: zlib`；客户端 `qUncompress` 解压后仍按 catalog `size`/`sha256` 整体校验并原子提交，`Range` 续传路径保持不压缩。`tst_nas_data_node` 新增压缩下载→解压→校验→缓存复用与关闭压缩回退用例（11/11）；Python 节点本地端到端校验通过（144000 字节 CSV → 564 字节，大小/摘要/内容全对）。真实虚拟机吞吐复验与 pyarrow 二进制解析、WebSocket 变更通知、分块续传仍为后续项。协议与路线图已同步。
 
-- 完成自定义策略 DSL v2 与向导第 3 步（指标组合）：`schemaVersion=2` 新增顶层 `series` 命名序列/别名引用（也支持操作数内联 `alias`，前向引用允许）与三个指标 `ROC`（百分比变动）、`VWAP`（Asia/Shanghai 会话累计）、`PP_FLOW`（价量趋势 PVT）；v1 文档语义保持不变并拒绝 v2 语法。新增只读预览服务 `CustomStrategyPreviewService` 与 `TradingController.customStrategyPreview()`（本地最近 K 线重放，返回指标序列 + B/S 信号，不写库）。`tst_custom_strategy` 扩展至 13 项（别名/顶层 series/新指标数值/会话重置/预览/ v1 拒绝），全量 CTest 22/22、`all_qmllint` 通过。QML 新增 `CustomStrategyWizard`：八步向导壳（第 3 步完整实现）、已选指标卡片（别名/周期/显示/移除/添加白名单）、入场/出场条件构建器（序列/字段/常量、七种比较符）、右侧组合预览（Canvas K 线 + 指标线叠加 + B/S 标记 + 命中详情 + 执行摘要）、前端草稿暂存（Qt.labs.settings），并与现有 JSON 工作台双模式并存（向导生成 DSL v2 JSON → 校验/保存/回测）。设计稿依据 Figma 节点 26:58。
+- 完成自定义策略 DSL v2 与向导第 3 步（指标组合）：`schemaVersion=2` 新增顶层 `series` 命名序列/别名引用（也支持操作数内联 `alias`，前向引用允许）与三个指标 `ROC`（百分比变动）、`VWAP`（Asia/Shanghai 会话累计）、`PP_FLOW`（价量趋势 PVT）；v1 文档语义保持不变并拒绝 v2 语法。新增只读预览服务 `CustomStrategyPreviewService` 与 `TradingController.customStrategyPreview()`（仅重放本地 `raw_tick_cache_v1` K 线，返回指标序列 + B/S 信号，不写库、不访问网络）。QML 新增 `CustomStrategyWizard`：八步向导壳（第 3 步完整实现）、已选指标卡片（别名/周期/显示/移除/添加白名单）、入场/出场条件构建器（序列/字段/常量、七种比较符）、右侧组合预览（Canvas K 线 + 指标线叠加 + B/S 标记 + 命中详情 + 执行摘要）、前端草稿暂存（Qt.labs.settings），并与现有 JSON 工作台双模式并存（向导生成 DSL v2 JSON → 校验/保存/回测）。设计稿依据 Figma 节点 26:58。
 
 - 完成 H4.3 节点变更摘要与显式轮询：节点新增 `GET /v1/changes?since=<毫秒>`（只扫描根目录下一层日期目录 mtime，不递归、不下载、不触发回测），返回目录总数、最新时间与变更目录；客户端 `requestChanges`（含 401 重试）与控制器 `requestNasNodeChanges()`，NAS 面板新增"检查节点更新"按钮与变更展示。Python 真实服务验证 since 前后语义，`tst_nas_data_node` 新增 changes 解析用例（10/10）。Parquet/Zstd 压缩传输评估已写入 `nas-data-node-protocol.md`（预计冷缓存传输 8.6s→2-3s，解析仍为瓶颈，列为后续项）。
 
@@ -355,18 +361,22 @@
 cmake --build --preset vs2022-debug --parallel 1
 ```
 
-新版 QML 已清理旧界面的重复 ID，并通过 QML lint。构建后的 `'pwsh.exe' 不是内部或外部命令` 是本机 Qt 部署钩子的非致命提示，不影响可执行文件、测试或 lint 结果。
+新版 QML 已清理旧界面的重复 ID，并通过 QML lint。构建后的 `'pwsh.exe' 不是内部或外部命令` 来自开发机全局 vcpkg MSBuild AppLocal：它先尝试 PowerShell 7，找不到后自动回退到系统 Windows PowerShell 并成功复制依赖；不是 PPTrader 脚本，也不影响构建结果。
 
 ## 未实现与后续优先级
 
-1. 进入 H3B：先复用已验收的 100 只装载基线增加单项曲线/成交按需归档；500 与 5207 档按用户决定暂不测试。
-2. 为回测归档增加显式删除、保留期、版本引用保护和同输入确定性对照；当前不自动清理任何历史结果。
-3. 增加同品种、同数据版本最多三份结果对比；自定义策略仍不开放模拟交易。
-4. 为 TDX/腾讯主备与选中品种分钟服务完成 4 小时以上持续运行、失败分块重试、限流和 p50/p95 端到端延迟基准；如需要正式生产 SLA，再接入授权 QMT/专业源。
-5. 历史 Tick 下载、NAS 同步和任意周期派生继续独立演进；实时免费分钟行情不得补写历史事实或成为回测缺失数据的自动回退。
-6. 接入策略审批和账户交易页面；远端同步、真实券商、导出、全屏和多窗口按独立阶段实现。
-7. 北交所数据源按后续独立阶段处理；当前仅保留模型角色、板块位、颜色和零计数展示。
+2026-08-14 完成 H2 内容身份加固：SQLite 全库升级为 v6，新增逐日规范化 Tick SHA-256 缓存与事实 INSERT/UPDATE/DELETE 脏标记触发器，派生 K 线缓存保存对应内容摘要。v2 身份可识别行数和最大 ID 不变的原位字段修改，相同事实重导保持版本稳定；旧 v1 归档 JSON 继续按 `count/max-id` 解析。首次读取旧库未计算日期需要流式扫描一次，后续复用摘要缓存。
+
+1. **继续修可信度边界**：H2 内容身份、向导预览限源和 H3C 观测日并集估值已完成；下一步补齐 NAS 并发乱序/取消迟到响应测试。组合估值仍不得越过“所有腿同时缺失时无日期事实”的边界。
+2. **完成真实稳定性验收**：TDX/腾讯至少四小时长稳、失败分块重试、缺口补拉、限流和 p50/p95；NAS Range/Token/changes/zlib 在真实节点上的故障、轮换、冷缓存吞吐与重启恢复。需要 SLA 时再评估授权 QMT/专业源。
+3. **继续自定义策略产品闭环**：完成向导其余步骤、固定金额/30% 上限风控、样本窗与逐 Bar 回放、最多 10 条验证记录、显式模拟执行审批和通知。自由代码、LLM 生成即执行和真实下单不在当前范围。
+4. **补齐数据工程**：500/5207 真实写库仍延期；后续包括全市场批量按需同步、公司行动/复权一致性、跨年度权威交易日历、坏行质量门槛、原始逐笔回放，以及按实测决定 Parquet/Zstd/pyarrow。实时分钟不得补写历史 Tick 事实。
+5. **完善组合与研究**：权威日历覆盖全腿同时缺失日、策略信号驱动调仓、组合级风险/熔断、组合对比与横截面因子研究；当前固定权重组合不等于完整组合管理系统。
+6. **持久化生命周期与交付**：回测归档删除、保留期、版本引用保护、同输入确定性对照、多结果比较、导出、备份清理与存储设置页仍未实现。
+7. **后续产品路线**：真实券商/对账与账户交易页面、多资产（美股/外汇/加密货币）、北交所完整源、LLM 辅助、全屏/多窗口均未完成，必须按独立阶段验收。
 
 ## 维护规则
 
 每个阶段结束时更新“本次完成”“验证状态”和“未实现”；功能状态只以已构建、已测试的代码为准。架构、流程或表结构发生变化时，同时更新 `docs/project-wiki.md`。
+
+2026-08-14 H3C.4 完成后实际串行 Debug 构建成功，CTest 22/22 通过（40.14 秒），`all_qmllint` 目标无诊断。此前已移除 `CustomStrategyWizard.qml` 未使用导入并完成向导预览严格限源。本轮未启动应用、联网或访问 NAS；构建环境的 `pwsh.exe` 提示来自全局 vcpkg AppLocal，系统 Windows PowerShell 回退成功。

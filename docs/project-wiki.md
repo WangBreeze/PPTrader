@@ -6,15 +6,17 @@ PPTrader 是基于 Qt 6、C++20 和 QML 的桌面量化交易工作台。系统�
 
 图表、数据库、NAS 与行情 Provider 的阶段边界见 `docs/roadmap/图表存储与行情10A-10F.md`，历史 Tick 回测的全局路线见 `docs/roadmap/历史Tick回测与NAS数据路线图.md`。架构决策是：本地 SQLite 保存历史 Tick 事实、派生缓存和应用状态；NAS 保存原始数据并通过服务 API 提供，不直接共享 SQLite/WAL 文件。免费实时行情最低粒度固定为 1 分钟且只驻留工作台内存，远端日 K 只作为研究缓存；历史回测只能使用 NAS 同步/显式导入后的 Tick 事实，三者不能自动回退或覆盖。
 
+截至 2026-08-14 的“已实现 / 待真实验收 / 未实现”矩阵与代码审查限制统一记录在 `docs/documentation-status-2026-08-14.md`；阶段文档中的历史数字保留为当时证据，不代表当前测试总数或生产 SLA。
+
 盘中真实成交统一进入 `RawTradeIncrementalIngestService`。批次必须带稳定来源与成交序号，并限制为单代码、单交易日；SQLite 唯一键负责重放幂等，事实提交后只刷新该日已经物化过的 K 线周期。事实已提交但缓存刷新失败时两种状态分开报告：原始成交不会回滚或丢失，下次查询依据指纹自动补建缓存。
 
-SQLite 全库版本从阶段 10B 起由 `PRAGMA user_version` 管理，当前为 v3（H2 增加回测数据集身份列）。`app_database_metadata` 的 database UUID 标识数据库身份，复制或搬迁后保持不变；`schema_migration_history` 记录全库迁移，原 `schema_versions` 只保留为回测归档等子模块的兼容版本。旧库升级先执行 `VACUUM INTO` 一致性备份，再在单事务内迁移并完成 SQLite、外键和必需业务表校验；程序不会自动删除这些备份。
+SQLite 全库版本从阶段 10B 起由 `PRAGMA user_version` 管理，当前为 v6：v3 增加回测数据集身份列，v4 增加批量运行恢复，v5 增加组合回测归档，v6 增加逐日 Tick 内容摘要缓存和派生缓存内容指纹。`app_database_metadata` 的 database UUID 标识数据库身份，复制或搬迁后保持不变；`schema_migration_history` 记录全库迁移，原 `schema_versions` 只保留为子模块兼容版本。旧库升级先执行 `VACUUM INTO` 一致性备份，再在单事务内迁移并完成 SQLite、外键和必需业务表校验；程序不会自动删除这些备份。
 
 本地数据库位置由 `StorageProfile` 管理并写入 `QSettings`。搬迁是复制并切换，不删除源库：Controller 先拒绝所有活动任务并排空/关闭后台 SQLite 连接，工作线程复制到目标临时文件，校验 database UUID 与完整性后才原子确认、保存配置并重启连接。UNC/SMB/NFS 地址不能作为 SQLite 路径；NAS 数据在 10D 中作为独立数据节点，通过 catalog/分块接口同步到本地数据库。
 
 NAS 数据节点 v1 的详细契约见 `docs/nas-data-node-protocol.md`。`NasDataNodeClient` 只接受用户显式配置的安全端点，以 requestId 管理异步 health/catalog/download；校验后的单日 CSV 进入本地暂存区，再复用现有 TickData 流式解析和 SQLite 事务导入。NAS 原始文件、暂存副本、本地事实表和派生 K 线各有独立身份，下载成功不能冒充导入成功。
 
-v1 已在真实虚拟机数据仓库上经 SSH 本地端口转发完成单日闭环：目录清单、文件字节数与 SHA-256 一致，客户端事务导入 4064 条合法成交并刷新 239 根 60 秒 K 线。节点现已安装为 systemd 用户服务，使用目标机环境文件提供仓库根目录和回环端口，仓库不保存连接参数；客户端验收结束后关闭本地 SSH 隧道，远端只读服务保留运行。生产部署仍需 NAS 原生 HTTPS、令牌轮换与监控。
+v1 已在真实虚拟机数据仓库上经受控本地转发完成单日闭环：目录清单、文件字节数与 SHA-256 一致，客户端事务导入 4064 条合法成交并刷新 239 根 60 秒 K 线；100 档装载与热缓存并发基线也已有记录。节点已安装为回环 systemd 用户服务，仓库不保存连接参数。Token 文件轮换、Range 续传、变更摘要和 zlib 已有代码/自动测试，但真实节点故障与长稳验收尚未完成；生产部署仍需 NAS 原生 HTTPS、监控、审计、备份和容量告警。
 
 ## 目录与分层
 
@@ -56,7 +58,7 @@ flowchart LR
 
 `CandleSeriesChart` 的交互状态由 `LocalCandleSeriesItem` 和 `LocalCandlePlotData` 承担。C++ 负责视口归一化、指针锚定缩放、Bar 平移、可见价格范围与命中；QML 只转发鼠标/键盘事件并绘制十字线标签。蜡烛仍是三个批量 `QSGGeometryNode`，缩放后不会为不可见数据构建几何，也不会为每根 K 线创建 QML Item。
 
-`StrategyResearchPage` 已能从独立回测策略目录选择 SMA、RSI、MACD 或布林带策略，并使用选中的历史 Tick 派生 SQLite 数据集运行。内置和自定义入口都直接调用 `loadRecentCandles()`，不进入 `HistoricalDataService`；远端 K 线只在独立研究缓存工作区显示。实时执行用的 `strategyModel` 与回测策略目录继续分离，避免把绑定观察列表和审批配置的实时策略误当成历史回测模板。
+`StrategyResearchPage` 已能从独立回测策略目录选择 SMA、RSI、MACD 或布林带策略，并使用选中的历史 Tick 派生 SQLite 数据集运行。正式内置/自定义回测由 `BacktestDatasetService` 按 `raw_tick_cache_v1` 身份准备和校验，不进入 `HistoricalDataService`；远端 K 线只用于独立研究缓存。向导只读预览同样通过按 source 限定的 SQL 只读取 `raw_tick_cache_v1`，多来源并存时不会误用 Provider 研究 K 线，也不会访问网络。实时执行用的 `strategyModel` 与回测策略目录继续分离。
 
 自定义模式由 `CustomStrategyWorkbench` 承载，只调用 `TradingController` 的策略模型、Schema、定义导出、校验、分析、保存和严格本地回测入口。编辑器不执行 JSON 中的脚本、JavaScript、命令或网络操作；DSL 仍由 C++ 白名单校验器和编译器解释。策略必须先校验、保存为不可变新版本，并与当前编辑内容一致后才能启动。
 
@@ -68,13 +70,13 @@ flowchart LR
 
 H3A/H3B 已增加独立 `BatchBacktestService` 和 `BatchBacktestResultListModel`。控制器从严格本地 Tick catalog 选择同周期数据集，后台线程以独立 SQLite 连接逐项读取，并把活动 `BacktestEngine` 限制为 20；每项运行前加载数据集身份（缺失/缓存过期按失败隔离），完成后保留摘要并在内存有界保留完整结果（32 项 LRU）。`archiveBatchBacktestItem(symbol)` 复用回测归档事务按需保存单项曲线/成交/身份；`batch_backtest_runs`/`batch_backtest_run_items` 持久化运行计划（全库 v4），应用重启把遗留 running 转为可重试 cancelled，`resumeBatchBacktest(runId)` 只重跑失败/取消项。批量任务与单标的任务互斥，支持原子取消、requestId 门控和单项失败隔离。它不是组合资金回测，也不自动批量保存曲线/成交。独立 Release 探针实测 5207×239 根在活动上限 20 时用时 2.710 秒；真实 5207 份数据的 NAS 同步、SQLite 装载和端到端上限仍属于 H1/H3B 后续大档验证。
 
-H3C 新增组合资金回测：`PortfolioBacktestEngine` 以共享资金池按目标权重（默认等权）在共同交易日收盘定期再平衡，强制 A 股整手、费用、滑点与 T+1（先卖后买，当日买入不可卖），停牌腿保持数量并按最后已知价估值；`PortfolioBacktestService` 逐腿校验 H2 数据集身份后异步运行，`portfolio_backtest_results`/`portfolio_equity_points`/`portfolio_trades` 三表单事务保存组合定义、数据集身份、每期持仓与调仓成交（全库 v5）。策略页组合回测面板支持腿解析、周期/调仓/根数配置、权益曲线、调仓成交与归档加载。它不是策略信号驱动调仓，也不含做空/杠杆/组合级熔断（见 `docs/portfolio-backtest-design.md`）。
+H3C 新增组合资金回测：`PortfolioBacktestEngine` 以共享资金池按目标权重（默认等权）在共同交易日收盘定期再平衡，强制 A 股整手、费用、滑点与先卖后买；`PortfolioBacktestService` 逐腿校验 H2 数据集身份后异步运行，三个 v5 表事务保存组合定义、身份、权益与调仓成交。H3C.4 后，权益曲线从首个共同交易日起覆盖各腿观测日期并集；缺报价持仓沿用最近收盘并以 `priceStale` 标记，该日不成交也不推进调仓时钟。策略页显示缺日报价估值点数，归档持仓 JSON 原样恢复 stale 身份。所有腿同时缺失的日期仍需权威日历才能生成，当前不伪造；策略信号驱动、做空/杠杆和组合级熔断也未实现（见 `docs/portfolio-backtest-design.md`）。
 
 `TickDataImportPanel` 是阶段 8A 的显式本地文件入口。目录、单个 A 股代码、交易日、文件格式、聚合周期和 5min volume 单位全部由用户确认；目录选择只更新控制器状态，不枚举或打开文件。只有导入按钮调用 `startTickDataImport()`，后台结果通过 requestId 回传，QML 不直接访问 `QFile` 或 SQLite。
 
 `TickDataBatchImportPanel` 是阶段 8B 的受控多日入口。`prepareTickDataBatchImport()` 只为指定代码和日期区间计算确定性预期路径并检查文件元数据，不解析内容、不递归扫描；`startTickDataBatchImport()` 才逐日串行复用阶段 8A 解析器。每个日期独立提交事务，失败继续；取消后可用 `resumeTickDataBatchImport()` 保留成功项并重试其余项。
 
-NAS H1A 在网络侧增加同样的按日事务边界，H1B 将输入扩展为用户明确提交的多代码 manifest。`NasTickSyncQueue` 按日期、代码稳定排序并串行执行 download→SHA-256→import；失败项不会回滚成功日期，取消与恢复也不会重新处理成功项。H1C 使用版本化原子 JSON 保存计划，重启仅从本地恢复并把中断项转为可重试状态，不自动访问节点。缓存管理只扫描和显式清理 Qt 暂存目录内符合 `YYYYMMDD/代码.csv` 的文件，跳过符号链接和无关文件，绝不删除 SQLite 事实。详细契约见 `docs/nas-sync-recovery-cache.md`。
+NAS H1A–H1C 建立按文件事务边界、多代码 manifest 与跨进程恢复。H4.1 后 `NasTickSyncQueue` 按日期、代码稳定排序，可并行下载（默认 4、上限 16），校验完成后仍由单个导入服务串行执行 SQLite 事务；失败项不回滚成功项，取消/恢复不重复成功项。缓存管理只扫描和显式清理 Qt 暂存目录内符合 `YYYYMMDD/代码.csv` 的文件，跳过符号链接和无关文件，绝不删除 SQLite 事实。真实并发乱序、取消迟到响应和重启长稳仍需控制器级验收；详细契约见 `docs/nas-sync-recovery-cache.md` 和 `docs/nas-data-node-protocol.md`。
 
 阶段 8C 在同一面板增加日历、覆盖预检和历史恢复。计划读取 SQLite 按交易日的现有 K 线数量，但仍不打开 CSV；完整日期默认跳过，部分覆盖明确显示后才允许用户启动 UPSERT。历史摘要可按代码/状态筛选，`restoreTickDataBatchRetryPlan()` 从不含路径的逐日明细恢复成功状态，并以用户当前重新确认的根目录重建待重试路径。
 
@@ -210,9 +212,9 @@ python -m venv .venv
 | `Instrument` | symbol、market、venue | 证券身份和市场归属 |
 | `Tick` / `Candle` | timestamp、OHLC、volume、可选 B/S/M 分向量 | Provider 行情观测与可缓存历史 K 线 |
 | `RawTradeTick` | instrument、tradingDate、timestamp、sourceLine、price、volumeShares、amount、direction | 本地逐笔成交事实；B/S/M 不复用策略信号 |
-| `RawTradeFingerprint` | count、maximumId | 判断指定代码/交易日的派生 K 线缓存是否过期 |
-| `RawTickDayFingerprint` | tradingDate、rawCount、rawMaximumId、barCount、cacheVersion | 单个交易日的事实指纹与派生缓存状态；参与数据集身份哈希的只有事实字段 |
-| `BacktestDatasetIdentity` | instrument、periodSeconds、source、aggregatorVersion、days、datasetVersion、日期范围、缺口/日历覆盖 | 可回测数据集的不可变身份；由原始日期集合+Tick 指纹+聚合版本组合，`toJson()` 随归档保存 |
+| `RawTradeFingerprint` | count、maximumId、contentSha256 | 判断指定代码/交易日的派生 K 线缓存是否过期；v2 以内容摘要为事实依据 |
+| `RawTickDayFingerprint` | tradingDate、rawCount、rawMaximumId、rawContentSha256、barCount、cacheVersion | 单个交易日的内容指纹与派生缓存状态；最大 ID 仅保留诊断/v1 兼容 |
+| `BacktestDatasetIdentity` | instrument、periodSeconds、source、aggregatorVersion、fingerprintVersion、days、datasetVersion、日期范围、缺口/日历覆盖 | v2 由逐日规范化 Tick 内容摘要组合；旧 v1 `count/max-id` 归档仍可恢复 |
 | `NasCatalogEntry` | symbol、tradingDate、format、size、sha256、version、downloadPath | NAS 单代码单交易日的不可变下载清单项 |
 | `NasDownloadResult` | requestId、entry、localPath、receivedBytes、cacheReused、error | 经大小与 SHA-256 校验的本地暂存结果 |
 | `TickDataImportRequest` | rootDirectory、instrument、tradingDate、format、period、volumeUnit | 一次显式的单文件本地导入请求 |

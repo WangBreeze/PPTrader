@@ -4,7 +4,7 @@
 
 ## 口径
 
-本基线验证"NAS manifest → 下载 → SHA-256 校验 → SQLite 事实 → 派生 K 线 → 数据集身份 → 批量回测 → 单项归档"的完整链路。数据源为 NAS 数据节点 `192.168.3.7`（经 SSH 回环隧道 `127.0.0.1:28765 → 127.0.0.1:18765`）上的真实成交仓库，交易日 `2026-08-07`。装载由 `pptrader_nas_sync_capacity` 执行（manifest/下载/解析/事务导入），派生缓存重建、批量回测与归档由 `pptrader_real_load_probe --existing-db` 执行；回测策略为 SMA 交叉（200 根），批量活动引擎上限 20。
+本基线验证“NAS manifest → 下载 → SHA-256 校验 → SQLite 事实 → 派生 K 线 → 数据集身份 → 批量回测 → 单项归档”的完整链路。数据来自经受控本机回环隧道访问的授权 NAS 测试节点，交易日为 `2026-08-07`；仓库不记录节点地址、账户、端口或远端路径。装载由 `pptrader_nas_sync_capacity` 执行，派生缓存重建、批量回测与归档由 `pptrader_real_load_probe --existing-db` 执行；回测策略为 SMA 交叉（200 根），批量活动引擎上限 20。
 
 1 档另以本地 SHA-256 暂存（`600519` 三日）验证多日身份，见文末。
 
@@ -82,14 +82,11 @@ cmake --build --preset vs2022-release --target pptrader_real_load_probe --parall
   --output .\artifacts\real-load-1\report-release.json
 ```
 
-10/100 档复现（先建 SSH 隧道再执行）：
+10/100 档复现（先由运维按授权环境建立本机回环隧道；连接参数不得进入仓库）：
 
 ```powershell
-# 隧道（远端节点监听 127.0.0.1:18765）
-ssh -N -L 28765:127.0.0.1:18765 wanglc@192.168.3.7
-
 .\out\build\vs2022-x64\Release\pptrader_nas_sync_capacity.exe `
-  --endpoint http://127.0.0.1:28765 --universe .\data\astock_cache.json `
+  --endpoint http://127.0.0.1:<local-port> --universe .\data\astock_cache.json `
   --date 2026-08-07 --tiers 1,10,100 `
   --output .\artifacts\real-load-100\sync-capacity-release.json `
   --keep-dir .\artifacts\real-load-100

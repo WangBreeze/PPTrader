@@ -13,7 +13,7 @@ NAS 数据节点是 PPTrader 与局域网原始 Tick 仓库之间的只读传输
 - `POST /v1/manifest`：接收显式代码数组与最多 31 天日期范围，返回受控多代码文件清单；最多 6000 个代码、12000 个条目。
 - `GET /v1/ticks/600519/20260807`：下载单代码单交易日文件，支持 `Range`、`ETag` 和 `Accept-Ranges`。
 
-catalog 的 `schemaVersion` 当前为 `1`。每个条目包含 `symbol`、`tradingDate`、`format`、`size`、`sha256`、不可变 `version` 和相对 `downloadPath`。客户端限制 catalog 为 2 MiB，并校验代码、日期、相对路径、大小与 SHA-256；下载使用 `QSaveFile`，只有字节数和摘要同时匹配才原子提交。本地已有同摘要暂存文件时直接复用，不重复下载。
+catalog 的 `schemaVersion` 当前为 `1`。每个条目包含 `symbol`、`tradingDate`、`format`、`size`、`sha256`、不可变 `version` 和相对 `downloadPath`。客户端限制单代码 catalog 为 2 MiB、manifest 为 16 MiB，并校验代码、日期、规范相对路径、大小、版本与 SHA-256；下载写入 `.part`，只有完整大小和摘要一致才提交为目标 CSV。本地已有同摘要暂存文件时直接复用。
 
 ## 安全模型
 
@@ -61,12 +61,12 @@ Windows 客户端开发期通过 SSH 本地端口转发把远端回环服务映�
 
 ## 客户端状态与流程
 
-`TradingController` 向 QML 暴露端点、catalog、请求版本、查询/同步状态、已收/预期字节和错误。`NasTickSyncPanel` 要求用户明确输入端点、代码、起止日期，并再次选择某个 catalog 条目启动下载与导入。新请求会取消旧请求；过时 requestId 的结果不会覆盖当前状态。
+`TradingController` 向 QML 暴露端点、catalog、请求版本、查询/同步状态、已收/预期字节和错误。`NasTickSyncPanel` 要求用户明确输入端点、代码、起止日期，并再次选择某个 catalog 条目启动下载与导入。同步可并发下载（默认 4、环境上限 16），校验后的文件进入单一导入队列串行写 SQLite；每个下载使用独立 requestId。生产声明前仍需补充乱序完成、取消后迟到响应和重启长稳的控制器级验收。
 
 同步成功不等同于只完成下载：校验通过的 CSV 必须继续通过 `TickDataCsvImportService` 流式解析和 SQLite 事务写入。失败不会破坏已有事实或缓存。导入成功后刷新本地历史 catalog、已使用周期缓存和相关主页 K 线。
 
 ## 当前限制
 
-v1 已支持 CSV、单代码 catalog、显式多代码 manifest、按日下载、字节范围、ETag、SHA-256、本地校验缓存、显式取消和 systemd 用户服务守护。H1B 的多代码同步固定单文件串行写入，并已完成 100 档真实临时库基线；500 与全市场真实写库留待后续。H1C 已增加应用本地同步计划的跨进程恢复、SHA-256 命中统计以及用户显式触发的暂存扫描/保留期清理。
+v1 已支持 CSV、单代码 catalog、显式多代码 manifest、并发按日下载/串行导入、ETag/SHA-256、`.part` Range 续传、本地缓存、显式取消、跨进程计划恢复、Token 文件热重载、变更摘要轮询、zlib 完整文件压缩、摘要缓存和 systemd 用户服务守护。100 档真实临时库与热缓存并发基线已完成；500 与全市场真实写库延期。
 
-恢复文件不包含端点和凭据，启动恢复不联网；它也不是字节级断点续传。Parquet/Zstd、真正的分块断点续传状态机、WebSocket 变更通知、令牌轮换界面、NAS 原生 HTTPS 和 manifest 摘要索引缓存尚未实现，不能把轮询 manifest 描述为实时推送。
+恢复文件不包含端点和凭据，启动恢复不联网。现有 `.part` 是单文件字节续传，不是多块并行/可校验分块状态机；zlib 中断也不会复用部分压缩体。Parquet/Zstd、pyarrow、WebSocket、Token 配置界面、NAS 原生 HTTPS、监控/审计/备份/容量告警尚未实现。Range/轮换/changes/zlib 的生产真实节点验收仍未完成，不能把自动测试等同于上线。
