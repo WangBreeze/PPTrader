@@ -820,6 +820,7 @@ public:
                                                       int barCount);
     Q_INVOKABLE void cancelCrossSectionalBacktest();
     Q_INVOKABLE void clearBacktestResult();
+    Q_INVOKABLE QVariantMap replayBacktestBar(int index) const;
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
     Q_INVOKABLE void clear();

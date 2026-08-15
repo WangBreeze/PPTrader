@@ -3234,6 +3234,44 @@ QAbstractItemModel *TradingController::crossSectionalTradeModel()
     return &m_crossSectionalTradeModel;
 }
 
+QVariantMap TradingController::replayBacktestBar(int index) const
+{
+    QVariantMap map;
+    if (!m_displayedBacktestResult) return map;
+    const QVector<Candle> &candles = m_displayedBacktestResult->candles;
+    if (index < 0 || index >= candles.size()) return map;
+    const Candle &candle = candles.at(index);
+    map.insert(QStringLiteral("timestamp"), candle.startTime);
+    map.insert(QStringLiteral("open"), candle.open);
+    map.insert(QStringLiteral("high"), candle.high);
+    map.insert(QStringLiteral("low"), candle.low);
+    map.insert(QStringLiteral("close"), candle.close);
+    map.insert(QStringLiteral("volume"), candle.volume);
+
+    QString side;
+    QString reason;
+    double price = 0.0;
+    for (const BacktestTrade &trade : m_displayedBacktestResult->trades) {
+        if (trade.entryTime == candle.startTime) {
+            side = QStringLiteral("买入");
+            reason = trade.entryReason;
+            price = trade.entryPrice;
+            break;
+        }
+        if (trade.exitTime == candle.startTime) {
+            side = QStringLiteral("卖出");
+            reason = trade.exitReason;
+            price = trade.exitPrice;
+            break;
+        }
+    }
+    map.insert(QStringLiteral("hasSignal"), !side.isEmpty());
+    map.insert(QStringLiteral("signalSide"), side);
+    map.insert(QStringLiteral("signalReason"), reason);
+    map.insert(QStringLiteral("signalPrice"), price);
+    return map;
+}
+
 void TradingController::clearBacktestResult()
 {
     m_candleModel.clear();
