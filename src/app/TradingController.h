@@ -55,6 +55,7 @@
 #include "strategy/CustomExecutionStrategy.h"
 #include "strategy/CustomStrategyRuntimeManager.h"
 #include "strategy/FixedAmountPositionSizer.h"
+#include "plugin/StrategyPluginManager.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
 
@@ -918,6 +919,14 @@ public:
     Q_INVOKABLE bool disableCustomStrategyExecution(const QString &strategyId);
     Q_INVOKABLE bool isCustomStrategyExecuting(const QString &strategyId) const;
     Q_INVOKABLE QVariantList customStrategyRuntimePlugins() const;
+    Q_INVOKABLE QVariantList strategyPluginScan();
+    Q_INVOKABLE bool loadStrategyPlugin(const QString &fileName);
+    Q_INVOKABLE bool unloadStrategyPlugin(const QString &pluginId);
+    Q_INVOKABLE QVariantList loadedStrategyPlugins() const;
+    Q_INVOKABLE bool activateStrategyPluginStrategy(const QString &pluginId,
+                                                    const QVariantMap &config);
+    Q_INVOKABLE void setStrategyPluginDirectory(const QString &path);
+    Q_INVOKABLE QString strategyPluginDirectory() const;
     Q_INVOKABLE bool startCustomStrategyReplay(const QString &strategyId, const QString &symbol,
                                                int periodSeconds, int barCount, int intervalMs);
     Q_INVOKABLE void stopCustomStrategyReplay();
@@ -1145,6 +1154,7 @@ private:
     WebhookNotificationService m_webhookNotifications;
     NotificationDispatcher m_notificationDispatcher;
     StrategyEngine m_strategyEngine;
+    StrategyPluginManager m_strategyPluginManager;
     CustomStrategyRuntimeManager m_customStrategyRuntimeManager;
     WorkspaceInstrumentSelectionState m_workspaceInstrumentSelections;
     InstrumentListModel m_instrumentModel;

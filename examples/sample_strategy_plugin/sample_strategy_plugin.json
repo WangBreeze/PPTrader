@@ -1,0 +1,5 @@
+{
+    "pluginId": "pp.sample.threshold",
+    "name": "示例阈值策略插件",
+    "version": 1
+}

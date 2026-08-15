@@ -88,6 +88,9 @@ qt_add_executable(PPTrader
     src/models/StrategyIntentListModel.h
     src/models/TickListModel.cpp
     src/models/TickListModel.h
+    src/plugin/StrategyPluginInterface.h
+    src/plugin/StrategyPluginManager.cpp
+    src/plugin/StrategyPluginManager.h
     src/services/BacktestEngine.cpp
     src/services/BacktestEngine.h
     src/services/BacktestDatasetService.cpp
@@ -696,6 +699,20 @@ if(BUILD_TESTING)
     target_include_directories(tst_notification_service PRIVATE src)
     target_link_libraries(tst_notification_service PRIVATE Qt6::Core Qt6::Network Qt6::Test)
 
+    qt_add_executable(tst_strategy_plugin
+        tests/tst_strategy_plugin.cpp
+        src/domain/MarketTypes.h
+        src/plugin/StrategyPluginInterface.h
+        src/plugin/StrategyPluginManager.cpp
+        src/plugin/StrategyPluginManager.h
+        src/strategy/Strategy.h
+    )
+    target_include_directories(tst_strategy_plugin PRIVATE src)
+    target_link_libraries(tst_strategy_plugin PRIVATE Qt6::Core Qt6::Test)
+    target_compile_definitions(tst_strategy_plugin PRIVATE
+        SAMPLE_PLUGIN_PATH="$<TARGET_FILE:sample_strategy_plugin>")
+    add_dependencies(tst_strategy_plugin sample_strategy_plugin)
+
     qt_add_executable(tst_exchange_rules
         tests/tst_exchange_rules.cpp
         src/domain/MarketTypes.h
@@ -1172,6 +1189,7 @@ if(BUILD_TESTING)
     add_test(NAME trading_account COMMAND tst_trading_account)
     add_test(NAME strategy_execution COMMAND tst_strategy_execution)
     add_test(NAME notification_service COMMAND tst_notification_service)
+    add_test(NAME strategy_plugin COMMAND tst_strategy_plugin)
     add_test(NAME exchange_rules COMMAND tst_exchange_rules)
     add_test(NAME cross_sectional COMMAND tst_cross_sectional)
     add_test(NAME market_snapshot_contract COMMAND tst_market_snapshot_contract)
@@ -1196,3 +1214,16 @@ if(BUILD_TESTING)
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
     )
 endif()
+
+# 示例第三方 C++ 策略插件：MODULE 库生成 .dll，供 QPluginLoader 加载演示。
+qt_add_library(sample_strategy_plugin MODULE
+    examples/sample_strategy_plugin/SampleThresholdStrategy.cpp
+    examples/sample_strategy_plugin/SampleThresholdStrategy.h
+    examples/sample_strategy_plugin/SampleStrategyPlugin.cpp
+    examples/sample_strategy_plugin/SampleStrategyPlugin.h
+    src/domain/MarketTypes.h
+    src/plugin/StrategyPluginInterface.h
+    src/strategy/Strategy.h
+)
+target_include_directories(sample_strategy_plugin PRIVATE src)
+target_link_libraries(sample_strategy_plugin PRIVATE Qt6::Core)

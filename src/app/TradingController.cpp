@@ -167,6 +167,8 @@ TradingController::TradingController(QObject *parent)
     m_historyDownloadRouter.addProvider(&m_tushareHistoryFetcher);
     m_historyDownloadRouter.addProvider(&m_baostockHistoryFetcher);
     m_historyDownloadRouter.addProvider(&m_historyDownloadFetcher);
+    m_strategyPluginManager.setPluginDirectory(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/strategies"));
     m_backtestStrategyRegistry.normalizeParameters(
         m_selectedBacktestStrategyId, {}, &m_selectedBacktestParameters, nullptr);
     MootdxMarketDataProvider::warmUpPython();
@@ -4670,6 +4672,107 @@ QVariantList TradingController::customStrategyRuntimePlugins() const
         result.append(plugin.toVariantMap());
     }
     return result;
+}
+
+QVariantList TradingController::strategyPluginScan()
+{
+    QVariantList result;
+    const auto scanResults = m_strategyPluginManager.scan();
+    result.reserve(scanResults.size());
+    for (const auto &entry : scanResults) {
+        QVariantMap map;
+        map.insert(QStringLiteral("fileName"), entry.fileName);
+        map.insert(QStringLiteral("sha256"), entry.sha256);
+        map.insert(QStringLiteral("manifestOk"), entry.manifestOk);
+        map.insert(QStringLiteral("error"), entry.error);
+        result.append(map);
+    }
+    return result;
+}
+
+bool TradingController::loadStrategyPlugin(const QString &fileName)
+{
+    QString error;
+    StrategyPlugin *plugin = m_strategyPluginManager.load(fileName, &error);
+    if (!plugin) {
+        setStatusText(QStringLiteral("插件加载失败：%1").arg(error));
+        return false;
+    }
+    setStatusText(QStringLiteral("插件已加载：%1（%2 v%3）")
+        .arg(plugin->pluginId(), plugin->pluginName()).arg(plugin->pluginVersion()));
+    return true;
+}
+
+bool TradingController::unloadStrategyPlugin(const QString &pluginId)
+{
+    QString error;
+    if (!m_strategyPluginManager.unload(pluginId, &error)) {
+        setStatusText(QStringLiteral("插件卸载失败：%1").arg(error));
+        return false;
+    }
+    setStatusText(QStringLiteral("插件已卸载：%1").arg(pluginId));
+    return true;
+}
+
+QVariantList TradingController::loadedStrategyPlugins() const
+{
+    QVariantList result;
+    const QVector<StrategyPluginRecord> records = m_strategyPluginManager.loadedPlugins();
+    result.reserve(records.size());
+    for (const StrategyPluginRecord &record : records) {
+        QVariantMap map;
+        map.insert(QStringLiteral("pluginId"), record.pluginId);
+        map.insert(QStringLiteral("pluginName"), record.pluginName);
+        map.insert(QStringLiteral("pluginVersion"), record.pluginVersion);
+        map.insert(QStringLiteral("pluginDescription"), record.pluginDescription);
+        map.insert(QStringLiteral("apiVersion"), record.apiVersion);
+        map.insert(QStringLiteral("fileName"), record.fileName);
+        result.append(map);
+    }
+    return result;
+}
+
+bool TradingController::activateStrategyPluginStrategy(const QString &pluginId,
+                                                       const QVariantMap &config)
+{
+    StrategyPlugin *plugin = m_strategyPluginManager.plugin(pluginId);
+    if (!plugin) {
+        setStatusText(QStringLiteral("插件未加载：%1").arg(pluginId));
+        return false;
+    }
+    const QString strategyId = config.value(QStringLiteral("strategyId")).toString();
+    if (strategyId.isEmpty()) {
+        setStatusText(QStringLiteral("缺少 strategyId 配置"));
+        return false;
+    }
+    if (m_strategyEngine.strategyById(strategyId) != nullptr) {
+        setStatusText(QStringLiteral("策略 ID 已存在：%1").arg(strategyId));
+        return false;
+    }
+    Strategy *strategy = plugin->createStrategy(config);
+    if (!strategy) {
+        setStatusText(QStringLiteral("插件创建策略失败：%1").arg(pluginId));
+        return false;
+    }
+    m_strategyEngine.addStrategy(strategy);
+    ensureStrategyExecutionConfiguration(strategyId, 0);
+    m_strategyModel.addStrategy({strategyId, strategy->subscribedSymbols().value(0),
+        strategy->displayName(), QStringLiteral("第三方插件策略 %1").arg(pluginId),
+        0.0, 0, true});
+    emit strategyStateChanged();
+    setStatusText(QStringLiteral("插件策略已激活：%1").arg(strategyId));
+    return true;
+}
+
+void TradingController::setStrategyPluginDirectory(const QString &path)
+{
+    m_strategyPluginManager.setPluginDirectory(path);
+    setStatusText(QStringLiteral("策略插件目录已设置：%1").arg(path));
+}
+
+QString TradingController::strategyPluginDirectory() const
+{
+    return m_strategyPluginManager.pluginDirectory();
 }
 
 bool TradingController::customStrategyReplayRunning() const
