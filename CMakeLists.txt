@@ -25,6 +25,8 @@ qt_add_executable(PPTrader
     src/app/CustomStrategyWorkspacePolicy.h
     src/app/WorkspaceInstrumentSelectionState.cpp
     src/app/WorkspaceInstrumentSelectionState.h
+    src/app/WindowPlacement.cpp
+    src/app/WindowPlacement.h
     src/domain/BacktestTypes.h
     src/domain/BacktestDatasetTypes.cpp
     src/domain/BacktestDatasetTypes.h
@@ -713,6 +715,14 @@ if(BUILD_TESTING)
         SAMPLE_PLUGIN_PATH="$<TARGET_FILE:sample_strategy_plugin>")
     add_dependencies(tst_strategy_plugin sample_strategy_plugin)
 
+    qt_add_executable(tst_window_placement
+        tests/tst_window_placement.cpp
+        src/app/WindowPlacement.cpp
+        src/app/WindowPlacement.h
+    )
+    target_include_directories(tst_window_placement PRIVATE src)
+    target_link_libraries(tst_window_placement PRIVATE Qt6::Core Qt6::Test)
+
     qt_add_executable(tst_exchange_rules
         tests/tst_exchange_rules.cpp
         src/domain/MarketTypes.h
@@ -1190,6 +1200,7 @@ if(BUILD_TESTING)
     add_test(NAME strategy_execution COMMAND tst_strategy_execution)
     add_test(NAME notification_service COMMAND tst_notification_service)
     add_test(NAME strategy_plugin COMMAND tst_strategy_plugin)
+    add_test(NAME window_placement COMMAND tst_window_placement)
     add_test(NAME exchange_rules COMMAND tst_exchange_rules)
     add_test(NAME cross_sectional COMMAND tst_cross_sectional)
     add_test(NAME market_snapshot_contract COMMAND tst_market_snapshot_contract)
