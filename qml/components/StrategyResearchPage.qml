@@ -130,7 +130,7 @@ Item {
                     Text { width: parent.width; text: root.controller.selectedBacktestDataAvailable ? root.controller.selectedBacktestInstrumentTitle + " · " + root.controller.selectedBacktestFrequency : "尚未选择本地数据集"; color: root.controller.selectedBacktestDataAvailable ? root.theme.textPrimary : root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 12; wrapMode: Text.Wrap }
                     Text { width: parent.width; text: root.controller.selectedBacktestDataAvailable ? "可用 " + root.controller.selectedBacktestCandleCount + " 根 · 当前配置使用 " + root.controller.backtestBarCount + " 根" : "不会调用 fetchHistory，也不会回退网络 Provider"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 10; wrapMode: Text.Wrap }
                     Rectangle { width: parent.width; height: 1; color: root.theme.border }
-                    Text { width: parent.width; text: "自定义策略只能进入 BacktestEngine；模拟盘、审批和订单链路不会加载该 DSL。"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 10; wrapMode: Text.Wrap; Accessible.name: text }
+                    Text { width: parent.width; text: "自定义策略默认仅回测（backtest_only）；声明 executionScope=mock_execution 的版本可进入模拟执行（审批/冷却走执行配置，不接真实下单）。"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 10; wrapMode: Text.Wrap; Accessible.name: text }
                 }
             }
 
@@ -572,6 +572,18 @@ Item {
                             }
                         }
                     }
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 380
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                Text { x: 18; y: 14; text: "执行审批与通知"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "模拟执行 · 桌面/Webhook 通知"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                ExecutionApprovalPanel {
+                    x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
+                    theme: root.theme; controller: root.controller
                 }
             }
         }

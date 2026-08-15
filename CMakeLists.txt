@@ -291,6 +291,7 @@ qt_add_qml_module(PPTrader
         qml/components/SnapshotSummaryPanel.qml
         qml/components/MarketSnapshotPage.qml
         qml/components/AppStatusBar.qml
+        qml/components/ExecutionApprovalPanel.qml
     SOURCES
         src/visualization/CrossSectionPlotData.cpp
         src/visualization/CrossSectionPlotData.h
