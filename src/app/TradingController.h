@@ -825,6 +825,8 @@ public:
     Q_INVOKABLE QVariantMap replayBacktestBar(int index) const;
     Q_INVOKABLE void saveValidationRun(const QString &name);
     Q_INVOKABLE bool loadValidationRun(int index);
+    Q_INVOKABLE void setBacktestSampleWindow(const QDateTime &from, const QDateTime &to);
+    Q_INVOKABLE void clearBacktestSampleWindow();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
     Q_INVOKABLE void clear();

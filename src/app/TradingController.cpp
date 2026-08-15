@@ -3332,6 +3332,18 @@ bool TradingController::loadValidationRun(int index)
     return true;
 }
 
+void TradingController::setBacktestSampleWindow(const QDateTime &from, const QDateTime &to)
+{
+    m_pendingSampleFrom = from;
+    m_pendingSampleTo = to;
+}
+
+void TradingController::clearBacktestSampleWindow()
+{
+    m_pendingSampleFrom = {};
+    m_pendingSampleTo = {};
+}
+
 void TradingController::clearBacktestResult()
 {
     m_candleModel.clear();

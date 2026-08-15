@@ -321,6 +321,29 @@ Item {
                         Text { text: "滑点（%）"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                         ConfigField { id: slippageField; width: 110; text: String(root.controller.backtestSlippageRate * 100); Accessible.name: "滑点率百分比" }
                     }
+                    Column {
+                        spacing: 5
+                        Text { text: "样本窗（可留空）"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                        Row {
+                            spacing: 6
+                            ConfigField { id: sampleFromField; width: 118; placeholderText: "起始 yyyy-MM-dd"; Accessible.name: "样本窗起始日期" }
+                            ConfigField { id: sampleToField; width: 118; placeholderText: "结束 yyyy-MM-dd"; Accessible.name: "样本窗结束日期" }
+                            PpButton {
+                                theme: root.theme; text: "应用"; visualWidth: 56
+                                toolTip: "按日期范围过滤回测 K 线（留空则不限制）"
+                                onClicked: {
+                                    const from = Date.fromLocaleString(Qt.locale("zh_CN"), sampleFromField.text, "yyyy-MM-dd")
+                                    const to = Date.fromLocaleString(Qt.locale("zh_CN"), sampleToField.text, "yyyy-MM-dd")
+                                    root.controller.setBacktestSampleWindow(from, to)
+                                }
+                            }
+                            PpButton {
+                                theme: root.theme; text: "清除"; visualWidth: 56
+                                toolTip: "清除样本窗限制"
+                                onClicked: root.controller.clearBacktestSampleWindow()
+                            }
+                        }
+                    }
                     Repeater {
                         model: root.controller.selectedBacktestStrategyDescriptor.parameters || []
                         delegate: Column {
