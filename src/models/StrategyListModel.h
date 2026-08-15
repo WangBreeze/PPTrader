@@ -39,6 +39,7 @@ public:
 
     void clear();
     void addStrategy(const StrategyRow &row);
+    bool removeStrategy(const QString &id);
     bool setStrategyEnabled(const QString &id, bool enabled);
     bool setStrategyParameters(const QString &id, double thresholdPercent, int cooldownSeconds);
 

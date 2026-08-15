@@ -111,6 +111,25 @@ void StrategyEngine::clearStrategies()
     emit strategyCountChanged();
 }
 
+bool StrategyEngine::removeStrategy(const QString &id)
+{
+    for (int index = 0; index < m_strategies.size(); ++index) {
+        Strategy *strategy = m_strategies.at(index);
+        if (strategy->id() != id) continue;
+        m_broadcastStrategies.removeAll(strategy);
+        for (auto iterator = m_strategiesBySymbol.begin();
+             iterator != m_strategiesBySymbol.end(); ++iterator) {
+            iterator.value().removeAll(strategy);
+        }
+        m_enabledById.remove(id);
+        m_strategies.removeAt(index);
+        strategy->deleteLater();
+        emit strategyCountChanged();
+        return true;
+    }
+    return false;
+}
+
 void StrategyEngine::setStrategyEnabled(const QString &id, bool enabled)
 {
     if (!m_enabledById.contains(id) || m_enabledById.value(id) == enabled) {

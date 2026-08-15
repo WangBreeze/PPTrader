@@ -205,6 +205,8 @@ qt_add_executable(PPTrader
     src/strategy/BacktestStrategyRegistry.h
     src/strategy/CustomBacktestStrategy.cpp
     src/strategy/CustomBacktestStrategy.h
+    src/strategy/CustomExecutionStrategy.cpp
+    src/strategy/CustomExecutionStrategy.h
     src/strategy/CrossSectionalIndicatorRuntime.cpp
     src/strategy/CrossSectionalIndicatorRuntime.h
     src/strategy/CrossSectionalCustomStrategy.cpp
@@ -932,6 +934,37 @@ if(BUILD_TESTING)
     target_include_directories(tst_custom_strategy PRIVATE src)
     target_link_libraries(tst_custom_strategy PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
 
+    qt_add_executable(tst_custom_strategy_execution
+        tests/tst_custom_strategy_execution.cpp
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/MarketTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TradingTypes.h
+        src/services/OrderSubmissionPort.h
+        src/strategy/CustomStrategyValidator.cpp
+        src/strategy/CustomStrategyValidator.h
+        src/strategy/CustomStrategyCompiler.cpp
+        src/strategy/CustomStrategyCompiler.h
+        src/strategy/CustomExecutionStrategy.cpp
+        src/strategy/CustomExecutionStrategy.h
+        src/strategy/CustomIndicatorRuntime.cpp
+        src/strategy/CustomIndicatorRuntime.h
+        src/strategy/Strategy.h
+        src/strategy/StrategyEngine.cpp
+        src/strategy/StrategyEngine.h
+        src/strategy/StrategyExecutionCoordinator.cpp
+        src/strategy/StrategyExecutionCoordinator.h
+        src/strategy/DefaultSignalExecutionPolicy.cpp
+        src/strategy/DefaultSignalExecutionPolicy.h
+        src/strategy/FixedAmountPositionSizer.cpp
+        src/strategy/FixedAmountPositionSizer.h
+        src/strategy/PositionSizer.h
+        src/strategy/SignalExecutionPolicy.h
+    )
+    target_include_directories(tst_custom_strategy_execution PRIVATE src)
+    target_link_libraries(tst_custom_strategy_execution PRIVATE Qt6::Core Qt6::Test)
+
     qt_add_executable(tst_workspace_instrument_selection
         tests/tst_workspace_instrument_selection.cpp
         src/app/WorkspaceInstrumentSelectionState.cpp
@@ -1143,6 +1176,7 @@ if(BUILD_TESTING)
     add_test(NAME backtest_dataset_service COMMAND tst_backtest_dataset_service)
     add_test(NAME cross_section_performance COMMAND tst_cross_section_performance)
     add_test(NAME custom_strategy COMMAND tst_custom_strategy)
+    add_test(NAME custom_strategy_execution COMMAND tst_custom_strategy_execution)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)
     add_test(NAME aligned_bar_series COMMAND tst_aligned_bar_series)
     add_test(NAME cross_sectional_backtest COMMAND tst_cross_sectional_backtest)

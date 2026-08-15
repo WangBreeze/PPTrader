@@ -52,6 +52,7 @@
 #include "strategy/DefaultSignalExecutionPolicy.h"
 #include "strategy/CustomStrategyValidator.h"
 #include "strategy/CustomStrategyCompiler.h"
+#include "strategy/CustomExecutionStrategy.h"
 #include "strategy/FixedAmountPositionSizer.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
@@ -902,6 +903,10 @@ public:
                                             const QString &webhookUrl, bool notifySignal,
                                             bool notifyApproval, bool notifyOrderSubmitted,
                                             bool notifyExecutionRejected, bool notifyIntentExpired);
+    Q_INVOKABLE bool enableCustomStrategyExecution(const QString &strategyId, int version,
+                                                   const QString &symbol);
+    Q_INVOKABLE bool disableCustomStrategyExecution(const QString &strategyId);
+    Q_INVOKABLE bool isCustomStrategyExecuting(const QString &strategyId) const;
     Q_INVOKABLE bool requestMarketSnapshot(const QDateTime &requestedTime);
     Q_INVOKABLE bool requestMarketSnapshotAt(const QString &marketTime);
     Q_INVOKABLE bool requestLatestMarketSnapshot();

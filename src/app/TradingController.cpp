@@ -4582,6 +4582,73 @@ void TradingController::persistNotificationSettings() const
     store.sync();
 }
 
+bool TradingController::enableCustomStrategyExecution(const QString &strategyId, int version,
+                                                      const QString &symbol)
+{
+    if (m_strategyEngine.strategyById(strategyId) != nullptr) {
+        return true;
+    }
+
+    const CustomStrategyDefinition *definition = nullptr;
+    for (const CustomStrategyDefinition &candidate : m_customStrategyDefinitions) {
+        if (candidate.strategyId == strategyId && candidate.version == version) {
+            definition = &candidate;
+            break;
+        }
+    }
+    if (!definition) {
+        setStatusText(QStringLiteral("未找到自定义策略：%1 v%2").arg(strategyId).arg(version));
+        return false;
+    }
+    if (definition->executionScope != QStringLiteral("mock_execution")) {
+        setStatusText(QStringLiteral("策略 %1 未声明 mock_execution，无法进入模拟执行").arg(strategyId));
+        return false;
+    }
+
+    QString error;
+    const auto plan = m_customStrategyCompiler.compile(*definition, {}, &error);
+    if (!plan) {
+        setStatusText(QStringLiteral("策略编译失败：%1").arg(error));
+        return false;
+    }
+
+    Instrument instrument = findInstrument(symbol.trimmed());
+    if (instrument.symbol.isEmpty()) {
+        instrument.symbol = symbol.trimmed();
+        instrument.name = symbol.trimmed();
+        instrument.market = Market::AShare;
+    }
+
+    auto *strategy = new CustomExecutionStrategy(*plan, instrument);
+    m_strategyEngine.addStrategy(strategy);
+    ensureStrategyExecutionConfiguration(strategyId, 0);
+    m_strategyModel.addStrategy({strategyId, instrument.symbol, strategy->displayName(),
+        QStringLiteral("自定义策略模拟执行（%1 v%2）").arg(plan->name).arg(plan->version),
+        0.0, 0, true});
+    emit strategyStateChanged();
+    setStatusText(QStringLiteral("自定义策略已进入模拟执行：%1 · %2")
+        .arg(strategyId, instrument.symbol));
+    return true;
+}
+
+bool TradingController::disableCustomStrategyExecution(const QString &strategyId)
+{
+    if (!m_strategyEngine.removeStrategy(strategyId)) {
+        setStatusText(QStringLiteral("自定义策略未在模拟执行：%1").arg(strategyId));
+        return false;
+    }
+    m_strategyModel.removeStrategy(strategyId);
+    m_strategyExecutionCoordinator.removeConfiguration(strategyId);
+    emit strategyStateChanged();
+    setStatusText(QStringLiteral("自定义策略已停止模拟执行：%1").arg(strategyId));
+    return true;
+}
+
+bool TradingController::isCustomStrategyExecuting(const QString &strategyId) const
+{
+    return m_strategyEngine.strategyById(strategyId) != nullptr;
+}
+
 bool TradingController::requestMarketSnapshot(const QDateTime &requestedTime)
 {
     m_followLatestSnapshot = false;

@@ -220,8 +220,10 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
         return fail(error, QStringLiteral("首版自定义策略仅支持 A股"));
     }
     result.executionScope = input.value(QStringLiteral("executionScope")).toString();
-    if (result.executionScope != QStringLiteral("backtest_only")) {
-        return fail(error, QStringLiteral("自定义策略必须声明 executionScope=backtest_only"));
+    if (result.executionScope != QStringLiteral("backtest_only")
+        && result.executionScope != QStringLiteral("mock_execution")) {
+        return fail(error,
+                    QStringLiteral("executionScope 仅支持 backtest_only 或 mock_execution"));
     }
     result.createdAt = parseTimestamp(input.value(QStringLiteral("createdAt")));
     if (!result.createdAt.isValid()) {

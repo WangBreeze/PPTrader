@@ -130,6 +130,19 @@ void StrategyListModel::addStrategy(const StrategyRow &row)
     endInsertRows();
 }
 
+bool StrategyListModel::removeStrategy(const QString &id)
+{
+    for (int rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex) {
+        if (m_rows.at(rowIndex).id == id) {
+            beginRemoveRows({}, rowIndex, rowIndex);
+            m_rows.removeAt(rowIndex);
+            endRemoveRows();
+            return true;
+        }
+    }
+    return false;
+}
+
 bool StrategyListModel::setStrategyEnabled(const QString &id, bool enabled)
 {
     for (int rowIndex = 0; rowIndex < m_rows.size(); ++rowIndex) {

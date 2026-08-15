@@ -25,6 +25,7 @@ public:
     bool isStrategyEnabled(const QString &id) const;
     void addStrategy(Strategy *strategy);
     void clearStrategies();
+    bool removeStrategy(const QString &id);
     void setStrategyEnabled(const QString &id, bool enabled);
 
 signals:
