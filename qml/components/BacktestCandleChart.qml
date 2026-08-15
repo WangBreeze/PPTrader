@@ -9,9 +9,23 @@ Control {
     property string emptyText: "完成回测后显示 K 线与买卖点"
     readonly property bool hasData: root.model && root.model.count > 0
 
+    readonly property int candleCount: root.model ? root.model.count : 0
+    property int hoveredIndex: -1
+
+    function signalAt(relativeX) {
+        if (root.candleCount === 0 || !root.model) return null
+        const step = plot.width / root.candleCount
+        const index = Math.floor(relativeX / step)
+        if (index < 0 || index >= root.candleCount) return null
+        const item = root.model.get(index)
+        if (item.hasSignal !== true) return null
+        return { index: index, side: item.signalSide, reason: item.signalReason,
+                 price: item.signalPrice, volume: item.volume, time: item.time }
+    }
+
     Accessible.role: Accessible.Graphic
     Accessible.name: hasData
-        ? "回测 K 线与买卖点，共 " + root.model.count + " 根"
+        ? "回测 K 线与买卖点，共 " + root.candleCount + " 根"
         : root.emptyText
 
     background: Rectangle {
@@ -22,14 +36,14 @@ Control {
     }
 
     Canvas {
-        id: canvas
+        id: plot
         anchors.fill: parent
         anchors.margins: 8
         antialiasing: true
         onPaint: {
             const ctx = getContext("2d")
             ctx.clearRect(0, 0, width, height)
-            const count = root.model ? root.model.count : 0
+            const count = root.candleCount
             if (count === 0) return
 
             let minimum = Infinity
@@ -101,6 +115,52 @@ Control {
         onHeightChanged: requestPaint()
     }
 
+    MouseArea {
+        id: hoverArea
+        anchors.fill: plot
+        hoverEnabled: true
+        onPositionChanged: function(mouse) {
+            const info = root.signalAt(mouse.x)
+            root.hoveredIndex = info ? info.index : -1
+        }
+        onExited: root.hoveredIndex = -1
+    }
+
+    Rectangle {
+        id: tooltip
+        visible: root.hoveredIndex >= 0
+        readonly property var info: root.signalAt(
+            plot.width / root.candleCount * (root.hoveredIndex + 0.5))
+        x: Math.max(plot.x, Math.min(plot.x + plot.width - width,
+                                     plot.x + plot.width / root.candleCount * (root.hoveredIndex + 0.5) - width / 2))
+        y: Math.max(plot.y, Math.min(plot.y + plot.height - height, plot.y + 8))
+        width: 232; height: 74; radius: 6
+        color: root.theme.bgRaised; border.color: root.theme.cyan
+        Column {
+            anchors.fill: parent; anchors.margins: 8; spacing: 3
+            Text {
+                width: parent.width
+                text: (info && info.side === "买入" ? "买入 · 进场" : "卖出 · 出场")
+                      + "  @ " + (info ? info.price : "--")
+                color: info && info.side === "买入" ? root.theme.green : root.theme.red
+                font.family: root.theme.fontFamily; font.pixelSize: 9; font.weight: Font.Bold
+            }
+            Text {
+                width: parent.width
+                text: "条件：" + (info ? info.reason : "--")
+                color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 8
+                elide: Text.ElideRight
+            }
+            Text {
+                width: parent.width
+                text: "成交量 " + (info ? info.volume : "--")
+                      + " · " + (info ? info.time : "--")
+                color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8
+                elide: Text.ElideRight
+            }
+        }
+    }
+
     Text {
         anchors.centerIn: parent
         visible: !root.hasData
@@ -112,8 +172,8 @@ Control {
     Connections {
         target: root.model
         ignoreUnknownSignals: true
-        function onModelReset() { canvas.requestPaint() }
-        function onRowsInserted() { canvas.requestPaint() }
-        function onCountChanged() { canvas.requestPaint() }
+        function onModelReset() { plot.requestPaint() }
+        function onRowsInserted() { plot.requestPaint() }
+        function onCountChanged() { plot.requestPaint() }
     }
 }
