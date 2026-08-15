@@ -33,6 +33,7 @@
 #include "services/NasTickCacheManager.h"
 #include "services/NasTickSyncQueue.h"
 #include "services/PortfolioBacktestService.h"
+#include "services/CrossSectionalBacktestService.h"
 #include "services/CrossSectionalIndicatorEngine.h"
 #include "services/HistoricalDataService.h"
 #include "services/HistoricalDataProviderRouter.h"
@@ -185,6 +186,19 @@ class TradingController final : public QObject {
                NOTIFY portfolioBacktestStateChanged)
     Q_PROPERTY(QString portfolioArchiveError READ portfolioArchiveError
                NOTIFY portfolioBacktestStateChanged)
+    Q_PROPERTY(bool crossSectionalBacktestRunning READ crossSectionalBacktestRunning
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalBacktestStatusText READ crossSectionalBacktestStatusText
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalBacktestError READ crossSectionalBacktestError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap crossSectionalResultConfiguration
+               READ crossSectionalResultConfiguration
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QAbstractItemModel *crossSectionalEquityCurveModel
+               READ crossSectionalEquityCurveModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *crossSectionalTradeModel
+               READ crossSectionalTradeModel CONSTANT)
     Q_PROPERTY(QString brokerName READ brokerName CONSTANT)
     Q_PROPERTY(bool brokerLoggedIn READ brokerLoggedIn NOTIFY brokerStateChanged)
     Q_PROPERTY(QString tradingError READ tradingError NOTIFY tradingStateChanged)
@@ -557,6 +571,12 @@ public:
     int portfolioArchiveCount() const;
     bool portfolioArchiveLoading() const;
     QString portfolioArchiveError() const;
+    bool crossSectionalBacktestRunning() const;
+    QString crossSectionalBacktestStatusText() const;
+    QString crossSectionalBacktestError() const;
+    QVariantMap crossSectionalResultConfiguration() const;
+    QAbstractItemModel *crossSectionalEquityCurveModel();
+    QAbstractItemModel *crossSectionalTradeModel();
     QString brokerName() const;
     bool brokerLoggedIn() const;
     QString tradingError() const;
@@ -796,6 +816,9 @@ public:
     Q_INVOKABLE void cancelPortfolioBacktest();
     Q_INVOKABLE bool loadPortfolioBacktestArchive(const QString &resultId);
     Q_INVOKABLE void refreshPortfolioBacktestArchiveList();
+    Q_INVOKABLE qulonglong runCrossSectionalBacktest(const QString &strategyJson,
+                                                      int barCount);
+    Q_INVOKABLE void cancelCrossSectionalBacktest();
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
@@ -893,6 +916,7 @@ signals:
     void backtestConfigurationChanged();
     void batchBacktestStateChanged();
     void portfolioBacktestStateChanged();
+    void crossSectionalBacktestStateChanged();
     void customStrategyStateChanged();
     void statusTextChanged();
     void stockSearchTextChanged();
@@ -960,6 +984,10 @@ private:
     void handleBacktestDatasetFailed(quint64 requestId, const QString &message);
     void handlePortfolioBacktestCompleted(
         quint64 requestId, const PortfolioResult &result);
+    void handleCrossSectionalBacktestCompleted(
+        quint64 requestId, const PortfolioResult &result);
+    void handleCrossSectionalBacktestFailed(
+        quint64 requestId, const QString &message);
     void handleHistoryKline(quint64 requestId, const QVector<Candle> &candles, bool fromCache);
     void handleHistoryError(quint64 requestId, const QString &message);
     void handleOrderChanged(const Order &order);
@@ -1026,6 +1054,8 @@ private:
     EquityCurveListModel m_portfolioEquityCurveModel;
     PortfolioTradeListModel m_portfolioTradeModel;
     PortfolioArchiveListModel m_portfolioArchiveModel;
+    EquityCurveListModel m_crossSectionalEquityCurveModel;
+    PortfolioTradeListModel m_crossSectionalTradeModel;
     OrderListModel m_orderModel;
     ExecutionListModel m_executionModel;
     PositionListModel m_positionModel;
@@ -1059,6 +1089,7 @@ private:
     BacktestEngine m_backtest;
     BatchBacktestService m_batchBacktestService;
     PortfolioBacktestService m_portfolioBacktestService;
+    CrossSectionalBacktestService m_crossSectionalBacktestService;
     BacktestStrategyRegistry m_backtestStrategyRegistry;
     CustomStrategyValidator m_customStrategyValidator;
     CustomStrategyCompiler m_customStrategyCompiler;
@@ -1163,6 +1194,10 @@ private:
     bool m_portfolioArchiveLoading = false;
     QString m_portfolioArchiveError;
     QString m_selectedPortfolioArchiveId;
+    quint64 m_crossSectionalBacktestRequestId = 0;
+    QString m_crossSectionalBacktestStatusText = QStringLiteral("未运行");
+    QString m_crossSectionalBacktestError;
+    std::optional<PortfolioResult> m_displayedCrossSectionalResult;
     QString m_backtestInstrumentSelectionError;
     QString m_localCandleSeriesSymbol;
     QString m_localCandleSeriesFrequency;

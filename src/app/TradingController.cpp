@@ -332,6 +332,11 @@ TradingController::TradingController(QObject *parent)
         m_portfolioBacktestStatusText = QStringLiteral("组合回测失败");
         emit portfolioBacktestStateChanged();
     });
+    connect(&m_crossSectionalBacktestService,
+            &CrossSectionalBacktestService::completed,
+            this, &TradingController::handleCrossSectionalBacktestCompleted);
+    connect(&m_crossSectionalBacktestService, &CrossSectionalBacktestService::failed,
+            this, &TradingController::handleCrossSectionalBacktestFailed);
     connect(&m_strategyEngine, &StrategyEngine::strategySignalGenerated,
             this, &TradingController::handleStrategySignal);
     connect(&m_strategyEngine, &StrategyEngine::strategyCountChanged, this, &TradingController::strategyStateChanged);
@@ -593,6 +598,9 @@ TradingController::TradingController(QObject *parent)
         }
         if (!m_portfolioBacktestService.start(databasePath)) {
             setStatusText(QStringLiteral("组合回测服务启动失败"));
+        }
+        if (!m_crossSectionalBacktestService.start(databasePath)) {
+            setStatusText(QStringLiteral("多股回测服务启动失败"));
         }
         emit storageStateChanged();
     }
@@ -1747,6 +1755,7 @@ bool TradingController::relocateStorage(const QString &pathOrUrl)
     m_asyncLiveDayCandleQueryService.stop();
     m_backtestDatasetService.stop();
     m_portfolioBacktestService.stop();
+    m_crossSectionalBacktestService.stop();
     m_dataStore.close();
     m_storageReady = false;
     m_storageRelocationRunning = true;
@@ -1787,8 +1796,9 @@ bool TradingController::restartStorageServices(const QString &databasePath)
     const bool liveSeriesReady = m_asyncLiveDayCandleQueryService.start(databasePath);
     const bool datasetReady = m_backtestDatasetService.start(databasePath);
     const bool portfolioReady = m_portfolioBacktestService.start(databasePath);
+    const bool crossSectionalReady = m_crossSectionalBacktestService.start(databasePath);
     if (!tickWriterReady || !snapshotReady || !localSeriesReady
-        || !liveSeriesReady || !datasetReady || !portfolioReady) {
+        || !liveSeriesReady || !datasetReady || !portfolioReady || !crossSectionalReady) {
         setStatusText(QStringLiteral("数据库已切换，但部分后台存储服务启动失败"));
     }
     return true;
@@ -2928,6 +2938,113 @@ void TradingController::cancelPortfolioBacktest()
     emit portfolioBacktestStateChanged();
 }
 
+qulonglong TradingController::runCrossSectionalBacktest(
+    const QString &strategyJson, int barCount)
+{
+    m_crossSectionalBacktestError.clear();
+    emit crossSectionalBacktestStateChanged();
+    if (!m_storageReady) {
+        m_crossSectionalBacktestError = QStringLiteral("本地 SQLite 数据库不可用");
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+    if (m_crossSectionalBacktestService.isRunning() || batchBacktestRunning()
+        || backtestRunning() || portfolioBacktestRunning()) {
+        m_crossSectionalBacktestError = QStringLiteral("已有回测任务正在运行");
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        strategyJson.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        m_crossSectionalBacktestError = QStringLiteral("策略 JSON 无效");
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+    CustomStrategyDefinition definition;
+    QString validationError;
+    if (!m_customStrategyValidator.validate(document.object(), &definition,
+                                            &validationError)) {
+        m_crossSectionalBacktestError = validationError;
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+    if (barCount < 2) {
+        m_crossSectionalBacktestError = QStringLiteral("回测根数必须大于 1");
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+
+    PortfolioDefinition portfolioDefinition;
+    portfolioDefinition.portfolioId = QStringLiteral("cross_sectional_ui");
+    portfolioDefinition.name = definition.name;
+    portfolioDefinition.periodSeconds = selectedBacktestPeriodSeconds() > 0
+        ? selectedBacktestPeriodSeconds() : 60;
+    portfolioDefinition.initialCapital = m_backtestConfiguredInitialCapital;
+    portfolioDefinition.commissionRate = m_backtestCommissionRate;
+    portfolioDefinition.slippageRate = m_backtestSlippageRate;
+    portfolioDefinition.lotSize = 100;
+    portfolioDefinition.tPlusOne = true;
+
+    ++m_crossSectionalBacktestRequestId;
+    if (m_crossSectionalBacktestRequestId == 0) ++m_crossSectionalBacktestRequestId;
+    m_displayedCrossSectionalResult.reset();
+    m_crossSectionalEquityCurveModel.clear();
+    m_crossSectionalTradeModel.clear();
+    const int symbolCount = definition.document.value(QStringLiteral("universe"))
+        .toObject().value(QStringLiteral("symbols")).toArray().size();
+    m_crossSectionalBacktestStatusText = QStringLiteral(
+        "多股回测准备中：%1 标的").arg(symbolCount);
+    if (!m_crossSectionalBacktestService.request(
+            m_crossSectionalBacktestRequestId, definition, {}, portfolioDefinition,
+            barCount, m_aShareUniverse)) {
+        m_crossSectionalBacktestError = QStringLiteral("多股回测服务不可用");
+        m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
+        emit crossSectionalBacktestStateChanged();
+        return 0;
+    }
+    emit crossSectionalBacktestStateChanged();
+    return m_crossSectionalBacktestRequestId;
+}
+
+void TradingController::cancelCrossSectionalBacktest()
+{
+    if (!m_crossSectionalBacktestService.isRunning()) return;
+    m_crossSectionalBacktestService.cancel();
+    m_crossSectionalBacktestStatusText = QStringLiteral("正在取消多股回测…");
+    emit crossSectionalBacktestStateChanged();
+}
+
+void TradingController::handleCrossSectionalBacktestCompleted(
+    quint64 requestId, const PortfolioResult &result)
+{
+    if (requestId != m_crossSectionalBacktestRequestId) return;
+    m_displayedCrossSectionalResult = result;
+    m_crossSectionalEquityCurveModel.loadPoints(portfolioEquityPoints(result));
+    m_crossSectionalTradeModel.loadTrades(result.trades);
+    m_crossSectionalBacktestError.clear();
+    m_crossSectionalBacktestStatusText = QStringLiteral(
+        "多股回测完成：收益 %1%，%2 笔调仓")
+        .arg(result.summary.totalReturnPercent, 0, 'f', 2)
+        .arg(result.summary.totalTrades);
+    emit crossSectionalBacktestStateChanged();
+}
+
+void TradingController::handleCrossSectionalBacktestFailed(
+    quint64 requestId, const QString &message)
+{
+    if (requestId != m_crossSectionalBacktestRequestId) return;
+    m_crossSectionalBacktestError = message;
+    m_crossSectionalBacktestStatusText = QStringLiteral("多股回测失败");
+    emit crossSectionalBacktestStateChanged();
+}
+
 void TradingController::handlePortfolioBacktestCompleted(
     quint64 requestId, const PortfolioResult &result)
 {
@@ -3069,6 +3186,52 @@ bool TradingController::portfolioArchiveLoading() const
 QString TradingController::portfolioArchiveError() const
 {
     return m_portfolioArchiveError;
+}
+
+bool TradingController::crossSectionalBacktestRunning() const
+{
+    return m_crossSectionalBacktestService.isRunning();
+}
+
+QString TradingController::crossSectionalBacktestStatusText() const
+{
+    return m_crossSectionalBacktestStatusText;
+}
+
+QString TradingController::crossSectionalBacktestError() const
+{
+    return m_crossSectionalBacktestError;
+}
+
+QVariantMap TradingController::crossSectionalResultConfiguration() const
+{
+    QVariantMap map;
+    if (!m_displayedCrossSectionalResult) return map;
+    map.insert(QStringLiteral("finalEquity"),
+               m_displayedCrossSectionalResult->summary.finalEquity);
+    map.insert(QStringLiteral("totalReturnPercent"),
+               m_displayedCrossSectionalResult->summary.totalReturnPercent);
+    map.insert(QStringLiteral("maxDrawdownPercent"),
+               m_displayedCrossSectionalResult->summary.maxDrawdownPercent);
+    map.insert(QStringLiteral("sharpeRatio"),
+               m_displayedCrossSectionalResult->summary.sharpeRatio);
+    map.insert(QStringLiteral("totalCommission"),
+               m_displayedCrossSectionalResult->summary.totalCommission);
+    map.insert(QStringLiteral("totalTrades"),
+               m_displayedCrossSectionalResult->summary.totalTrades);
+    map.insert(QStringLiteral("datasetVersions"),
+               QVariant(m_displayedCrossSectionalResult->datasetVersions));
+    return map;
+}
+
+QAbstractItemModel *TradingController::crossSectionalEquityCurveModel()
+{
+    return &m_crossSectionalEquityCurveModel;
+}
+
+QAbstractItemModel *TradingController::crossSectionalTradeModel()
+{
+    return &m_crossSectionalTradeModel;
 }
 
 void TradingController::clearBacktestResult()
