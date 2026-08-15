@@ -145,6 +145,8 @@ qt_add_executable(PPTrader
     src/services/PortfolioExecutor.h
     src/services/AlignedBarSeries.cpp
     src/services/AlignedBarSeries.h
+    src/services/CrossSectionalBacktestEngine.cpp
+    src/services/CrossSectionalBacktestEngine.h
     src/services/PortfolioBacktestService.cpp
     src/services/PortfolioBacktestService.h
     src/services/NasDataNodeClient.cpp
@@ -946,8 +948,15 @@ if(BUILD_TESTING)
         src/domain/CustomStrategyTypes.cpp
         src/domain/CustomStrategyTypes.h
         src/domain/MarketTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/PortfolioTypes.cpp
+        src/domain/PortfolioTypes.h
         src/services/AlignedBarSeries.cpp
         src/services/AlignedBarSeries.h
+        src/services/CrossSectionalBacktestEngine.cpp
+        src/services/CrossSectionalBacktestEngine.h
+        src/services/PortfolioExecutor.cpp
+        src/services/PortfolioExecutor.h
         src/strategy/CrossSectionalIndicatorRuntime.cpp
         src/strategy/CrossSectionalIndicatorRuntime.h
         src/strategy/CrossSectionalCustomStrategy.cpp
