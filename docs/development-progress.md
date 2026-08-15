@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 接线自定义策略模拟执行的 Candle 回放驱动：`TradingController` 新增 `startCustomStrategyReplay`/`stopCustomStrategyReplay`（从本地 `raw_tick_cache_v1` 读最近 N 根 K 线，QTimer 按间隔逐 Bar `dispatchCandle` 驱动激活的 `CustomExecutionStrategy`）+ `customStrategyReplayRunning/ReplayedBars/TotalBars` 属性；`ExecutionApprovalPanel` 顶部加回放控制区（策略 ID/标的/周期/根数/间隔 + 开始/停止 + 进度）。至此阶段 C 完整闭环：自定义策略 → 加载/激活 → 回放驱动 → 信号 → 审批 → 模拟账户 → 通知。CTest 26/26，`all_qmllint` 通过，主程序加载无 QML 错误。
+
 - 完成自定义策略插件化（加载/卸载）：新增 `CustomStrategyRuntimeManager` 生命周期管理器（`Unloaded → Loaded → Active` 状态机 + `load/activate/deactivate/unload`，编译产物缓存、幂等加载、热插拔），`TradingController` 的 `enable/disableCustomStrategyExecution` 重构为转发到管理器并新增 `customStrategyRuntimePlugins()` 暴露插件状态；`tst_custom_strategy_execution` 新增 `runtimeManagerManagesPluginLifecycle`（6 用例），设计文档 `docs/roadmap/自定义策略插件化.md`（DSL 策略单元 vs C++ Qt Plugin 对比与演进路径）。CTest 26/26，主程序加载无 QML 错误。
 
 - 完成阶段 C 执行审批/通知后端：① 落地 `NotificationService` 抽象重构（`NotificationMessage`/`NotificationEvent`/`NotificationSeverity`）+ `DesktopNotificationService`（QSystemTrayIcon 气泡）+ `WebhookNotificationService`（QNetworkAccessManager POST JSON，transport 可注入）+ `NotificationDispatcher`（通道/事件过滤路由），事件接入策略信号/待审批/订单提交/执行拒绝；② 通知设置（桌面/Webhook URL/逐事件开关）QSettings 持久化 + `configureNotifications`/`notificationSettings` 接口；③ 新增 `CustomExecutionStrategy` 运行时（消费 Candle → 复用 DSL 信号状态机 → TradeSignal，QMutex 线程安全），`StrategyEngine`/`StrategyListModel` 增加 `removeStrategy`，`executionScope` 校验扩展 `mock_execution`，`enableCustomStrategyExecution`/`disableCustomStrategyExecution` 接口打通「自定义策略 → 模拟执行 → StrategyExecutionCoordinator → 模拟账户」；④ 新增 `ExecutionApprovalPanel` QML（审批队列批准/拒绝 + 通知设置）挂到策略页。新增 `tst_notification_service`（6 用例）与 `tst_custom_strategy_execution`（5 用例），CTest 26/26，`all_qmllint` 通过，主程序加载无 QML 错误。
