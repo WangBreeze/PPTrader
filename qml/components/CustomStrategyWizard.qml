@@ -1,6 +1,7 @@
 // qmllint disable unqualified
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import Qt.labs.settings
 
 Item {
@@ -16,6 +17,14 @@ Item {
     property string previewError: ""
     property var previewData: ({})
     property int activeConditionSide: 0
+    property int activeStep: 3
+    property string positionType: "fixedPercent"
+    property string positionAmount: "50000"
+    property string positionPercent: "100"
+    property string maxPositionPercent: "30"
+    property string stopLossPercent: "0"
+    property string takeProfitPercent: "0"
+    property string maximumHoldingBars: "0"
 
     readonly property var catalog: [
         { name: "SMA", hasPeriod: true },
@@ -152,6 +161,23 @@ Item {
         }
         const entry = root.conditionList(entryConditionsModel)
         const exit = root.conditionList(exitConditionsModel)
+        let position = { type: "fixedPercent", percent: 1.0 }
+        if (root.positionType === "fixedAmount") {
+            const amount = Number(root.positionAmount)
+            position = { type: "fixedAmount", amount: amount > 0 ? amount : 50000 }
+        } else {
+            const percent = Number(root.positionPercent)
+            position = { type: "fixedPercent", percent: percent > 0 ? percent / 100 : 1.0 }
+        }
+        const risk = { tPlusOne: true }
+        const maxPosition = Number(root.maxPositionPercent)
+        if (maxPosition > 0 && maxPosition <= 100) risk.maxPositionPercent = maxPosition
+        const stopLoss = Number(root.stopLossPercent)
+        if (stopLoss > 0) risk.stopLossPercent = stopLoss
+        const takeProfit = Number(root.takeProfitPercent)
+        if (takeProfit > 0) risk.takeProfitPercent = takeProfit
+        const holdingBars = Number(root.maximumHoldingBars)
+        if (holdingBars > 0) risk.maximumHoldingBars = holdingBars
         return JSON.stringify({
             schemaVersion: 2,
             strategyId: "custom_wizard_draft",
@@ -165,6 +191,8 @@ Item {
             updatedAt: stamp,
             parameters: [],
             series: series,
+            position: position,
+            risk: risk,
             entry: entry.length === 1 ? entry[0] : { op: "and", conditions: entry },
             exit: exit.length === 1 ? exit[0] : { op: "and", conditions: exit }
         })
@@ -427,8 +455,13 @@ Item {
                             MouseArea {
                                 anchors.fill: parent
                                 onClicked: {
-                                    if (!modelData.active)
+                                    if (modelData.no === "03") {
+                                        root.activeStep = 3
+                                    } else if (modelData.no === "05") {
+                                        root.activeStep = 5
+                                    } else if (!modelData.active) {
                                         root.statusText = "步骤 " + modelData.no + " 尚未实现，当前可完成第 3 步后切换 JSON 模式"
+                                    }
                                 }
                             }
                         }
@@ -489,6 +522,7 @@ Item {
 
             Flickable {
                 id: wizardScroll
+                visible: root.activeStep === 3
                 anchors.fill: parent
                 anchors.margins: 20
                 contentWidth: width
@@ -1320,6 +1354,139 @@ Item {
                         text: "验证计划         3 年日线 + 90 天 15m"
                         color: theme.textMuted
                         font.family: theme.fontFamily; font.pixelSize: 9
+                    }
+                }
+            }
+        }
+
+        // 步骤 5 面板（仓位与风控）
+        Rectangle {
+            id: step5Area
+            anchors.left: sidebar.right
+            anchors.right: preview.left
+            anchors.top: topBar.bottom
+            anchors.bottom: footer.top
+            visible: root.activeStep === 5
+            color: theme.bgCanvas
+
+            Flickable {
+                anchors.fill: parent
+                anchors.margins: 24
+                contentWidth: width
+                contentHeight: Math.max(height, 620)
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                    width: parent.width
+                    spacing: 14
+
+                    Text {
+                        width: parent.width
+                        text: "05  仓位与风控"
+                        color: theme.textPrimary
+                        font.family: theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold
+                    }
+                    Text {
+                        width: parent.width
+                        text: "设置建仓方式、最大持仓市值占比与止损止盈；生成到策略 JSON 的 position / risk 字段。"
+                        color: theme.textMuted
+                        font.family: theme.fontFamily; font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+
+                    Text { text: "仓位类型"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 13; font.weight: Font.Bold }
+                    Row {
+                        spacing: 8
+                        PpButton {
+                            theme: root.theme; text: "按比例（fixedPercent）"; visualWidth: 170
+                            active: root.positionType === "fixedPercent"
+                            onClicked: root.positionType = "fixedPercent"
+                        }
+                        PpButton {
+                            theme: root.theme; text: "按金额（fixedAmount）"; visualWidth: 170
+                            active: root.positionType === "fixedAmount"
+                            onClicked: root.positionType = "fixedAmount"
+                        }
+                    }
+                    Row {
+                        spacing: 16
+                        Column {
+                            spacing: 5
+                            visible: root.positionType === "fixedPercent"
+                            Text { text: "仓位比例（%）"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                            TextField {
+                                width: 150; height: 32
+                                text: root.positionPercent
+                                color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                                selectByMouse: true
+                                onTextChanged: root.positionPercent = text
+                                background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                            }
+                        }
+                        Column {
+                            spacing: 5
+                            visible: root.positionType === "fixedAmount"
+                            Text { text: "固定金额（元）"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                            TextField {
+                                width: 150; height: 32
+                                text: root.positionAmount
+                                color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                                selectByMouse: true
+                                onTextChanged: root.positionAmount = text
+                                background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                            }
+                        }
+                    }
+
+                    Text { text: "风控限制（0 或留空表示关闭）"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 13; font.weight: Font.Bold }
+                    GridLayout {
+                        columns: 4
+                        columnSpacing: 12; rowSpacing: 8
+                        Text { text: "最大持仓占比（%）"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                        TextField {
+                            Layout.preferredWidth: 100; Layout.preferredHeight: 30
+                            text: root.maxPositionPercent
+                            color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                            selectByMouse: true
+                            onTextChanged: root.maxPositionPercent = text
+                            background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                        }
+                        Text { text: "止损（%）"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                        TextField {
+                            Layout.preferredWidth: 100; Layout.preferredHeight: 30
+                            text: root.stopLossPercent
+                            color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                            selectByMouse: true
+                            onTextChanged: root.stopLossPercent = text
+                            background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                        }
+                        Text { text: "止盈（%）"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                        TextField {
+                            Layout.preferredWidth: 100; Layout.preferredHeight: 30
+                            text: root.takeProfitPercent
+                            color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                            selectByMouse: true
+                            onTextChanged: root.takeProfitPercent = text
+                            background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                        }
+                        Text { text: "最大持仓 Bar"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                        TextField {
+                            Layout.preferredWidth: 100; Layout.preferredHeight: 30
+                            text: root.maximumHoldingBars
+                            color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 10
+                            selectByMouse: true
+                            onTextChanged: root.maximumHoldingBars = text
+                            background: Rectangle { radius: 5; color: theme.bgInput; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? theme.cyan : theme.border }
+                        }
+                    }
+                    Text {
+                        width: parent.width
+                        text: "生成的 position / risk 会写入 DSL v2 JSON；切回 JSON 模式可查看并校验。"
+                        color: theme.textMuted
+                        font.family: theme.fontFamily; font.pixelSize: 9
+                        wrapMode: Text.Wrap
                     }
                 }
             }
