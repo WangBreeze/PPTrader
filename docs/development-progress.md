@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成第三方 C++ 策略插件系统（真插件）：① `StrategyPluginInterface`（`Q_DECLARE_INTERFACE` + `Q_PLUGIN_METADATA` 接口，pluginId/name/version/apiVersion + `createStrategy` 工厂）；② `StrategyPluginManager`（目录扫描 `.dll/.so`、`plugins.manifest` 清单 SHA-256 完整性校验、`QPluginLoader` 加载/`qobject_cast`/ABI 版本校验/卸载）；③ 示例插件 `sample_strategy_plugin`（MODULE 库生成 `.dll`，`SampleThresholdStrategy` close 上穿/下穿阈值 + `SampleStrategyPlugin` 工厂）；④ `TradingController` 接入 `strategyPluginScan/loadStrategyPlugin/unloadStrategyPlugin/loadedStrategyPlugins/activateStrategyPluginStrategy/setStrategyPluginDirectory`，默认目录 `应用目录/strategies`。新增 `tst_strategy_plugin`（7 用例，含真 `.dll` 加载→创建策略→卸载全链路），CTest 27/27。Figma 插件管理与多股回测 UI 设计稿已完成（`docs/roadmap/插件与多股回测UI设计.md`，节点 `1393:17`/`1394:281`）。
+
 - 接线自定义策略模拟执行的 Candle 回放驱动：`TradingController` 新增 `startCustomStrategyReplay`/`stopCustomStrategyReplay`（从本地 `raw_tick_cache_v1` 读最近 N 根 K 线，QTimer 按间隔逐 Bar `dispatchCandle` 驱动激活的 `CustomExecutionStrategy`）+ `customStrategyReplayRunning/ReplayedBars/TotalBars` 属性；`ExecutionApprovalPanel` 顶部加回放控制区（策略 ID/标的/周期/根数/间隔 + 开始/停止 + 进度）。至此阶段 C 完整闭环：自定义策略 → 加载/激活 → 回放驱动 → 信号 → 审批 → 模拟账户 → 通知。CTest 26/26，`all_qmllint` 通过，主程序加载无 QML 错误。
 
 - 完成自定义策略插件化（加载/卸载）：新增 `CustomStrategyRuntimeManager` 生命周期管理器（`Unloaded → Loaded → Active` 状态机 + `load/activate/deactivate/unload`，编译产物缓存、幂等加载、热插拔），`TradingController` 的 `enable/disableCustomStrategyExecution` 重构为转发到管理器并新增 `customStrategyRuntimePlugins()` 暴露插件状态；`tst_custom_strategy_execution` 新增 `runtimeManagerManagesPluginLifecycle`（6 用例），设计文档 `docs/roadmap/自定义策略插件化.md`（DSL 策略单元 vs C++ Qt Plugin 对比与演进路径）。CTest 26/26，主程序加载无 QML 错误。
