@@ -84,3 +84,34 @@ v2 在 v1 基础上新增三项能力，v1 文档保持原语义不变（v1 仍�
 约束与 v1 保持一致：`market` 仍仅支持 `A股`、`executionScope` 仍为 `backtest_only`、T+1 强制开启；新指标只允许出现在 v2 文档中。
 
 `TradingController.customStrategyPreview(json, symbol, periodSeconds, barCount)` 是只读预览接口：校验并编译后，在本地最近 K 线上重放，返回指标序列（按 series 顺序）与 B/S 信号，供向导预览图使用；不写库、不启动回测任务。
+
+## DSL v3（schemaVersion=3）
+
+v3 在 v1/v2 基础上新增多股横截面能力，v1/v2 语义不变（v1/v2 仍拒绝 v3 语法）：
+
+1. 顶层 `universe`：首期仅 `explicit` 代码列表。
+
+   ```json
+   "universe": { "mode": "explicit", "symbols": ["600519", "000001", "600036"] }
+   ```
+
+2. 顶层 `crossIndicators`：横截面指标，在同一时刻的 n 只股票之间计算。
+
+   ```json
+   "crossIndicators": [
+     { "alias": "mom_rank", "indicator": "RANK", "of": { "indicator": "ROC", "period": 20 }, "ascending": false },
+     { "alias": "close_z", "indicator": "ZSCORE", "of": { "field": "close" } },
+     { "alias": "peer_spread", "indicator": "PEER", "symbol": "600519", "field": "close" }
+   ]
+   ```
+
+   - `RANK`/`ZSCORE`/`PERCENTILE`/`MEAN`/`MEDIAN`：`of` 为 `field`（OHLCV）或单标的指标（`indicator`+`period`）；`RANK` 支持 `ascending`（默认降序，rank=1 为最大值）。
+   - `PEER`：`symbol`+`field` 引用指定标的字段（价差/比值）。
+
+3. 条件横截面操作数 `{"cross":"别名"}`，引用 `crossIndicators` 中已定义的别名；别名命名规则同 v2（小写字母开头 1–32 位），与 v2 `series` 别名独立。
+
+4. 顶层 `selection`（首期仅 `topN`）：`rankBy` 按某横截面指标排序，`count` 选前 N 只，`ascending` 控制升/降序。
+
+5. `position.type` 支持 `equalWeight`（多股等权）；`fixedPercent` 保持 v1 语义。
+
+约束：`market` 仍仅 `A股`、`executionScope` 仍 `backtest_only`、T+1 强制开启；v3 语法（universe/crossIndicators/selection/cross）只允许出现在 v3 文档中。多股回测引擎（阶段 2.3–2.5）由 `docs/roadmap/多股自定义回测.md` 管理。
