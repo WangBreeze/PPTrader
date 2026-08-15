@@ -398,7 +398,7 @@ Item {
                 font.family: theme.fontFamily; font.pixelSize: 17; font.weight: Font.Bold
             }
             Text {
-                x: 24; y: 54; text: "步骤 3 / 8 · 可随时返回修改"
+                x: 24; y: 54; text: "步骤 " + root.activeStep + " / 8 · 可随时返回修改"
                 color: theme.textMuted
                 font.family: theme.fontFamily; font.pixelSize: 10
             }
@@ -406,7 +406,7 @@ Item {
                 x: 24; y: 86; width: 248; height: 5; radius: 2
                 color: theme.bgRaised
                 Rectangle {
-                    width: 93; height: 5; radius: 2
+                    width: Math.min(248, 248 * root.activeStep / 8); height: 5; radius: 2
                     color: theme.purple
                 }
             }
@@ -464,6 +464,12 @@ Item {
                                         root.activeStep = 4
                                     } else if (modelData.no === "05") {
                                         root.activeStep = 5
+                                    } else if (modelData.no === "06") {
+                                        root.activeStep = 6
+                                    } else if (modelData.no === "07") {
+                                        root.activeStep = 7
+                                    } else if (modelData.no === "08") {
+                                        root.activeStep = 8
                                     } else if (!modelData.active) {
                                         root.statusText = "步骤 " + modelData.no + " 尚未实现，当前可完成第 3 步后切换 JSON 模式"
                                     }
@@ -1578,6 +1584,89 @@ Item {
             }
         }
 
+        // 步骤 6 面板（执行与审批）
+        Rectangle {
+            id: step6Area
+            anchors.left: sidebar.right
+            anchors.right: preview.left
+            anchors.top: topBar.bottom
+            anchors.bottom: footer.top
+            visible: root.activeStep === 6
+            color: theme.bgCanvas
+            Column {
+                x: 40; y: 30; width: parent.width - 80; spacing: 14
+                Text { width: parent.width; text: "06  执行与审批"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold }
+                Text {
+                    width: parent.width
+                    text: "策略执行审批（人工审批 / 自动提交、冷却、仓位计算）由执行中心与 StrategyExecutionCoordinator 提供，参数走执行配置而非 DSL。当前自定义策略 executionScope 仍为 backtest_only，模拟执行入口后续开放。"
+                    color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 11; wrapMode: Text.Wrap
+                }
+                Rectangle {
+                    width: parent.width; height: 64; radius: 8; color: theme.bgPanel; border.color: theme.border
+                    Text {
+                        x: 14; y: 12; width: parent.width - 28
+                        text: "执行范围：仅历史回测（backtest_only）"
+                        color: theme.yellow; font.family: theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold
+                    }
+                    Text {
+                        x: 14; y: 36; width: parent.width - 28
+                        text: "后续阶段将接入模拟执行审批与通知通道（不接真实下单）。"
+                        color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9
+                    }
+                }
+            }
+        }
+
+        // 步骤 7 面板（回测验证）
+        Rectangle {
+            id: step7Area
+            anchors.left: sidebar.right
+            anchors.right: preview.left
+            anchors.top: topBar.bottom
+            anchors.bottom: footer.top
+            visible: root.activeStep === 7
+            color: theme.bgCanvas
+            Column {
+                x: 40; y: 30; width: parent.width - 80; spacing: 14
+                Text { width: parent.width; text: "07  回测验证"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold }
+                Text {
+                    width: parent.width
+                    text: "样本窗、逐 Bar 回放与验证记录已在策略页回测结果区提供：样本窗过滤回测范围、replayBacktestBar 回放任意 Bar 的 OHLCV 与买卖信号、验证记录按收益率排序并可恢复。"
+                    color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 11; wrapMode: Text.Wrap
+                }
+                Rectangle {
+                    width: parent.width; height: 64; radius: 8; color: theme.bgPanel; border.color: theme.border
+                    Text { x: 14; y: 12; text: "回测验证能力已就绪"; color: theme.green; font.family: theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
+                    Text { x: 14; y: 36; width: parent.width - 28; text: "切换到 JSON 模式校验并保存后，即可在策略页运行严格本地回测。"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                }
+            }
+        }
+
+        // 步骤 8 面板（发布与运行）
+        Rectangle {
+            id: step8Area
+            anchors.left: sidebar.right
+            anchors.right: preview.left
+            anchors.top: topBar.bottom
+            anchors.bottom: footer.top
+            visible: root.activeStep === 8
+            color: theme.bgCanvas
+            Column {
+                x: 40; y: 30; width: parent.width - 80; spacing: 14
+                Text { width: parent.width; text: "08  发布与运行"; color: theme.textPrimary; font.family: theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold }
+                Text {
+                    width: parent.width
+                    text: "通过校验的自定义策略可保存为不可变版本并进入严格本地回测；模拟执行、线程运行与通知通道属于后续阶段。"
+                    color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 11; wrapMode: Text.Wrap
+                }
+                Rectangle {
+                    width: parent.width; height: 64; radius: 8; color: theme.bgPanel; border.color: theme.border
+                    Text { x: 14; y: 12; text: "当前可发布到回测"; color: theme.green; font.family: theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
+                    Text { x: 14; y: 36; width: parent.width - 28; text: "切换到 JSON 模式校验并保存新版本，随后在策略页运行回测。"; color: theme.textMuted; font.family: theme.fontFamily; font.pixelSize: 9 }
+                }
+            }
+        }
+
         // 底部操作栏
         Rectangle {
             id: footer
@@ -1599,7 +1688,13 @@ Item {
                 x: 400; y: 15; visualWidth: 112
                 theme: root.theme; text: "← 上一步"
                 toolTip: "步骤 1–2 后续开放；可先切换 JSON 模式"
-                onClicked: root.switchToJson()
+                onClicked: {
+                    if (root.activeStep > 3) {
+                        root.activeStep = root.activeStep - 1
+                    } else {
+                        root.switchToJson()
+                    }
+                }
             }
             PpButton {
                 x: 524; y: 15; visualWidth: 136
@@ -1611,13 +1706,17 @@ Item {
             }
             PpButton {
                 x: 672; y: 15; visualWidth: 210
-                theme: root.theme; text: "下一步：信号条件  →"
+                theme: root.theme; text: root.activeStep < 8 ? "下一步：继续  →" : "完成：生成 JSON  →"
                 primary: true
                 onClicked: {
                     if (root.validateLocal()) {
                         root.saveDraft()
-                        root.switchToJson()
-                        root.statusText = "已生成 DSL v2 JSON，可在 JSON 模式校验并保存版本"
+                        if (root.activeStep < 8) {
+                            root.activeStep = root.activeStep + 1
+                        } else {
+                            root.switchToJson()
+                            root.statusText = "已生成 DSL v2 JSON，可在 JSON 模式校验并保存版本"
+                        }
                     }
                 }
             }
