@@ -60,6 +60,20 @@ AlignedBarSeries AlignedBarSeries::build(const QHash<QString, QVector<Candle>> &
         result.m_frames.append(frame);
     }
 
+    // 预计算前向填充表：每个 symbol 每帧最近 bar 帧索引。
+    for (auto symbolIt = indexBySymbol.constBegin();
+         symbolIt != indexBySymbol.constEnd(); ++symbolIt) {
+        QVector<int> lastBarFrame(result.m_frames.size(), -1);
+        int last = -1;
+        for (int frameIndex = 0; frameIndex < result.m_frames.size(); ++frameIndex) {
+            if (result.m_frames.at(frameIndex).hasBar(symbolIt.key())) {
+                last = frameIndex;
+            }
+            lastBarFrame[frameIndex] = last;
+        }
+        result.m_lastBarFrame.insert(symbolIt.key(), lastBarFrame);
+    }
+
     if (error) error->clear();
     return result;
 }
@@ -68,6 +82,22 @@ const AlignedBarFrame *AlignedBarSeries::frameAt(int frameIndex) const
 {
     if (frameIndex < 0 || frameIndex >= m_frames.size()) return nullptr;
     return &m_frames.at(frameIndex);
+}
+
+std::optional<double> AlignedBarSeries::forwardFillClose(const QString &symbol,
+                                                         int frameIndex,
+                                                         bool *stale) const
+{
+    if (stale) *stale = false;
+    if (frameIndex < 0 || frameIndex >= m_frames.size()) return std::nullopt;
+    const auto symbolIt = m_lastBarFrame.constFind(symbol);
+    if (symbolIt == m_lastBarFrame.constEnd()) return std::nullopt;
+    const int last = symbolIt.value().at(frameIndex);
+    if (last < 0) return std::nullopt;
+    const Candle *candle = m_frames.at(last).bar(symbol);
+    if (!candle) return std::nullopt;
+    if (stale) *stale = (last < frameIndex);
+    return candle->close;
 }
 
 } // namespace pp

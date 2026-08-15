@@ -7,6 +7,8 @@
 #include <QString>
 #include <QVector>
 
+#include <optional>
+
 namespace pp {
 
 // 对齐帧：同一时间戳各标的的 K 线快照。某标的该时刻无 bar 时不在 bars 中（absent）。
@@ -39,9 +41,17 @@ public:
     // 逐帧回放语义别名（只读，不推进任何状态）。
     const AlignedBarFrame *replayBar(int frameIndex) const { return frameAt(frameIndex); }
 
+    // 前向填充：返回 symbol 在 frameIndex（含）之前最近 bar 的 close。
+    // stale 输出：true 表示该帧该 symbol 无 bar，使用了更早 bar 前向填充。
+    // 若 frameIndex 之前无任何 bar，返回 nullopt。
+    std::optional<double> forwardFillClose(const QString &symbol, int frameIndex,
+                                           bool *stale = nullptr) const;
+
 private:
     QVector<AlignedBarFrame> m_frames;
     int m_periodSeconds = 0;
+    // 预计算前向填充表：symbol → 每帧最近 bar 的帧索引（-1 表示该帧之前无 bar）。
+    QHash<QString, QVector<int>> m_lastBarFrame;
 };
 
 } // namespace pp

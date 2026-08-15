@@ -38,6 +38,10 @@ private slots:
     void emptyInputRejected();
     void twoSeriesAlignMissingBarsAbsent();
     void mixedPeriodsRejected();
+    void forwardFillUsesLatestCloseWhenPresent();
+    void forwardFillCarriesForwardWhenAbsent();
+    void forwardFillBeforeFirstBarReturnsNull();
+    void forwardFillUnknownSymbolReturnsNull();
 };
 
 void AlignedBarSeriesTest::singleSeriesBuildsFramePerBar()
@@ -140,6 +144,68 @@ void AlignedBarSeriesTest::mixedPeriodsRejected()
     const AlignedBarSeries aligned = AlignedBarSeries::build(series, &error);
     QVERIFY(!error.isEmpty());
     QVERIFY(aligned.isEmpty());
+}
+
+void AlignedBarSeriesTest::forwardFillUsesLatestCloseWhenPresent()
+{
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"),
+         {makeCandle(QStringLiteral("600001"), at(1, 9, 30), 10.0),
+          makeCandle(QStringLiteral("600001"), at(1, 9, 32), 12.0)}},
+        {QStringLiteral("600002"),
+         {makeCandle(QStringLiteral("600002"), at(1, 9, 31), 20.0),
+          makeCandle(QStringLiteral("600002"), at(1, 9, 32), 22.0)}}};
+    const AlignedBarSeries aligned = AlignedBarSeries::build(series);
+    QCOMPARE(aligned.frameCount(), 3);
+
+    bool stale = true;
+    const auto value = aligned.forwardFillClose(QStringLiteral("600001"), 2, &stale);
+    QVERIFY(value.has_value());
+    QCOMPARE(value.value(), 12.0);
+    QVERIFY(!stale);
+}
+
+void AlignedBarSeriesTest::forwardFillCarriesForwardWhenAbsent()
+{
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"),
+         {makeCandle(QStringLiteral("600001"), at(1, 9, 30), 10.0),
+          makeCandle(QStringLiteral("600001"), at(1, 9, 32), 12.0)}},
+        {QStringLiteral("600002"),
+         {makeCandle(QStringLiteral("600002"), at(1, 9, 31), 20.0),
+          makeCandle(QStringLiteral("600002"), at(1, 9, 32), 22.0)}}};
+    const AlignedBarSeries aligned = AlignedBarSeries::build(series);
+
+    // 帧1（9:31）600001 无 bar，前向填充帧0 的 close 10.0，stale=true。
+    bool stale = false;
+    const auto value = aligned.forwardFillClose(QStringLiteral("600001"), 1, &stale);
+    QVERIFY(value.has_value());
+    QCOMPARE(value.value(), 10.0);
+    QVERIFY(stale);
+}
+
+void AlignedBarSeriesTest::forwardFillBeforeFirstBarReturnsNull()
+{
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"),
+         {makeCandle(QStringLiteral("600001"), at(1, 9, 30), 10.0)}},
+        {QStringLiteral("600002"),
+         {makeCandle(QStringLiteral("600002"), at(1, 9, 31), 20.0)}}};
+    const AlignedBarSeries aligned = AlignedBarSeries::build(series);
+
+    // 帧0（9:30）600002 之前无 bar → nullopt。
+    QVERIFY(!aligned.forwardFillClose(QStringLiteral("600002"), 0).has_value());
+}
+
+void AlignedBarSeriesTest::forwardFillUnknownSymbolReturnsNull()
+{
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"),
+         {makeCandle(QStringLiteral("600001"), at(1, 9, 30), 10.0)}}};
+    const AlignedBarSeries aligned = AlignedBarSeries::build(series);
+    QVERIFY(!aligned.forwardFillClose(QStringLiteral("999999"), 0).has_value());
+    // 越界帧也返回 nullopt。
+    QVERIFY(!aligned.forwardFillClose(QStringLiteral("600001"), 99).has_value());
 }
 
 } // namespace pp
