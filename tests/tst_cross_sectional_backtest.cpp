@@ -4,9 +4,12 @@
 #include "strategy/CustomStrategyValidator.h"
 #include "domain/CustomStrategyTypes.h"
 #include "services/CrossSectionalBacktestEngine.h"
+#include "services/CrossSectionalBacktestService.h"
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTest>
 
 #include <cmath>
@@ -24,6 +27,7 @@ private slots:
     void emptyInputReturnsEmpty();
     void strategySelectsTopNByCrossRank();
     void engineRebalancesToTopNSelection();
+    void serviceValidatesLifecycleAndRejectsMissingData();
 };
 
 static Candle makeBar(const QString &symbol, double close)
@@ -251,6 +255,38 @@ void CrossSectionalBacktestTest::engineRebalancesToTopNSelection()
     QVERIFY(quantity600002 > 0.0);
     QVERIFY(quantity600003 > 0.0);
     QVERIFY(!result.trades.isEmpty());
+}
+
+void CrossSectionalBacktestTest::serviceValidatesLifecycleAndRejectsMissingData()
+{
+    CrossSectionalBacktestService service;
+    QVERIFY(!service.isRunning());
+    QVERIFY(!service.start(QString()));
+    QVERIFY(!service.isRunning());
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QVERIFY(service.start(directory.filePath(QStringLiteral("cross.db"))));
+    QVERIFY(service.isRunning());
+
+    CustomStrategyDefinition definition;
+    PortfolioDefinition portfolio;
+    portfolio.periodSeconds = 60;
+    QVERIFY(!service.request(0, definition, {}, portfolio, 10, {}));
+
+    const QJsonObject document = makeCrossV3Document();
+    CustomStrategyValidator validator;
+    QVERIFY2(validator.validate(document, &definition, nullptr), "v3 校验应通过");
+
+    QSignalSpy failedSpy(&service, &CrossSectionalBacktestService::failed);
+    QVERIFY(service.request(1, definition, {}, portfolio, 10, {}));
+    QVERIFY(failedSpy.wait(3000));
+    QCOMPARE(failedSpy.size(), 1);
+    const QString message = failedSpy.first().at(1).toString();
+    QVERIFY(message.contains(QStringLiteral("数据集身份")));
+
+    service.stop();
+    QVERIFY(!service.isRunning());
 }
 
 } // namespace pp

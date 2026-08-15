@@ -147,6 +147,8 @@ qt_add_executable(PPTrader
     src/services/AlignedBarSeries.h
     src/services/CrossSectionalBacktestEngine.cpp
     src/services/CrossSectionalBacktestEngine.h
+    src/services/CrossSectionalBacktestService.cpp
+    src/services/CrossSectionalBacktestService.h
     src/services/PortfolioBacktestService.cpp
     src/services/PortfolioBacktestService.h
     src/services/NasDataNodeClient.cpp
@@ -945,18 +947,38 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_cross_sectional_backtest
         tests/tst_cross_sectional_backtest.cpp
+        src/domain/BacktestDatasetTypes.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/CrossSectionalTypes.h
         src/domain/CustomStrategyTypes.cpp
         src/domain/CustomStrategyTypes.h
+        src/domain/LocalHistoryTypes.cpp
+        src/domain/LocalHistoryTypes.h
         src/domain/MarketTypes.h
-        src/domain/BacktestTypes.h
         src/domain/PortfolioTypes.cpp
         src/domain/PortfolioTypes.h
+        src/domain/RawTradeTypes.h
+        src/domain/StrategyExecutionTypes.h
+        src/domain/TickDataImportTypes.h
+        src/domain/TradingTypes.h
         src/services/AlignedBarSeries.cpp
         src/services/AlignedBarSeries.h
+        src/services/AShareTradingCalendar.cpp
+        src/services/AShareTradingCalendar.h
+        src/services/BacktestDataVersion.cpp
+        src/services/BacktestDataVersion.h
         src/services/CrossSectionalBacktestEngine.cpp
         src/services/CrossSectionalBacktestEngine.h
+        src/services/CrossSectionalBacktestService.cpp
+        src/services/CrossSectionalBacktestService.h
+        src/services/CustomStrategyStore.h
+        src/services/LocalDataStore.h
         src/services/PortfolioExecutor.cpp
         src/services/PortfolioExecutor.h
+        src/services/SqliteLocalDataStore.cpp
+        src/services/SqliteLocalDataStore.h
+        src/services/StrategyExecutionStore.h
         src/strategy/CrossSectionalIndicatorRuntime.cpp
         src/strategy/CrossSectionalIndicatorRuntime.h
         src/strategy/CrossSectionalCustomStrategy.cpp
@@ -969,7 +991,7 @@ if(BUILD_TESTING)
         src/strategy/CustomIndicatorRuntime.h
     )
     target_include_directories(tst_cross_sectional_backtest PRIVATE src)
-    target_link_libraries(tst_cross_sectional_backtest PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(tst_cross_sectional_backtest PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
 
     qt_add_executable(tst_portfolio_backtest_store
         tests/tst_portfolio_backtest_store.cpp
