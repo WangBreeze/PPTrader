@@ -156,19 +156,26 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
         QStringLiteral("createdAt"), QStringLiteral("updatedAt"),
         QStringLiteral("parameters"), QStringLiteral("position"), QStringLiteral("risk"),
         QStringLiteral("entry"), QStringLiteral("exit"), QStringLiteral("series"),
-        QStringLiteral("signal")
+        QStringLiteral("signal"), QStringLiteral("universe"),
+        QStringLiteral("crossIndicators"), QStringLiteral("selection")
     };
     if (!hasOnlyKeys(input, allowedTopLevel, QStringLiteral("策略定义"), error)) return false;
     const int schemaVersion = input.value(QStringLiteral("schemaVersion")).toInt(-1);
-    if (schemaVersion != 1 && schemaVersion != 2) {
-        return fail(error, QStringLiteral("仅支持 schemaVersion=1/2"));
+    if (schemaVersion != 1 && schemaVersion != 2 && schemaVersion != 3) {
+        return fail(error, QStringLiteral("仅支持 schemaVersion=1/2/3"));
     }
-    const bool v2 = schemaVersion == 2;
+    const bool v2 = schemaVersion >= 2;
+    const bool v3 = schemaVersion == 3;
     if (input.contains(QStringLiteral("series")) && !v2) {
         return fail(error, QStringLiteral("series 需要 schemaVersion=2"));
     }
     if (input.contains(QStringLiteral("signal")) && !v2) {
         return fail(error, QStringLiteral("signal 需要 schemaVersion=2"));
+    }
+    if ((input.contains(QStringLiteral("universe"))
+         || input.contains(QStringLiteral("crossIndicators"))
+         || input.contains(QStringLiteral("selection"))) && !v3) {
+        return fail(error, QStringLiteral("universe/crossIndicators/selection 需要 schemaVersion=3"));
     }
     if (v2 && input.contains(QStringLiteral("signal"))) {
         if (!input.value(QStringLiteral("signal")).isObject()) {
@@ -231,17 +238,24 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
             return fail(error, QStringLiteral("position 必须是对象"));
         }
         const QJsonObject position = input.value(QStringLiteral("position")).toObject();
-        if (!hasOnlyKeys(position,
-                         {QStringLiteral("type"), QStringLiteral("percent")},
-                         QStringLiteral("position"), error)
-            || position.value(QStringLiteral("type")).toString()
-                != QStringLiteral("fixedPercent")) {
-            return fail(error, QStringLiteral("position.type 仅支持 fixedPercent"));
-        }
-        double percent = 0.0;
-        if (!finiteNumber(position.value(QStringLiteral("percent")), &percent)
-            || percent < 0.01 || percent > 1.0) {
-            return fail(error, QStringLiteral("position.percent 必须在 0.01–1.0 之间"));
+        const QString positionType = position.value(QStringLiteral("type"))
+            .toString(QStringLiteral("fixedPercent"));
+        if (positionType == QStringLiteral("fixedPercent")) {
+            if (!hasOnlyKeys(position, {QStringLiteral("type"), QStringLiteral("percent")},
+                             QStringLiteral("position"), error)) {
+                return false;
+            }
+            double percent = 0.0;
+            if (!finiteNumber(position.value(QStringLiteral("percent")), &percent)
+                || percent < 0.01 || percent > 1.0) {
+                return fail(error, QStringLiteral("position.percent 必须在 0.01–1.0 之间"));
+            }
+        } else if (positionType == QStringLiteral("equalWeight") && v3) {
+            if (!hasOnlyKeys(position, {QStringLiteral("type")}, QStringLiteral("position"), error)) {
+                return false;
+            }
+        } else {
+            return fail(error, QStringLiteral("position.type 仅支持 fixedPercent/equalWeight"));
         }
     }
 
@@ -297,6 +311,7 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
     }
     int nodeCount = 0;
     QSet<QString> aliases;
+    QSet<QString> crossAliases;
     if (v2 && input.contains(QStringLiteral("series"))) {
         const QJsonArray series = input.value(QStringLiteral("series")).toArray();
         if (series.size() < 1 || series.size() > 16) {
@@ -312,8 +327,134 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
             QJsonObject operand = item;
             operand.remove(QStringLiteral("alias"));
             if (!validateOperand(operand, parameters, path, 1, v2, aliases,
-                                 &nodeCount, error)) {
+                                 crossAliases, &nodeCount, error)) {
                 return false;
+            }
+        }
+    }
+    if (v3) {
+        if (!input.value(QStringLiteral("universe")).isObject()) {
+            return fail(error, QStringLiteral("schemaVersion=3 需要 universe 对象"));
+        }
+        const QJsonObject universe = input.value(QStringLiteral("universe")).toObject();
+        if (!hasOnlyKeys(universe, {QStringLiteral("mode"), QStringLiteral("symbols")},
+                         QStringLiteral("universe"), error)) {
+            return false;
+        }
+        if (universe.value(QStringLiteral("mode")).toString() != QStringLiteral("explicit")) {
+            return fail(error, QStringLiteral("universe.mode 首期仅支持 explicit"));
+        }
+        static const QRegularExpression symbolPattern(QStringLiteral("^[0-9]{6}$"));
+        const QJsonArray universeSymbols = universe.value(QStringLiteral("symbols")).toArray();
+        if (universeSymbols.size() < 1 || universeSymbols.size() > 512) {
+            return fail(error, QStringLiteral("universe.symbols 必须包含 1–512 项"));
+        }
+        for (int index = 0; index < universeSymbols.size(); ++index) {
+            if (!symbolPattern.match(universeSymbols.at(index).toString()).hasMatch()) {
+                return fail(error, QStringLiteral("universe.symbols[%1] 必须是 6 位数字代码").arg(index));
+            }
+        }
+
+        if (!input.value(QStringLiteral("crossIndicators")).isArray()) {
+            return fail(error, QStringLiteral("schemaVersion=3 需要 crossIndicators 数组"));
+        }
+        const QJsonArray crossIndicators = input.value(QStringLiteral("crossIndicators")).toArray();
+        if (crossIndicators.size() < 1 || crossIndicators.size() > 32) {
+            return fail(error, QStringLiteral("crossIndicators 必须包含 1–32 项"));
+        }
+        static const QSet<QString> crossIndicatorNames {
+            QStringLiteral("RANK"), QStringLiteral("ZSCORE"), QStringLiteral("PERCENTILE"),
+            QStringLiteral("MEAN"), QStringLiteral("MEDIAN"), QStringLiteral("PEER")
+        };
+        for (int index = 0; index < crossIndicators.size(); ++index) {
+            if (!crossIndicators.at(index).isObject()) {
+                return fail(error, QStringLiteral("crossIndicators[%1] 必须是对象").arg(index));
+            }
+            const QJsonObject item = crossIndicators.at(index).toObject();
+            const QString path = QStringLiteral("crossIndicators[%1]").arg(index);
+            const QString alias = item.value(QStringLiteral("alias")).toString();
+            if (!validAliasKey(alias, error)) return false;
+            if (crossAliases.contains(alias)) {
+                return fail(error, QStringLiteral("横截面指标别名重复：%1").arg(alias));
+            }
+            crossAliases.insert(alias);
+            const QString name = item.value(QStringLiteral("indicator")).toString().toUpper();
+            if (!crossIndicatorNames.contains(name)) {
+                return fail(error, QStringLiteral("%1 使用了未知横截面指标：%2").arg(path, name));
+            }
+            if (name == QStringLiteral("PEER")) {
+                if (!hasOnlyKeys(item, {QStringLiteral("alias"), QStringLiteral("indicator"),
+                                        QStringLiteral("symbol"), QStringLiteral("field")},
+                                 path, error)) {
+                    return false;
+                }
+                if (!symbolPattern.match(item.value(QStringLiteral("symbol")).toString()).hasMatch()) {
+                    return fail(error, QStringLiteral("%1.symbol 必须是 6 位数字代码").arg(path));
+                }
+                static const QSet<QString> fields {QStringLiteral("open"), QStringLiteral("high"),
+                                                   QStringLiteral("low"), QStringLiteral("close"),
+                                                   QStringLiteral("volume")};
+                if (!fields.contains(item.value(QStringLiteral("field")).toString())) {
+                    return fail(error, QStringLiteral("%1.field 必须是 OHLCV 字段").arg(path));
+                }
+            } else {
+                QSet<QString> allowed {QStringLiteral("alias"), QStringLiteral("indicator"),
+                                       QStringLiteral("of")};
+                if (name == QStringLiteral("RANK")) allowed.insert(QStringLiteral("ascending"));
+                if (!hasOnlyKeys(item, allowed, path, error)) return false;
+                if (!item.value(QStringLiteral("of")).isObject()) {
+                    return fail(error, QStringLiteral("%1.of 必须是对象").arg(path));
+                }
+                const QJsonObject of = item.value(QStringLiteral("of")).toObject();
+                if (of.contains(QStringLiteral("field"))) {
+                    static const QSet<QString> fields {QStringLiteral("open"), QStringLiteral("high"),
+                                                       QStringLiteral("low"), QStringLiteral("close"),
+                                                       QStringLiteral("volume")};
+                    if (!hasOnlyKeys(of, {QStringLiteral("field")}, path + QStringLiteral(".of"), error)
+                        || !fields.contains(of.value(QStringLiteral("field")).toString())) {
+                        return fail(error, QStringLiteral("%1.of.field 必须是 OHLCV 字段").arg(path));
+                    }
+                } else if (of.contains(QStringLiteral("indicator"))) {
+                    if (!validateOperand(of, parameters, path + QStringLiteral(".of"), 1, v2,
+                                         aliases, crossAliases, &nodeCount, error)) {
+                        return false;
+                    }
+                } else {
+                    return fail(error, QStringLiteral("%1.of 必须是 field 或 indicator").arg(path));
+                }
+                if (name == QStringLiteral("RANK")
+                    && item.contains(QStringLiteral("ascending"))
+                    && !item.value(QStringLiteral("ascending")).isBool()) {
+                    return fail(error, QStringLiteral("%1.ascending 必须是布尔值").arg(path));
+                }
+            }
+        }
+
+        if (input.contains(QStringLiteral("selection"))) {
+            if (!input.value(QStringLiteral("selection")).isObject()) {
+                return fail(error, QStringLiteral("selection 必须是对象"));
+            }
+            const QJsonObject selection = input.value(QStringLiteral("selection")).toObject();
+            if (!hasOnlyKeys(selection, {QStringLiteral("mode"), QStringLiteral("rankBy"),
+                                         QStringLiteral("count"), QStringLiteral("ascending")},
+                             QStringLiteral("selection"), error)) {
+                return false;
+            }
+            if (selection.value(QStringLiteral("mode")).toString() != QStringLiteral("topN")) {
+                return fail(error, QStringLiteral("selection.mode 首期仅支持 topN"));
+            }
+            const QString rankBy = selection.value(QStringLiteral("rankBy")).toString();
+            if (!crossAliases.contains(rankBy)) {
+                return fail(error, QStringLiteral("selection.rankBy 引用了未定义的横截面指标：%1").arg(rankBy));
+            }
+            double count = 0.0;
+            if (!finiteNumber(selection.value(QStringLiteral("count")), &count)
+                || std::floor(count) != count || count < 1.0 || count > 512.0) {
+                return fail(error, QStringLiteral("selection.count 必须是 1–512 的整数"));
+            }
+            if (selection.contains(QStringLiteral("ascending"))
+                && !selection.value(QStringLiteral("ascending")).isBool()) {
+                return fail(error, QStringLiteral("selection.ascending 必须是布尔值"));
             }
         }
     }
@@ -325,9 +466,11 @@ bool CustomStrategyValidator::validate(const QJsonObject &input,
         return false;
     }
     if (!validateCondition(input.value(QStringLiteral("entry")).toObject(), parameters,
-                           QStringLiteral("entry"), 1, v2, aliases, &nodeCount, error)
+                           QStringLiteral("entry"), 1, v2, aliases, crossAliases,
+                           &nodeCount, error)
         || !validateCondition(input.value(QStringLiteral("exit")).toObject(), parameters,
-                              QStringLiteral("exit"), 1, v2, aliases, &nodeCount, error)) {
+                              QStringLiteral("exit"), 1, v2, aliases, crossAliases,
+                              &nodeCount, error)) {
         return false;
     }
 
@@ -400,6 +543,7 @@ bool CustomStrategyValidator::validateCondition(const QJsonObject &condition,
                                                 const ParameterMap &parameters,
                                                 const QString &path, int depth, bool v2,
                                                 const QSet<QString> &aliases,
+                                                const QSet<QString> &crossAliases,
                                                 int *nodeCount, QString *error) const
 {
     if (depth > kMaximumExpressionDepth) {
@@ -419,7 +563,7 @@ bool CustomStrategyValidator::validateCondition(const QJsonObject &condition,
             if (!children.at(index).isObject()
                 || !validateCondition(children.at(index).toObject(), parameters,
                                       QStringLiteral("%1.conditions[%2]").arg(path).arg(index),
-                                      depth + 1, v2, aliases, nodeCount, error)) {
+                                      depth + 1, v2, aliases, crossAliases, nodeCount, error)) {
                 if (error && error->isEmpty()) *error = QStringLiteral("%1.conditions[%2] 必须是条件对象").arg(path).arg(index);
                 return false;
             }
@@ -433,7 +577,7 @@ bool CustomStrategyValidator::validateCondition(const QJsonObject &condition,
         }
         return validateCondition(condition.value(QStringLiteral("condition")).toObject(), parameters,
                                  path + QStringLiteral(".condition"), depth + 1, v2,
-                                 aliases, nodeCount, error);
+                                 aliases, crossAliases, nodeCount, error);
     }
     static const QSet<QString> comparisonOps {
         QStringLiteral("gt"), QStringLiteral("gte"), QStringLiteral("lt"),
@@ -450,16 +594,17 @@ bool CustomStrategyValidator::validateCondition(const QJsonObject &condition,
     }
     return validateOperand(condition.value(QStringLiteral("left")).toObject(), parameters,
                            path + QStringLiteral(".left"), depth + 1, v2, aliases,
-                           nodeCount, error)
+                           crossAliases, nodeCount, error)
         && validateOperand(condition.value(QStringLiteral("right")).toObject(), parameters,
                            path + QStringLiteral(".right"), depth + 1, v2, aliases,
-                           nodeCount, error);
+                           crossAliases, nodeCount, error);
 }
 
 bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
                                               const ParameterMap &parameters,
                                               const QString &path, int depth, bool v2,
                                               const QSet<QString> &aliases,
+                                              const QSet<QString> &crossAliases,
                                               int *nodeCount, QString *error) const
 {
     if (depth > kMaximumExpressionDepth || ++(*nodeCount) > kMaximumExpressionNodes) {
@@ -495,6 +640,12 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
         const QString alias = operand.value(QStringLiteral("series")).toString();
         return aliases.contains(alias)
             ? true : fail(error, QStringLiteral("%1 引用了未定义的指标别名：%2").arg(path, alias));
+    }
+    if (operand.contains(QStringLiteral("cross"))) {
+        if (!hasOnlyKeys(operand, {QStringLiteral("cross")}, path, error)) return false;
+        const QString alias = operand.value(QStringLiteral("cross")).toString();
+        return crossAliases.contains(alias)
+            ? true : fail(error, QStringLiteral("%1 引用了未定义的横截面指标：%2").arg(path, alias));
     }
     if (!operand.contains(QStringLiteral("indicator"))) {
         return fail(error, QStringLiteral("%1 不是受支持的操作数").arg(path));
@@ -580,7 +731,7 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
 
 QVariantMap CustomStrategyValidator::schemaDescriptor() const
 {
-    return {{QStringLiteral("schemaVersion"), 2},
+    return {{QStringLiteral("schemaVersion"), 3},
             {QStringLiteral("stage"), QStringLiteral("backtest_ready")},
             {QStringLiteral("executionScope"), QStringLiteral("backtest_only")},
             {QStringLiteral("executable"), true},
@@ -589,6 +740,9 @@ QVariantMap CustomStrategyValidator::schemaDescriptor() const
                 QStringLiteral("RSI"), QStringLiteral("MACD"), QStringLiteral("BOLLINGER"),
                 QStringLiteral("ATR"), QStringLiteral("VOLUME_SMA"), QStringLiteral("ROC"),
                 QStringLiteral("VWAP"), QStringLiteral("PP_FLOW")}},
+            {QStringLiteral("crossIndicators"), QStringList{QStringLiteral("RANK"), QStringLiteral("ZSCORE"),
+                QStringLiteral("PERCENTILE"), QStringLiteral("MEAN"), QStringLiteral("MEDIAN"),
+                QStringLiteral("PEER")}},
             {QStringLiteral("comparisonOperators"), QStringList{QStringLiteral("gt"), QStringLiteral("gte"),
                 QStringLiteral("lt"), QStringLiteral("lte"), QStringLiteral("eq"),
                 QStringLiteral("crossesAbove"), QStringLiteral("crossesBelow")}},

@@ -30,11 +30,13 @@ private:
                             QString *error) const;
     bool validateCondition(const QJsonObject &condition, const ParameterMap &parameters,
                            const QString &path, int depth, bool v2,
-                           const QSet<QString> &aliases, int *nodeCount,
+                           const QSet<QString> &aliases,
+                           const QSet<QString> &crossAliases, int *nodeCount,
                            QString *error) const;
     bool validateOperand(const QJsonObject &operand, const ParameterMap &parameters,
                          const QString &path, int depth, bool v2,
-                         const QSet<QString> &aliases, int *nodeCount,
+                         const QSet<QString> &aliases,
+                         const QSet<QString> &crossAliases, int *nodeCount,
                          QString *error) const;
 };
 

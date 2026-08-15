@@ -20,6 +20,18 @@ bool fail(QString *error, const QString &message)
     return false;
 }
 
+CustomOperandKind fieldKind(const QString &field)
+{
+    static const QHash<QString, CustomOperandKind> fields {
+        {QStringLiteral("open"), CustomOperandKind::Open},
+        {QStringLiteral("high"), CustomOperandKind::High},
+        {QStringLiteral("low"), CustomOperandKind::Low},
+        {QStringLiteral("close"), CustomOperandKind::Close},
+        {QStringLiteral("volume"), CustomOperandKind::Volume}
+    };
+    return fields.value(field, CustomOperandKind::Close);
+}
+
 class PlanBuilder {
 public:
     PlanBuilder(const QVariantMap &parameters, CompiledCustomStrategy *plan,
@@ -104,6 +116,49 @@ public:
 
     bool hasCross() const { return m_hasCross; }
 
+    int compileCrossIndicator(const QJsonObject &object)
+    {
+        CompiledCrossIndicator indicator;
+        const QString name = object.value(QStringLiteral("indicator")).toString().toUpper();
+        if (name == QStringLiteral("RANK")) indicator.kind = CustomCrossIndicatorKind::Rank;
+        else if (name == QStringLiteral("ZSCORE")) indicator.kind = CustomCrossIndicatorKind::ZScore;
+        else if (name == QStringLiteral("PERCENTILE")) indicator.kind = CustomCrossIndicatorKind::Percentile;
+        else if (name == QStringLiteral("MEAN")) indicator.kind = CustomCrossIndicatorKind::Mean;
+        else if (name == QStringLiteral("MEDIAN")) indicator.kind = CustomCrossIndicatorKind::Median;
+        else if (name == QStringLiteral("PEER")) indicator.kind = CustomCrossIndicatorKind::Peer;
+        else {
+            fail(m_error, QStringLiteral("编译时遇到未知横截面指标：%1").arg(name));
+            return -1;
+        }
+        indicator.alias = object.value(QStringLiteral("alias")).toString();
+        if (indicator.kind == CustomCrossIndicatorKind::Peer) {
+            indicator.peerSymbol = object.value(QStringLiteral("symbol")).toString();
+            indicator.peerField = fieldKind(object.value(QStringLiteral("field")).toString());
+        } else {
+            const QJsonObject of = object.value(QStringLiteral("of")).toObject();
+            if (of.contains(QStringLiteral("field"))) {
+                indicator.field = fieldKind(of.value(QStringLiteral("field")).toString());
+            } else if (of.contains(QStringLiteral("indicator"))) {
+                const int index = compileIndicator(of);
+                if (index < 0) return -1;
+                indicator.indicatorIndex = index;
+            }
+            if (indicator.kind == CustomCrossIndicatorKind::Rank) {
+                indicator.ascending = object.value(QStringLiteral("ascending")).toBool(false);
+            }
+        }
+        const int row = m_plan->crossIndicators.size();
+        m_plan->crossIndicators.append(indicator);
+        m_crossAliasRows.insert(indicator.alias, row);
+        return row;
+    }
+
+    int crossAliasRow(const QString &alias) const
+    {
+        const auto row = m_crossAliasRows.constFind(alias);
+        return row == m_crossAliasRows.constEnd() ? -1 : row.value();
+    }
+
 private:
     void registerOperandAlias(const QJsonObject &operand)
     {
@@ -173,6 +228,15 @@ private:
             }
             operand.kind = CustomOperandKind::Indicator;
             operand.indicatorIndex = row.value();
+        } else if (object.contains(QStringLiteral("cross"))) {
+            const QString alias = object.value(QStringLiteral("cross")).toString();
+            const auto row = m_crossAliasRows.constFind(alias);
+            if (row == m_crossAliasRows.constEnd()) {
+                fail(m_error, QStringLiteral("编译时遇到未定义的横截面指标别名：%1").arg(alias));
+                return -1;
+            }
+            operand.kind = CustomOperandKind::Cross;
+            operand.crossIndex = row.value();
         } else {
             const int indicatorIndex = compileIndicator(object);
             if (indicatorIndex < 0) return -1;
@@ -251,6 +315,7 @@ private:
     QString *m_error = nullptr;
     QHash<QString, int> m_indicatorRows;
     QHash<QString, int> m_aliasRows;
+    QHash<QString, int> m_crossAliasRows;
     bool m_hasCross = false;
 };
 
@@ -348,14 +413,36 @@ std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
         .toString(QStringLiteral("triggerClose"));
     plan.signalPriceMode = priceMode == QStringLiteral("nextOpen")
         ? CustomSignalPriceMode::NextOpen : CustomSignalPriceMode::TriggerClose;
-    PlanBuilder builder(normalized, &plan, validated.schemaVersion == 2, error);
-    if (validated.schemaVersion == 2) {
+    PlanBuilder builder(normalized, &plan, validated.schemaVersion >= 2, error);
+    if (validated.schemaVersion >= 2) {
         builder.preRegisterSeries(
             validated.document.value(QStringLiteral("series")).toArray());
         builder.preRegisterAliases(
             validated.document.value(QStringLiteral("entry")).toObject());
         builder.preRegisterAliases(
             validated.document.value(QStringLiteral("exit")).toObject());
+    }
+    if (validated.schemaVersion == 3) {
+        const QJsonArray symbols = validated.document.value(QStringLiteral("universe"))
+            .toObject().value(QStringLiteral("symbols")).toArray();
+        for (const QJsonValue &value : symbols) {
+            plan.universeSymbols.append(value.toString());
+        }
+        const QJsonArray cross = validated.document
+            .value(QStringLiteral("crossIndicators")).toArray();
+        for (const QJsonValue &value : cross) {
+            if (builder.compileCrossIndicator(value.toObject()) < 0) return std::nullopt;
+        }
+        const QJsonObject selection = validated.document
+            .value(QStringLiteral("selection")).toObject();
+        if (!selection.isEmpty()) {
+            const int rankBy = builder.crossAliasRow(
+                selection.value(QStringLiteral("rankBy")).toString());
+            if (rankBy < 0) return std::nullopt;
+            plan.selection.rankByIndex = rankBy;
+            plan.selection.count = selection.value(QStringLiteral("count")).toInt();
+            plan.selection.ascending = selection.value(QStringLiteral("ascending")).toBool(false);
+        }
     }
     plan.entryCondition = builder.compileCondition(
         validated.document.value(QStringLiteral("entry")).toObject());

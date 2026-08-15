@@ -2,6 +2,7 @@
 
 #include "domain/CustomStrategyTypes.h"
 
+#include <QStringList>
 #include <QVariantMap>
 #include <QVector>
 
@@ -11,7 +12,9 @@ namespace pp {
 
 enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma,
                                  Roc, Vwap, PpFlow };
-enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator };
+enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator,
+                               Cross };
+enum class CustomCrossIndicatorKind { Rank, ZScore, Percentile, Mean, Median, Peer };
 enum class CustomSignalPriceMode { TriggerClose, NextOpen };
 enum class CustomConditionOp {
     And, Or, Not, Greater, GreaterOrEqual, Less, LessOrEqual, Equal,
@@ -32,10 +35,28 @@ struct CompiledCustomIndicator {
     QString cacheKey() const;
 };
 
+// 横截面指标：在同一帧的 n 只股票之间计算的统计。
+struct CompiledCrossIndicator {
+    CustomCrossIndicatorKind kind = CustomCrossIndicatorKind::Rank;
+    QString alias;
+    CustomOperandKind field = CustomOperandKind::Close; // of.field 时使用
+    int indicatorIndex = -1;                            // of.indicator 时使用
+    bool ascending = false;
+    QString peerSymbol;                                 // PEER 专用
+    CustomOperandKind peerField = CustomOperandKind::Close; // PEER 专用
+};
+
+struct CompiledSelection {
+    int rankByIndex = -1; // crossIndicators 索引
+    int count = 0;
+    bool ascending = false;
+};
+
 struct CompiledCustomOperand {
     CustomOperandKind kind = CustomOperandKind::Constant;
     double constant = 0.0;
     int indicatorIndex = -1;
+    int crossIndex = -1; // 引用 crossIndicators 索引
 };
 
 struct CompiledCustomCondition {
@@ -61,6 +82,9 @@ struct CompiledCustomStrategy {
     int version = 1;
     QVariantMap normalizedParameters;
     QVector<CompiledCustomIndicator> indicators;
+    QVector<CompiledCrossIndicator> crossIndicators;
+    CompiledSelection selection;
+    QStringList universeSymbols;
     QVector<CompiledCustomOperand> operands;
     QVector<CompiledCustomCondition> conditions;
     int entryCondition = -1;

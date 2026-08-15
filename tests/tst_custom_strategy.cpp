@@ -32,6 +32,8 @@ private slots:
     void compilesCrossConditionsAndResetsDeterministically();
     void validatesCompilesAndExecutesPositionRiskRules();
     void enforcesWorkspaceRunAndResultIdentity();
+    void v3SupportsUniverseCrossIndicatorsAndSelection();
+    void v3RejectsInvalidCrossSyntax();
 };
 
 static QJsonObject indicator(const QString &name, const QJsonValue &period)
@@ -989,6 +991,103 @@ void CustomStrategyTest::validatesCompilesAndExecutesPositionRiskRules()
     QCOMPARE(defaultsPlan->rules.stopLossPercent, 0.0);
     QCOMPARE(defaultsPlan->rules.maximumHoldingBars, 0);
     QVERIFY(defaultsPlan->rules.tPlusOne);
+}
+
+void CustomStrategyTest::v3SupportsUniverseCrossIndicatorsAndSelection()
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("schemaVersion"), 3);
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("universe"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("explicit")},
+        {QStringLiteral("symbols"), QJsonArray{QStringLiteral("600519"),
+                                               QStringLiteral("000001"),
+                                               QStringLiteral("600036")}}});
+    document.insert(QStringLiteral("crossIndicators"), QJsonArray{
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("mom_rank")},
+                    {QStringLiteral("indicator"), QStringLiteral("RANK")},
+                    {QStringLiteral("of"), QJsonObject{{QStringLiteral("indicator"), QStringLiteral("ROC")},
+                                                       {QStringLiteral("period"), 20}}},
+                    {QStringLiteral("ascending"), false}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("close_z")},
+                    {QStringLiteral("indicator"), QStringLiteral("ZSCORE")},
+                    {QStringLiteral("of"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}}},
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("peer_spread")},
+                    {QStringLiteral("indicator"), QStringLiteral("PEER")},
+                    {QStringLiteral("symbol"), QStringLiteral("600519")},
+                    {QStringLiteral("field"), QStringLiteral("close")}}});
+    document.insert(QStringLiteral("selection"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("topN")},
+        {QStringLiteral("rankBy"), QStringLiteral("mom_rank")},
+        {QStringLiteral("count"), 3}});
+    document.insert(QStringLiteral("position"), QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("equalWeight")}});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gte")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("cross"), QStringLiteral("mom_rank")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 1}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("cross"), QStringLiteral("mom_rank")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 3}}}});
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->universeSymbols.size(), 3);
+    QCOMPARE(plan->universeSymbols.first(), QStringLiteral("600519"));
+    QCOMPARE(plan->crossIndicators.size(), 3);
+    QCOMPARE(plan->selection.count, 3);
+    QCOMPARE(plan->selection.rankByIndex, 0);
+    // 条件里的 cross 操作数编译为 Cross 类型并指向横截面指标。
+    bool hasCrossOperand = false;
+    for (const CompiledCustomOperand &operand : plan->operands) {
+        if (operand.kind == CustomOperandKind::Cross) hasCrossOperand = true;
+    }
+    QVERIFY(hasCrossOperand);
+}
+
+void CustomStrategyTest::v3RejectsInvalidCrossSyntax()
+{
+    CustomStrategyValidator validator;
+    QString error;
+
+    QJsonObject v1WithUniverse = validDocument();
+    v1WithUniverse.insert(QStringLiteral("universe"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("explicit")},
+        {QStringLiteral("symbols"), QJsonArray{QStringLiteral("600519")}}});
+    QVERIFY(!validator.validate(v1WithUniverse, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("schemaVersion=3")));
+
+    QJsonObject v3NoUniverse = validDocument();
+    v3NoUniverse.insert(QStringLiteral("schemaVersion"), 3);
+    QVERIFY(!validator.validate(v3NoUniverse, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("universe")));
+
+    QJsonObject v3 = validDocument();
+    v3.insert(QStringLiteral("schemaVersion"), 3);
+    v3.insert(QStringLiteral("parameters"), QJsonArray{});
+    v3.insert(QStringLiteral("universe"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("explicit")},
+        {QStringLiteral("symbols"), QJsonArray{QStringLiteral("600519")}}});
+    v3.insert(QStringLiteral("crossIndicators"), QJsonArray{
+        QJsonObject{{QStringLiteral("alias"), QStringLiteral("r")},
+                    {QStringLiteral("indicator"), QStringLiteral("RANK")},
+                    {QStringLiteral("of"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}}}});
+    v3.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gte")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("cross"), QStringLiteral("undefined_alias")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 1}}}});
+    v3.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("cross"), QStringLiteral("r")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 3}}}});
+    QVERIFY(!validator.validate(v3, nullptr, &error));
+    QVERIFY(error.contains(QStringLiteral("横截面指标")));
 }
 
 } // namespace pp
