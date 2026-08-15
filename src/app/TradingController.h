@@ -56,6 +56,7 @@
 #include "strategy/CustomStrategyRuntimeManager.h"
 #include "strategy/FixedAmountPositionSizer.h"
 #include "plugin/StrategyPluginManager.h"
+#include "services/ParameterGridBacktestService.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
 
@@ -85,6 +86,9 @@ class TradingController final : public QObject {
                NOTIFY customStrategyReplayStateChanged)
     Q_PROPERTY(int customStrategyReplayTotalBars READ customStrategyReplayTotalBars
                NOTIFY customStrategyReplayStateChanged)
+    Q_PROPERTY(bool parameterGridRunning READ parameterGridRunning NOTIFY parameterGridStateChanged)
+    Q_PROPERTY(QString parameterGridError READ parameterGridError NOTIFY parameterGridStateChanged)
+    Q_PROPERTY(QVariantList parameterGridResults READ parameterGridResults NOTIFY parameterGridStateChanged)
     Q_PROPERTY(QAbstractItemModel *customStrategyModel READ customStrategyModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *searchModel READ searchModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *instrumentModel READ instrumentModel CONSTANT)
@@ -741,6 +745,9 @@ public:
     bool customStrategyReplayRunning() const;
     int customStrategyReplayedBars() const;
     int customStrategyReplayTotalBars() const;
+    bool parameterGridRunning() const;
+    QString parameterGridError() const;
+    QVariantList parameterGridResults() const;
     int aShareUniverseCount() const;
     int aShareUniverseSourceCount() const;
     int aShareUniverseRejectedCount() const;
@@ -927,6 +934,10 @@ public:
                                                     const QVariantMap &config);
     Q_INVOKABLE void setStrategyPluginDirectory(const QString &path);
     Q_INVOKABLE QString strategyPluginDirectory() const;
+    Q_INVOKABLE qulonglong runParameterGridBacktest(const QString &strategyId, int version,
+                                                    const QString &symbol, int periodSeconds,
+                                                    int barCount, const QVariantList &axes);
+    Q_INVOKABLE void cancelParameterGridBacktest();
     Q_INVOKABLE bool startCustomStrategyReplay(const QString &strategyId, const QString &symbol,
                                                int periodSeconds, int barCount, int intervalMs);
     Q_INVOKABLE void stopCustomStrategyReplay();
@@ -987,6 +998,7 @@ signals:
     void strategyExecutionConfigChanged(const QString &strategyId);
     void notificationSettingsChanged();
     void customStrategyReplayStateChanged();
+    void parameterGridStateChanged();
     void crossSectionalFrameUpdated(const pp::FactorFrame &frame);
     void marketSnapshotChanged();
     void snapshotQueryStateChanged();
@@ -1009,6 +1021,9 @@ private:
     void handleRealtimeSignal(const TradeSignal &signal);
     void handleStrategySignal(const QString &strategyId, const TradeSignal &signal);
     void handleCustomStrategyReplayTick();
+    void handleParameterGridCompleted(quint64 requestId,
+                                      const QVector<ParameterGridResult> &results);
+    void handleParameterGridFailed(quint64 requestId, const QString &error);
     void handleBacktestPoint(const CandlePoint &point);
     void handleBacktestTrade(const BacktestTrade &trade);
     void handleHistoryDownloadReady(quint64 requestId,
@@ -1165,6 +1180,10 @@ private:
     QVector<Candle> m_customStrategyReplayCandles;
     int m_customStrategyReplayIndex = 0;
     QString m_customStrategyReplaySymbol;
+    ParameterGridBacktestService m_parameterGridBacktestService;
+    QVector<ParameterGridResult> m_parameterGridResults;
+    QString m_parameterGridError;
+    quint64 m_parameterGridRequestId = 0;
     BacktestConfig m_pendingBacktestConfig;
     std::optional<CompiledCustomStrategy> m_pendingCustomBacktestPlan;
     std::optional<BacktestResult> m_displayedBacktestResult;

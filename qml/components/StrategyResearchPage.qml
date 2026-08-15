@@ -586,6 +586,19 @@ Item {
                     theme: root.theme; controller: root.controller
                 }
             }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 420
+                visible: root.customMode
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                Text { x: 18; y: 14; text: "参数网格扫描"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "笛卡尔积回测 · 收益率降序"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                ParameterGridPanel {
+                    x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
+                    theme: root.theme; controller: root.controller
+                }
+            }
         }
     }
 }

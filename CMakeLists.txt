@@ -95,6 +95,8 @@ qt_add_executable(PPTrader
     src/plugin/StrategyPluginManager.h
     src/services/BacktestEngine.cpp
     src/services/BacktestEngine.h
+    src/services/BacktestEvaluator.cpp
+    src/services/BacktestEvaluator.h
     src/services/BacktestDatasetService.cpp
     src/services/BacktestDatasetService.h
     src/services/BatchBacktestService.cpp
@@ -156,6 +158,10 @@ qt_add_executable(PPTrader
     src/services/CrossSectionalBacktestService.h
     src/services/PortfolioBacktestService.cpp
     src/services/PortfolioBacktestService.h
+    src/services/ParameterGridScanner.cpp
+    src/services/ParameterGridScanner.h
+    src/services/ParameterGridBacktestService.cpp
+    src/services/ParameterGridBacktestService.h
     src/services/NasDataNodeClient.cpp
     src/services/NasDataNodeClient.h
     src/services/NasSyncStateStore.cpp
@@ -299,6 +305,7 @@ qt_add_qml_module(PPTrader
         qml/components/MarketSnapshotPage.qml
         qml/components/AppStatusBar.qml
         qml/components/ExecutionApprovalPanel.qml
+        qml/components/ParameterGridPanel.qml
     SOURCES
         src/visualization/CrossSectionPlotData.cpp
         src/visualization/CrossSectionPlotData.h
@@ -997,6 +1004,31 @@ if(BUILD_TESTING)
     target_include_directories(tst_custom_strategy_execution PRIVATE src)
     target_link_libraries(tst_custom_strategy_execution PRIVATE Qt6::Core Qt6::Test)
 
+    qt_add_executable(tst_parameter_grid_scanner
+        tests/tst_parameter_grid_scanner.cpp
+        src/domain/BacktestDatasetTypes.h
+        src/domain/BacktestTypes.h
+        src/domain/CustomStrategyTypes.cpp
+        src/domain/CustomStrategyTypes.h
+        src/domain/MarketTypes.h
+        src/services/BacktestEvaluator.cpp
+        src/services/BacktestEvaluator.h
+        src/services/ParameterGridScanner.cpp
+        src/services/ParameterGridScanner.h
+        src/strategy/BacktestStrategy.h
+        src/strategy/CustomBacktestStrategy.cpp
+        src/strategy/CustomBacktestStrategy.h
+        src/strategy/CustomIndicatorRuntime.cpp
+        src/strategy/CustomIndicatorRuntime.h
+        src/strategy/CustomStrategyCompiler.cpp
+        src/strategy/CustomStrategyCompiler.h
+        src/strategy/CustomStrategyValidator.cpp
+        src/strategy/CustomStrategyValidator.h
+        src/strategy/Strategy.h
+    )
+    target_include_directories(tst_parameter_grid_scanner PRIVATE src)
+    target_link_libraries(tst_parameter_grid_scanner PRIVATE Qt6::Core Qt6::Test)
+
     qt_add_executable(tst_workspace_instrument_selection
         tests/tst_workspace_instrument_selection.cpp
         src/app/WorkspaceInstrumentSelectionState.cpp
@@ -1211,6 +1243,7 @@ if(BUILD_TESTING)
     add_test(NAME cross_section_performance COMMAND tst_cross_section_performance)
     add_test(NAME custom_strategy COMMAND tst_custom_strategy)
     add_test(NAME custom_strategy_execution COMMAND tst_custom_strategy_execution)
+    add_test(NAME parameter_grid_scanner COMMAND tst_parameter_grid_scanner)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)
     add_test(NAME aligned_bar_series COMMAND tst_aligned_bar_series)
     add_test(NAME cross_sectional_backtest COMMAND tst_cross_sectional_backtest)

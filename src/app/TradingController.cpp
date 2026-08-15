@@ -348,6 +348,10 @@ TradingController::TradingController(QObject *parent)
     m_customStrategyReplayTimer.setSingleShot(false);
     connect(&m_customStrategyReplayTimer, &QTimer::timeout,
             this, &TradingController::handleCustomStrategyReplayTick);
+    connect(&m_parameterGridBacktestService, &ParameterGridBacktestService::completed,
+            this, &TradingController::handleParameterGridCompleted);
+    connect(&m_parameterGridBacktestService, &ParameterGridBacktestService::failed,
+            this, &TradingController::handleParameterGridFailed);
     m_tradingPersistenceTimer.setSingleShot(true);
     m_tradingPersistenceTimer.setInterval(1000);
     connect(&m_tradingPersistenceTimer, &QTimer::timeout,
@@ -4773,6 +4777,132 @@ void TradingController::setStrategyPluginDirectory(const QString &path)
 QString TradingController::strategyPluginDirectory() const
 {
     return m_strategyPluginManager.pluginDirectory();
+}
+
+bool TradingController::parameterGridRunning() const
+{
+    return m_parameterGridBacktestService.isBusy();
+}
+
+QString TradingController::parameterGridError() const
+{
+    return m_parameterGridError;
+}
+
+QVariantList TradingController::parameterGridResults() const
+{
+    QVariantList result;
+    result.reserve(m_parameterGridResults.size());
+    for (const ParameterGridResult &row : m_parameterGridResults) {
+        result.append(row.toVariantMap());
+    }
+    return result;
+}
+
+qulonglong TradingController::runParameterGridBacktest(const QString &strategyId, int version,
+                                                       const QString &symbol, int periodSeconds,
+                                                       int barCount, const QVariantList &axes)
+{
+    if (m_parameterGridBacktestService.isBusy()) {
+        setStatusText(QStringLiteral("参数网格扫描正在运行"));
+        return 0;
+    }
+
+    const CustomStrategyDefinition *definition = nullptr;
+    for (const CustomStrategyDefinition &candidate : m_customStrategyDefinitions) {
+        if (candidate.strategyId == strategyId && candidate.version == version) {
+            definition = &candidate;
+            break;
+        }
+    }
+    if (!definition) {
+        m_parameterGridError = QStringLiteral("未找到自定义策略：%1 v%2").arg(strategyId).arg(version);
+        emit parameterGridStateChanged();
+        setStatusText(m_parameterGridError);
+        return 0;
+    }
+
+    Instrument instrument = findInstrument(symbol.trimmed());
+    if (instrument.symbol.isEmpty()) {
+        instrument.symbol = symbol.trimmed();
+        instrument.name = symbol.trimmed();
+        instrument.market = Market::AShare;
+    }
+    if (periodSeconds <= 0) periodSeconds = 60;
+    if (barCount <= 0) barCount = 300;
+    if (barCount > 2000) barCount = 2000;
+
+    const QVector<Candle> candles = m_dataStore.loadRecentCandlesFromSource(
+        instrument, periodSeconds, barCount, QStringLiteral("raw_tick_cache_v1"));
+    if (candles.isEmpty()) {
+        m_parameterGridError = QStringLiteral("没有可用于扫描的 raw_tick_cache_v1 本地 K 线：%1").arg(symbol);
+        emit parameterGridStateChanged();
+        setStatusText(m_parameterGridError);
+        return 0;
+    }
+
+    QVector<ParameterGridAxis> gridAxes;
+    for (const QVariant &entry : axes) {
+        const QVariantMap map = entry.toMap();
+        ParameterGridAxis axis;
+        axis.key = map.value(QStringLiteral("key")).toString();
+        const QVariantList values = map.value(QStringLiteral("values")).toList();
+        for (const QVariant &value : values) {
+            axis.values.append(value.toDouble());
+        }
+        if (!axis.key.isEmpty() && !axis.values.isEmpty()) {
+            gridAxes.append(axis);
+        }
+    }
+
+    BacktestConfig config;
+    config.instrument = instrument;
+    config.periodSeconds = periodSeconds;
+    config.initialCapital = m_backtestConfiguredInitialCapital;
+    config.commissionRate = std::max(0.0, m_backtestCommissionRate);
+    config.slippageRate = std::max(0.0, m_backtestSlippageRate);
+    config.lotSize = 100;
+
+    m_parameterGridError.clear();
+    m_parameterGridResults.clear();
+    quint64 requestId = ++m_parameterGridRequestId;
+    if (requestId == 0) requestId = ++m_parameterGridRequestId;
+    emit parameterGridStateChanged();
+    if (!m_parameterGridBacktestService.request(requestId, *definition, gridAxes, candles, config)) {
+        m_parameterGridError = QStringLiteral("参数网格扫描服务不可用");
+        emit parameterGridStateChanged();
+        setStatusText(m_parameterGridError);
+        return 0;
+    }
+    setStatusText(QStringLiteral("参数网格扫描开始：%1 · %2 根 · 组合 %3")
+        .arg(symbol).arg(candles.size())
+        .arg(ParameterGridScanner::expandGrid(gridAxes).size()));
+    return requestId;
+}
+
+void TradingController::cancelParameterGridBacktest()
+{
+    m_parameterGridBacktestService.cancel();
+    setStatusText(QStringLiteral("参数网格扫描已请求取消"));
+}
+
+void TradingController::handleParameterGridCompleted(quint64 requestId,
+                                                     const QVector<ParameterGridResult> &results)
+{
+    if (requestId != m_parameterGridRequestId) return;
+    m_parameterGridResults = results;
+    m_parameterGridError.clear();
+    emit parameterGridStateChanged();
+    setStatusText(QStringLiteral("参数网格扫描完成：%1 组结果").arg(results.size()));
+}
+
+void TradingController::handleParameterGridFailed(quint64 requestId, const QString &error)
+{
+    if (requestId != m_parameterGridRequestId) return;
+    m_parameterGridError = error;
+    m_parameterGridResults.clear();
+    emit parameterGridStateChanged();
+    setStatusText(QStringLiteral("参数网格扫描失败：%1").arg(error));
 }
 
 bool TradingController::customStrategyReplayRunning() const
