@@ -1,6 +1,7 @@
 #include "strategy/CustomStrategyValidator.h"
 #include "strategy/CustomStrategyCompiler.h"
 #include "strategy/CustomExecutionStrategy.h"
+#include "strategy/CustomStrategyRuntimeManager.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
 #include "strategy/DefaultSignalExecutionPolicy.h"
@@ -96,6 +97,7 @@ private slots:
     void executionStrategyEmitsEntryAndExit();
     void strategyEngineManagesExecutionStrategy();
     void coordinatorProcessesExecutionSignal();
+    void runtimeManagerManagesPluginLifecycle();
 };
 
 void CustomStrategyExecutionTest::validatorAcceptsMockExecutionScope()
@@ -216,6 +218,49 @@ void CustomStrategyExecutionTest::coordinatorProcessesExecutionSignal()
     QCOMPARE(port.requests.size(), 1);
     QVERIFY(port.requests.first().side == OrderSide::Buy);
     QVERIFY(port.requests.first().quantity > 0.0);
+}
+
+void CustomStrategyExecutionTest::runtimeManagerManagesPluginLifecycle()
+{
+    StrategyEngine engine;
+    CustomStrategyRuntimeManager manager(&engine);
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY(validator.validate(executionDocument(), &definition, &error));
+
+    const Instrument instrument = makeInstrument();
+    QVERIFY(manager.load(definition, instrument, &error));
+    QCOMPARE(manager.state(QStringLiteral("custom_exec_close")),
+             CustomStrategyRuntimeState::Loaded);
+    QCOMPARE(engine.strategyCount(), 0); // 加载但未激活
+
+    QVERIFY(manager.activate(QStringLiteral("custom_exec_close")));
+    QCOMPARE(manager.state(QStringLiteral("custom_exec_close")),
+             CustomStrategyRuntimeState::Active);
+    QCOMPARE(engine.strategyCount(), 1);
+
+    QVERIFY(manager.deactivate(QStringLiteral("custom_exec_close")));
+    QCOMPARE(manager.state(QStringLiteral("custom_exec_close")),
+             CustomStrategyRuntimeState::Loaded);
+    QCOMPARE(engine.strategyCount(), 0); // 已退出但保留编译产物
+
+    QVERIFY(manager.activate(QStringLiteral("custom_exec_close")));
+    QCOMPARE(engine.strategyCount(), 1);
+
+    QVERIFY(manager.unload(QStringLiteral("custom_exec_close")));
+    QCOMPARE(manager.state(QStringLiteral("custom_exec_close")),
+             CustomStrategyRuntimeState::Unloaded);
+    QCOMPARE(engine.strategyCount(), 0);
+    QVERIFY(manager.plugin(QStringLiteral("custom_exec_close")) == nullptr);
+
+    // load 幂等：重复加载不重复计数。
+    QVERIFY(manager.load(definition, instrument, &error));
+    QVERIFY(manager.load(definition, instrument, &error));
+    QCOMPARE(manager.plugins().size(), 1);
+    QVERIFY(manager.plugins().first().toVariantMap().value(QStringLiteral("strategyId")).toString()
+            == QStringLiteral("custom_exec_close"));
 }
 
 } // namespace pp

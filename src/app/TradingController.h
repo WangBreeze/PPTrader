@@ -53,6 +53,7 @@
 #include "strategy/CustomStrategyValidator.h"
 #include "strategy/CustomStrategyCompiler.h"
 #include "strategy/CustomExecutionStrategy.h"
+#include "strategy/CustomStrategyRuntimeManager.h"
 #include "strategy/FixedAmountPositionSizer.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
@@ -907,6 +908,7 @@ public:
                                                    const QString &symbol);
     Q_INVOKABLE bool disableCustomStrategyExecution(const QString &strategyId);
     Q_INVOKABLE bool isCustomStrategyExecuting(const QString &strategyId) const;
+    Q_INVOKABLE QVariantList customStrategyRuntimePlugins() const;
     Q_INVOKABLE bool requestMarketSnapshot(const QDateTime &requestedTime);
     Q_INVOKABLE bool requestMarketSnapshotAt(const QString &marketTime);
     Q_INVOKABLE bool requestLatestMarketSnapshot();
@@ -1129,6 +1131,7 @@ private:
     WebhookNotificationService m_webhookNotifications;
     NotificationDispatcher m_notificationDispatcher;
     StrategyEngine m_strategyEngine;
+    CustomStrategyRuntimeManager m_customStrategyRuntimeManager;
     WorkspaceInstrumentSelectionState m_workspaceInstrumentSelections;
     InstrumentListModel m_instrumentModel;
     QVector<Instrument> m_aShareUniverse;

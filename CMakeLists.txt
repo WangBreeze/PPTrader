@@ -215,6 +215,8 @@ qt_add_executable(PPTrader
     src/strategy/CustomIndicatorRuntime.h
     src/strategy/CustomStrategyCompiler.cpp
     src/strategy/CustomStrategyCompiler.h
+    src/strategy/CustomStrategyRuntimeManager.cpp
+    src/strategy/CustomStrategyRuntimeManager.h
     src/strategy/CustomStrategyValidator.cpp
     src/strategy/CustomStrategyValidator.h
     src/strategy/BollingerMeanReversionStrategy.cpp
@@ -949,6 +951,8 @@ if(BUILD_TESTING)
         src/strategy/CustomStrategyCompiler.h
         src/strategy/CustomExecutionStrategy.cpp
         src/strategy/CustomExecutionStrategy.h
+        src/strategy/CustomStrategyRuntimeManager.cpp
+        src/strategy/CustomStrategyRuntimeManager.h
         src/strategy/CustomIndicatorRuntime.cpp
         src/strategy/CustomIndicatorRuntime.h
         src/strategy/Strategy.h

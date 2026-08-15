@@ -162,6 +162,7 @@ TradingController::TradingController(QObject *parent)
     , m_tradingAccount(&m_broker)
     , m_strategyExecutionCoordinator(&m_tradingAccount, &m_positionSizer,
                                      &m_executionPolicy, &m_dataStore)
+    , m_customStrategyRuntimeManager(&m_strategyEngine)
 {
     m_historyDownloadRouter.addProvider(&m_tushareHistoryFetcher);
     m_historyDownloadRouter.addProvider(&m_baostockHistoryFetcher);
@@ -4585,7 +4586,7 @@ void TradingController::persistNotificationSettings() const
 bool TradingController::enableCustomStrategyExecution(const QString &strategyId, int version,
                                                       const QString &symbol)
 {
-    if (m_strategyEngine.strategyById(strategyId) != nullptr) {
+    if (m_customStrategyRuntimeManager.state(strategyId) == CustomStrategyRuntimeState::Active) {
         return true;
     }
 
@@ -4605,13 +4606,6 @@ bool TradingController::enableCustomStrategyExecution(const QString &strategyId,
         return false;
     }
 
-    QString error;
-    const auto plan = m_customStrategyCompiler.compile(*definition, {}, &error);
-    if (!plan) {
-        setStatusText(QStringLiteral("策略编译失败：%1").arg(error));
-        return false;
-    }
-
     Instrument instrument = findInstrument(symbol.trimmed());
     if (instrument.symbol.isEmpty()) {
         instrument.symbol = symbol.trimmed();
@@ -4619,11 +4613,23 @@ bool TradingController::enableCustomStrategyExecution(const QString &strategyId,
         instrument.market = Market::AShare;
     }
 
-    auto *strategy = new CustomExecutionStrategy(*plan, instrument);
-    m_strategyEngine.addStrategy(strategy);
+    QString error;
+    if (!m_customStrategyRuntimeManager.load(*definition, instrument, &error)) {
+        setStatusText(QStringLiteral("策略加载失败：%1").arg(error));
+        return false;
+    }
+    if (!m_customStrategyRuntimeManager.activate(strategyId)) {
+        setStatusText(QStringLiteral("策略激活失败：%1").arg(strategyId));
+        return false;
+    }
+
+    const CustomStrategyPlugin *plugin = m_customStrategyRuntimeManager.plugin(strategyId);
     ensureStrategyExecutionConfiguration(strategyId, 0);
-    m_strategyModel.addStrategy({strategyId, instrument.symbol, strategy->displayName(),
-        QStringLiteral("自定义策略模拟执行（%1 v%2）").arg(plan->name).arg(plan->version),
+    m_strategyModel.addStrategy({strategyId, instrument.symbol,
+        plugin ? plugin->plan.name : strategyId,
+        QStringLiteral("自定义策略模拟执行（%1 v%2）")
+            .arg(plugin ? plugin->plan.name : strategyId)
+            .arg(plugin ? plugin->plan.version : version),
         0.0, 0, true});
     emit strategyStateChanged();
     setStatusText(QStringLiteral("自定义策略已进入模拟执行：%1 · %2")
@@ -4633,20 +4639,34 @@ bool TradingController::enableCustomStrategyExecution(const QString &strategyId,
 
 bool TradingController::disableCustomStrategyExecution(const QString &strategyId)
 {
-    if (!m_strategyEngine.removeStrategy(strategyId)) {
-        setStatusText(QStringLiteral("自定义策略未在模拟执行：%1").arg(strategyId));
+    const CustomStrategyRuntimeState previousState =
+        m_customStrategyRuntimeManager.state(strategyId);
+    if (previousState == CustomStrategyRuntimeState::Unloaded) {
+        setStatusText(QStringLiteral("自定义策略未加载：%1").arg(strategyId));
         return false;
     }
+    m_customStrategyRuntimeManager.unload(strategyId);
     m_strategyModel.removeStrategy(strategyId);
     m_strategyExecutionCoordinator.removeConfiguration(strategyId);
     emit strategyStateChanged();
-    setStatusText(QStringLiteral("自定义策略已停止模拟执行：%1").arg(strategyId));
+    setStatusText(QStringLiteral("自定义策略已卸载：%1").arg(strategyId));
     return true;
 }
 
 bool TradingController::isCustomStrategyExecuting(const QString &strategyId) const
 {
-    return m_strategyEngine.strategyById(strategyId) != nullptr;
+    return m_customStrategyRuntimeManager.state(strategyId) == CustomStrategyRuntimeState::Active;
+}
+
+QVariantList TradingController::customStrategyRuntimePlugins() const
+{
+    QVariantList result;
+    const QVector<CustomStrategyPlugin> plugins = m_customStrategyRuntimeManager.plugins();
+    result.reserve(plugins.size());
+    for (const CustomStrategyPlugin &plugin : plugins) {
+        result.append(plugin.toVariantMap());
+    }
+    return result;
 }
 
 bool TradingController::requestMarketSnapshot(const QDateTime &requestedTime)
