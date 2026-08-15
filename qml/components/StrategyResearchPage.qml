@@ -469,7 +469,13 @@ Item {
                     height: parent.height - y - 20
                     spacing: 16
                     Rectangle {
-                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 420
+                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 360
+                        color: root.theme.bgInput; radius: 8; border.color: root.theme.border
+                        Text { x: 12; y: 8; text: "K 线与买卖点"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
+                        BacktestCandleChart { anchors.fill: parent; anchors.margins: 8; anchors.topMargin: 30; theme: root.theme; model: root.controller.candleModel }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
                         color: root.theme.bgInput; radius: 8; border.color: root.theme.border
                         BacktestEquityChart { anchors.fill: parent; anchors.margins: 8; theme: root.theme; model: root.controller.equityCurveModel }
                     }

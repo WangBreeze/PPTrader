@@ -270,6 +270,7 @@ qt_add_qml_module(PPTrader
         qml/components/LocalMinuteSeriesPanel.qml
         qml/components/StrategyResearchPage.qml
         qml/components/BacktestEquityChart.qml
+        qml/components/BacktestCandleChart.qml
         qml/components/BacktestArchivePanel.qml
         qml/components/BatchBacktestPanel.qml
         qml/components/PortfolioBacktestPanel.qml

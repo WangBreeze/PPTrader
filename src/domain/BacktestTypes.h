@@ -78,6 +78,7 @@ struct BacktestResult {
     PerformanceSummary summary;
     QVector<BacktestTrade> trades;
     QVector<EquityPoint> equityCurve;
+    QVector<Candle> candles; // 回测用 K 线，供 K 线图叠加买卖点
 };
 
 struct BacktestArchiveSummary {

@@ -261,6 +261,7 @@ void BacktestEngine::finishBacktest()
     }
 
     m_result.summary = calculateSummary();
+    m_result.candles = m_candles;
     emit progressChanged(1.0);
     emit finished(m_result.summary);
 }
