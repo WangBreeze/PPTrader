@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成多屏窗口放置持久化：新增 `WindowPlacement`（QSettings 读写窗口几何 + 屏幕名，`resolve` 按屏幕恢复几何——优先同名屏幕、屏幕缺失/几何越界回退主屏居中、尺寸钳制到可用区域），`main.cpp` 启动时恢复窗口到上次关闭屏幕、`aboutToQuit` 记录屏幕与几何；新增 `tst_window_placement`（6 用例覆盖同屏恢复/屏幕缺失回退/越界回退/尺寸钳制），CTest 28/28。已实测：正常关闭写入 `screenName=Mi Monitor` + geometry，重启恢复到同屏同位置。
+
 - 完成第三方 C++ 策略插件系统（真插件）：① `StrategyPluginInterface`（`Q_DECLARE_INTERFACE` + `Q_PLUGIN_METADATA` 接口，pluginId/name/version/apiVersion + `createStrategy` 工厂）；② `StrategyPluginManager`（目录扫描 `.dll/.so`、`plugins.manifest` 清单 SHA-256 完整性校验、`QPluginLoader` 加载/`qobject_cast`/ABI 版本校验/卸载）；③ 示例插件 `sample_strategy_plugin`（MODULE 库生成 `.dll`，`SampleThresholdStrategy` close 上穿/下穿阈值 + `SampleStrategyPlugin` 工厂）；④ `TradingController` 接入 `strategyPluginScan/loadStrategyPlugin/unloadStrategyPlugin/loadedStrategyPlugins/activateStrategyPluginStrategy/setStrategyPluginDirectory`，默认目录 `应用目录/strategies`。新增 `tst_strategy_plugin`（7 用例，含真 `.dll` 加载→创建策略→卸载全链路），CTest 27/27。Figma 插件管理与多股回测 UI 设计稿已完成（`docs/roadmap/插件与多股回测UI设计.md`，节点 `1393:17`/`1394:281`）。
 
 - 接线自定义策略模拟执行的 Candle 回放驱动：`TradingController` 新增 `startCustomStrategyReplay`/`stopCustomStrategyReplay`（从本地 `raw_tick_cache_v1` 读最近 N 根 K 线，QTimer 按间隔逐 Bar `dispatchCandle` 驱动激活的 `CustomExecutionStrategy`）+ `customStrategyReplayRunning/ReplayedBars/TotalBars` 属性；`ExecutionApprovalPanel` 顶部加回放控制区（策略 ID/标的/周期/根数/间隔 + 开始/停止 + 进度）。至此阶段 C 完整闭环：自定义策略 → 加载/激活 → 回放驱动 → 信号 → 审批 → 模拟账户 → 通知。CTest 26/26，`all_qmllint` 通过，主程序加载无 QML 错误。
