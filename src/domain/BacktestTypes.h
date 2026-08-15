@@ -23,6 +23,8 @@ struct BacktestConfig {
     int actualBars = 0;
     QDateTime from;
     QDateTime to;
+    QDateTime sampleFrom; // 请求样本窗起点，无效表示不限制
+    QDateTime sampleTo;   // 请求样本窗终点，无效表示不限制
     double initialCapital = 1000000.0;
     double commissionRate = 0.0003;
     double slippageRate = 0.0002;
@@ -109,6 +111,40 @@ struct BacktestArchiveRecord {
     QString resultId;
     QDateTime completedAt;
     BacktestResult result;
+};
+
+// 回测验证记录：保存一次验证回测的配置与摘要，供按收益率排序与重跑。
+struct ValidationRun {
+    QString name;
+    QString strategyId;
+    int strategyVersion = 0;
+    QString instrumentSymbol;
+    int periodSeconds = 0;
+    QDateTime sampleFrom;
+    QDateTime sampleTo;
+    int requestedBars = 0;
+    double totalReturnPercent = 0.0;
+    double maxDrawdownPercent = 0.0;
+    double sharpeRatio = 0.0;
+    int totalTrades = 0;
+    QDateTime completedAt;
+
+    QVariantMap toVariantMap() const
+    {
+        return {{QStringLiteral("name"), name},
+                {QStringLiteral("strategyId"), strategyId},
+                {QStringLiteral("strategyVersion"), strategyVersion},
+                {QStringLiteral("instrumentSymbol"), instrumentSymbol},
+                {QStringLiteral("periodSeconds"), periodSeconds},
+                {QStringLiteral("sampleFrom"), sampleFrom},
+                {QStringLiteral("sampleTo"), sampleTo},
+                {QStringLiteral("requestedBars"), requestedBars},
+                {QStringLiteral("totalReturnPercent"), totalReturnPercent},
+                {QStringLiteral("maxDrawdownPercent"), maxDrawdownPercent},
+                {QStringLiteral("sharpeRatio"), sharpeRatio},
+                {QStringLiteral("totalTrades"), totalTrades},
+                {QStringLiteral("completedAt"), completedAt}};
+    }
 };
 
 } // namespace pp

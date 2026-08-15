@@ -68,6 +68,7 @@ class TradingController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QAbstractItemModel *tickModel READ tickModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *candleModel READ candleModel CONSTANT)
+    Q_PROPERTY(QVariantList validationRuns READ validationRuns NOTIFY validationRunsChanged)
     Q_PROPERTY(QAbstractItemModel *historyCandleModel READ historyCandleModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *signalModel READ signalModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *strategyModel READ strategyModel CONSTANT)
@@ -492,6 +493,7 @@ public:
 
     QAbstractItemModel *tickModel();
     QAbstractItemModel *candleModel();
+    QVariantList validationRuns() const;
     QAbstractItemModel *historyCandleModel();
     QAbstractItemModel *signalModel();
     QAbstractItemModel *strategyModel();
@@ -821,6 +823,8 @@ public:
     Q_INVOKABLE void cancelCrossSectionalBacktest();
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE QVariantMap replayBacktestBar(int index) const;
+    Q_INVOKABLE void saveValidationRun(const QString &name);
+    Q_INVOKABLE bool loadValidationRun(int index);
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
     Q_INVOKABLE void clear();
@@ -913,6 +917,7 @@ signals:
     void backtestRunningChanged();
     void backtestStateChanged();
     void backtestSummaryChanged();
+    void validationRunsChanged();
     void backtestArchiveStateChanged();
     void backtestConfigurationChanged();
     void batchBacktestStateChanged();
@@ -1043,6 +1048,9 @@ private:
     TickListModel m_tickModel;
     StockSearchModel m_searchModel;
     CandleListModel m_candleModel;
+    QVector<ValidationRun> m_validationRuns;
+    QDateTime m_pendingSampleFrom;
+    QDateTime m_pendingSampleTo;
     CandleListModel m_historyCandleModel;
     SignalListModel m_signalModel;
     StrategyListModel m_strategyModel;

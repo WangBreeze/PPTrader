@@ -2057,6 +2057,8 @@ qulonglong TradingController::runStrategyBacktest(const QString &strategyId,
     m_pendingBacktestConfig.commissionRate = std::max(0.0, commissionRate);
     m_pendingBacktestConfig.slippageRate = std::max(0.0, slippageRate);
     m_pendingBacktestConfig.lotSize = 100;
+    m_pendingBacktestConfig.sampleFrom = m_pendingSampleFrom;
+    m_pendingBacktestConfig.sampleTo = m_pendingSampleTo;
 
     m_pendingBacktestHistoryRequestId = 0;
     m_backtestPreparing = true;
@@ -2170,6 +2172,8 @@ qulonglong TradingController::runCustomStrategyBacktest(
     m_pendingBacktestConfig.commissionRate = std::max(0.0, commissionRate);
     m_pendingBacktestConfig.slippageRate = std::max(0.0, slippageRate);
     m_pendingBacktestConfig.lotSize = 100;
+    m_pendingBacktestConfig.sampleFrom = m_pendingSampleFrom;
+    m_pendingBacktestConfig.sampleTo = m_pendingSampleTo;
     m_pendingCustomBacktestPlan = *plan;
 
     m_pendingBacktestHistoryRequestId = 0;
@@ -2352,6 +2356,8 @@ qulonglong TradingController::runSelectedLocalCustomStrategyBacktest(
     m_pendingBacktestConfig.commissionRate = std::max(0.0, m_backtestCommissionRate);
     m_pendingBacktestConfig.slippageRate = std::max(0.0, m_backtestSlippageRate);
     m_pendingBacktestConfig.lotSize = 100;
+    m_pendingBacktestConfig.sampleFrom = m_pendingSampleFrom;
+    m_pendingBacktestConfig.sampleTo = m_pendingSampleTo;
     m_pendingCustomBacktestPlan = *plan;
 
     m_backtestPreparing = true;
@@ -3270,6 +3276,53 @@ QVariantMap TradingController::replayBacktestBar(int index) const
     map.insert(QStringLiteral("signalReason"), reason);
     map.insert(QStringLiteral("signalPrice"), price);
     return map;
+}
+
+QVariantList TradingController::validationRuns() const
+{
+    QVariantList list;
+    for (const ValidationRun &run : m_validationRuns) {
+        list.append(run.toVariantMap());
+    }
+    return list;
+}
+
+void TradingController::saveValidationRun(const QString &name)
+{
+    if (!m_displayedBacktestResult) return;
+    ValidationRun run;
+    run.name = name.trimmed().isEmpty() ? QStringLiteral("未命名验证") : name.trimmed();
+    run.strategyId = m_displayedBacktestResult->config.strategyId;
+    run.strategyVersion = m_displayedBacktestResult->config.strategyVersion;
+    run.instrumentSymbol = m_displayedBacktestResult->config.instrument.symbol;
+    run.periodSeconds = m_displayedBacktestResult->config.periodSeconds;
+    run.sampleFrom = m_displayedBacktestResult->config.sampleFrom;
+    run.sampleTo = m_displayedBacktestResult->config.sampleTo;
+    run.requestedBars = m_displayedBacktestResult->config.requestedBars;
+    run.totalReturnPercent = m_displayedBacktestResult->summary.totalReturnPercent;
+    run.maxDrawdownPercent = m_displayedBacktestResult->summary.maxDrawdownPercent;
+    run.sharpeRatio = m_displayedBacktestResult->summary.sharpeRatio;
+    run.totalTrades = m_displayedBacktestResult->summary.totalTrades;
+    run.completedAt = QDateTime::currentDateTimeUtc();
+    m_validationRuns.append(run);
+    std::sort(m_validationRuns.begin(), m_validationRuns.end(),
+              [](const ValidationRun &left, const ValidationRun &right) {
+        return left.totalReturnPercent > right.totalReturnPercent;
+    });
+    while (m_validationRuns.size() > 10) {
+        m_validationRuns.removeLast();
+    }
+    emit validationRunsChanged();
+}
+
+bool TradingController::loadValidationRun(int index)
+{
+    if (index < 0 || index >= m_validationRuns.size()) return false;
+    const ValidationRun &run = m_validationRuns.at(index);
+    m_pendingSampleFrom = run.sampleFrom;
+    m_pendingSampleTo = run.sampleTo;
+    emit validationRunsChanged();
+    return true;
 }
 
 void TradingController::clearBacktestResult()

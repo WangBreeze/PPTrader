@@ -34,6 +34,18 @@ bool BacktestEngine::start(const BacktestConfig &config, QVector<Candle> candles
     std::sort(candles.begin(), candles.end(), [](const Candle &left, const Candle &right) {
         return left.startTime < right.startTime;
     });
+    if (config.sampleFrom.isValid()) {
+        candles.erase(std::remove_if(candles.begin(), candles.end(),
+            [&config](const Candle &candle) {
+                return candle.startTime < config.sampleFrom;
+            }), candles.end());
+    }
+    if (config.sampleTo.isValid()) {
+        candles.erase(std::remove_if(candles.begin(), candles.end(),
+            [&config](const Candle &candle) {
+                return candle.startTime > config.sampleTo;
+            }), candles.end());
+    }
 
     QString strategyError;
     std::unique_ptr<BacktestStrategy> strategy = std::move(providedStrategy);
