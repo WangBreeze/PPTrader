@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成阶段 2.4 多股策略：`CrossSectionalCustomStrategy` 每帧求值 DSL v3——每条腿一个 `CustomIndicatorRuntime` 更新单标的指标，`CrossSectionalIndicatorRuntime` 计算横截面指标（含 PEER 引用），按 `selection.topN` 产出等权目标持仓。`tst_cross_sectional_backtest` 新增横截面选股用例（8/8）。
+
 - 完成阶段 2.3 横截面指标运行时：`CrossSectionalIndicatorRuntime` 提供 `rank`（1-based，同值按 symbol 稳定排序）、`zscore`（总体标准差）、`percentile`（最高值 1.0）、`mean`/`median` 纯函数，口径与 `AShareRelativeStrengthIndicator` 一致。新增 `tst_cross_sectional_backtest` 覆盖排名并列/升序、总体标准差 Z-Score、分位数、均值中位数与空输入（7/7）。
 
 - 完成阶段 2.2 DSL v3：新增 `schemaVersion=3` 顶层 `universe`（explicit 代码列表）、`crossIndicators`（RANK/ZSCORE/PERCENTILE/MEAN/MEDIAN/PEER，`of` 支持 field 或单标的指标，PEER 引用指定标的字段）与 `selection`（topN 按横截面指标排序）；条件新增 `{"cross":"alias"}` 横截面操作数；`position.type` 支持 `equalWeight`。`CompiledCustomStrategy` 携带 `universeSymbols/crossIndicators/selection`，`CompiledCustomOperand` 新增 `Cross` 类型。`tst_custom_strategy` 新增 v3 编译与非法语法用例（17/17）。
