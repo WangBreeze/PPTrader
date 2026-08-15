@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 完成文件日志系统：`LogService` 单例（分级 Debug/Info/Warning/Error、按大小滚动保留有限备份、线程安全、QTextStream UTF-8），`TradingController` 启动配置日志到 `应用目录/logs/pptrader.log`（5MB × 3 备份），`setStatusText` 同步写 Info 日志；新增 `tst_log_service`（5 用例：写入分级/按大小滚动/重新配置切路径），CTest 30/30。已实测启动日志与状态日志正确落盘（UTF-8）。
+
 - 完成回测参数网格扫描/优化：① `BacktestEvaluator`（同步回测评估器，与 `BacktestEngine` 共享开/平仓、滑点/手续费、权益曲线、摘要算法，供批量场景使用）；② `ParameterGridScanner`（笛卡尔积展开 + 逐组合编译/回测 + 按收益率降序，组合上限与取消支持）；③ `ParameterGridBacktestService`（独立线程异步跑扫描，completed/failed + cancel）；④ `TradingController` 接入 `runParameterGridBacktest/cancelParameterGridBacktest/parameterGridRunning/Error/Results`；⑤ `ParameterGridPanel` QML（策略/标的/周期/根数 + 两个参数轴 key=候选值 + 结果表格）挂到策略页自定义模式。新增 `tst_parameter_grid_scanner`（6 用例：笛卡尔积/排序/超限/空轴），CTest 29/29，`all_qmllint` 通过，主程序加载无 QML 错误。
 
 - 完成多屏窗口放置持久化：新增 `WindowPlacement`（QSettings 读写窗口几何 + 屏幕名，`resolve` 按屏幕恢复几何——优先同名屏幕、屏幕缺失/几何越界回退主屏居中、尺寸钳制到可用区域），`main.cpp` 启动时恢复窗口到上次关闭屏幕、`aboutToQuit` 记录屏幕与几何；新增 `tst_window_placement`（6 用例覆盖同屏恢复/屏幕缺失回退/越界回退/尺寸钳制），CTest 28/28。已实测：正常关闭写入 `screenName=Mi Monitor` + geometry，重启恢复到同屏同位置。
