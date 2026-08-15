@@ -104,6 +104,8 @@ public:
     QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() override;
     std::optional<BacktestArchiveRecord> loadBacktestArchive(
         const QString &resultId) override;
+    bool saveValidationRun(const ValidationRun &run);
+    QVector<ValidationRun> loadValidationRuns(int limit = 10);
     bool upsertOrder(const Order &order) override;
     bool appendExecution(const Execution &execution) override;
     bool saveTradingState(const AccountSnapshot &account, const QVector<Position> &positions) override;

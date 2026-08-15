@@ -605,7 +605,11 @@ TradingController::TradingController(QObject *parent)
         emit storageStateChanged();
     }
     initializeRealtimeStrategies();
-    if (m_storageReady) requestLatestMarketSnapshot();
+    if (m_storageReady) {
+        requestLatestMarketSnapshot();
+        m_validationRuns = m_dataStore.loadValidationRuns(10);
+        emit validationRunsChanged();
+    }
 
     m_marketClockTimer.setInterval(1000);
     m_marketClockTimer.start();
@@ -3311,6 +3315,9 @@ void TradingController::saveValidationRun(const QString &name)
     });
     while (m_validationRuns.size() > 10) {
         m_validationRuns.removeLast();
+    }
+    if (m_storageReady) {
+        m_dataStore.saveValidationRun(run);
     }
     emit validationRunsChanged();
 }

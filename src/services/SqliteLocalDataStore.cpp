@@ -22,7 +22,7 @@ namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 6;
+constexpr int kCurrentDatabaseSchemaVersion = 7;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -372,6 +372,20 @@ bool SqliteLocalDataStore::migrateSchema()
             if (!history.exec()) {
                 m_database.rollback();
                 emitSqlError(QStringLiteral("记录全库 v6 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 7) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(7, 'backtest_validation_runs', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-validation-runs-v7"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v7 迁移历史"));
                 return false;
             }
         }
@@ -2601,6 +2615,74 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     return record;
 }
 
+bool SqliteLocalDataStore::saveValidationRun(const ValidationRun &run)
+{
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into backtest_validation_runs(name, strategy_id, strategy_version, "
+        "instrument_symbol, period_seconds, sample_from_utc, sample_to_utc, requested_bars, "
+        "total_return_percent, max_drawdown_percent, sharpe_ratio, total_trades, completed_at_utc) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    query.addBindValue(run.name);
+    query.addBindValue(run.strategyId);
+    query.addBindValue(run.strategyVersion);
+    query.addBindValue(run.instrumentSymbol);
+    query.addBindValue(run.periodSeconds);
+    query.addBindValue(run.sampleFrom.isValid()
+                           ? run.sampleFrom.toString(Qt::ISODateWithMs) : QString());
+    query.addBindValue(run.sampleTo.isValid()
+                           ? run.sampleTo.toString(Qt::ISODateWithMs) : QString());
+    query.addBindValue(run.requestedBars);
+    query.addBindValue(run.totalReturnPercent);
+    query.addBindValue(run.maxDrawdownPercent);
+    query.addBindValue(run.sharpeRatio);
+    query.addBindValue(run.totalTrades);
+    query.addBindValue(run.completedAt.toString(Qt::ISODateWithMs));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("保存回测验证记录"));
+        return false;
+    }
+    return true;
+}
+
+QVector<ValidationRun> SqliteLocalDataStore::loadValidationRuns(int limit)
+{
+    QVector<ValidationRun> runs;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select name, strategy_id, strategy_version, instrument_symbol, period_seconds, "
+        "sample_from_utc, sample_to_utc, requested_bars, total_return_percent, "
+        "max_drawdown_percent, sharpe_ratio, total_trades, completed_at_utc "
+        "from backtest_validation_runs order by total_return_percent desc limit ?"));
+    query.addBindValue(limit);
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取回测验证记录"));
+        return runs;
+    }
+    while (query.next()) {
+        ValidationRun run;
+        run.name = query.value(0).toString();
+        run.strategyId = query.value(1).toString();
+        run.strategyVersion = query.value(2).toInt();
+        run.instrumentSymbol = query.value(3).toString();
+        run.periodSeconds = query.value(4).toInt();
+        const QString sampleFrom = query.value(5).toString();
+        const QString sampleTo = query.value(6).toString();
+        run.sampleFrom = sampleFrom.isEmpty()
+            ? QDateTime() : QDateTime::fromString(sampleFrom, Qt::ISODateWithMs);
+        run.sampleTo = sampleTo.isEmpty()
+            ? QDateTime() : QDateTime::fromString(sampleTo, Qt::ISODateWithMs);
+        run.requestedBars = query.value(7).toInt();
+        run.totalReturnPercent = query.value(8).toDouble();
+        run.maxDrawdownPercent = query.value(9).toDouble();
+        run.sharpeRatio = query.value(10).toDouble();
+        run.totalTrades = query.value(11).toInt();
+        run.completedAt = QDateTime::fromString(query.value(12).toString(), Qt::ISODateWithMs);
+        runs.append(run);
+    }
+    return runs;
+}
+
 bool SqliteLocalDataStore::upsertOrder(const Order &order)
 {
     QSqlQuery query(m_database);
@@ -3412,7 +3494,20 @@ bool SqliteLocalDataStore::ensureSchema()
             "amount real not null, reason text not null, "
             "primary key(result_id, sequence_no), "
             "foreign key(result_id) references portfolio_backtest_results(result_id) "
-            "on delete cascade)")
+            "on delete cascade)"),
+        QStringLiteral(
+            "create table if not exists backtest_validation_runs("
+            "run_id integer primary key autoincrement,"
+            "name text not null, strategy_id text not null, strategy_version integer not null,"
+            "instrument_symbol text not null, period_seconds integer not null,"
+            "sample_from_utc text not null default '', sample_to_utc text not null default '',"
+            "requested_bars integer not null default 0,"
+            "total_return_percent real not null, max_drawdown_percent real not null,"
+            "sharpe_ratio real not null, total_trades integer not null,"
+            "completed_at_utc text not null)"),
+        QStringLiteral(
+            "create index if not exists idx_validation_runs_return "
+            "on backtest_validation_runs(total_return_percent desc)")
     };
 
     for (const QString &statement : statements) {
