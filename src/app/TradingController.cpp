@@ -2240,16 +2240,15 @@ QVariantMap TradingController::customStrategyPreview(
         instrument.name = symbol.trimmed();
         instrument.market = Market::AShare;
     }
-    const QVector<Candle> candles =
-        m_dataStore.loadRecentCandles(instrument, periodSeconds, barCount);
-    const auto preview = CustomStrategyPreviewService::buildPreview(
-        definition, {}, candles, &error);
+    const auto preview = CustomStrategyPreviewService::buildLocalTickPreview(
+        definition, {}, m_dataStore, instrument, periodSeconds, barCount, &error);
     if (!error.isEmpty()) {
         result.insert(QStringLiteral("error"), error);
         return result;
     }
 
     result.insert(QStringLiteral("symbol"), instrument.symbol);
+    result.insert(QStringLiteral("source"), QStringLiteral("raw_tick_cache_v1"));
     result.insert(QStringLiteral("barCount"), preview.bars.size());
     QVariantList aliases;
     QVariantList labels;
@@ -3012,6 +3011,19 @@ QVariantMap TradingController::portfolioResultConfiguration() const
     QVariantMap map = result.definition.toVariantMap();
     map.insert(QStringLiteral("completedAt"), m_displayedPortfolioCompletedAt);
     map.insert(QStringLiteral("barCount"), result.equityCurve.size());
+    int staleValuationPointCount = 0;
+    for (const PortfolioBar &bar : result.equityCurve) {
+        if (std::any_of(bar.positions.cbegin(), bar.positions.cend(),
+                        [](const PortfolioPosition &position) {
+            return position.priceStale;
+        })) {
+            ++staleValuationPointCount;
+        }
+    }
+    map.insert(QStringLiteral("staleValuationPointCount"),
+               staleValuationPointCount);
+    map.insert(QStringLiteral("valuationCalendar"),
+               QStringLiteral("observed_union"));
     map.insert(QStringLiteral("datasetVersions"),
                QVariant(result.datasetVersions));
     map.insert(QStringLiteral("finalEquity"), result.summary.finalEquity);

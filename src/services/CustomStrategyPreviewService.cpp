@@ -1,5 +1,7 @@
 #include "services/CustomStrategyPreviewService.h"
 
+#include "services/LocalDataStore.h"
+
 #include "strategy/CustomBacktestStrategy.h"
 #include "strategy/CustomIndicatorRuntime.h"
 #include "strategy/CustomStrategyCompiler.h"
@@ -7,6 +9,33 @@
 #include <optional>
 
 namespace pp {
+
+CustomStrategyPreviewService::PreviewResult
+CustomStrategyPreviewService::buildLocalTickPreview(
+    const CustomStrategyDefinition &definition,
+    const QVariantMap &runtimeParameters,
+    LocalDataStore &store,
+    const Instrument &instrument,
+    int periodSeconds,
+    int barCount,
+    QString *error)
+{
+    if (error) error->clear();
+    if (instrument.symbol.trimmed().isEmpty() || periodSeconds <= 0 || barCount <= 0) {
+        if (error) *error = QStringLiteral("预览缺少有效的本地品种、周期或根数");
+        return {};
+    }
+    const QVector<Candle> candles = store.loadRecentCandlesFromSource(
+        instrument, periodSeconds, barCount, QStringLiteral("raw_tick_cache_v1"));
+    if (candles.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral(
+                "没有可用于预览的 raw_tick_cache_v1 本地 Tick 派生 K 线；未访问网络 Provider");
+        }
+        return {};
+    }
+    return buildPreview(definition, runtimeParameters, candles, error);
+}
 
 namespace {
 

@@ -69,6 +69,7 @@ private slots:
     void commissionAndSlippageAreCharged();
     void sellBeforeBuyInvariantHolds();
     void missingDayUsesLastPrice();
+    void missingDayDoesNotAdvanceRebalanceClock();
     void invalidDefinitionsRejected();
     void weightsRespectMaximumLegWeight();
 };
@@ -167,11 +168,49 @@ void PortfolioBacktestTest::missingDayUsesLastPrice()
         equalWeightDefinition(QStringLiteral("600001"),
                               QStringLiteral("600002")),
         series);
-    // 2026-01-06 不是共同交易日：只有 2 个共同交易日（1/5、1/7）。
-    QCOMPARE(result.equityCurve.size(), 2);
+    // 2026-01-06 不是共同交易日，但仍以腿 B 的最近收盘价输出估值点。
+    QCOMPARE(result.equityCurve.size(), 3);
     QCOMPARE(result.trades.size(), 4); // 1/5 建仓 2 笔 + 1/7 再平衡 2 笔
+    static const QTimeZone shanghai("Asia/Shanghai");
+    const PortfolioBar &missingDay = result.equityCurve.at(1);
+    QCOMPARE(missingDay.timestamp.toTimeZone(shanghai).date(), QDate(2026, 1, 6));
+    QCOMPARE(missingDay.equity, 1050000.0);
+    QCOMPARE(missingDay.positions.at(0).lastPrice, 110.0);
+    QVERIFY(!missingDay.positions.at(0).priceStale);
+    QCOMPARE(missingDay.positions.at(1).lastPrice, 100.0);
+    QVERIFY(missingDay.positions.at(1).priceStale);
     const PortfolioBar &last = result.equityCurve.last();
     QCOMPARE(last.positions.at(1).lastPrice, 100.0);
+    QVERIFY(!last.positions.at(1).priceStale);
+    for (const PortfolioTrade &trade : result.trades) {
+        QVERIFY(trade.timestamp.toTimeZone(shanghai).date() != QDate(2026, 1, 6));
+    }
+}
+
+void PortfolioBacktestTest::missingDayDoesNotAdvanceRebalanceClock()
+{
+    const QVector<QDate> fullDays{QDate(2026, 1, 5), QDate(2026, 1, 6),
+                                  QDate(2026, 1, 7), QDate(2026, 1, 8)};
+    const QVector<QDate> shortDays{QDate(2026, 1, 5), QDate(2026, 1, 7),
+                                   QDate(2026, 1, 8)};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             fullDays, {100.0, 120.0, 144.0, 172.8})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             shortDays, {100.0, 100.0, 100.0})}};
+    PortfolioDefinition definition =
+        equalWeightDefinition(QStringLiteral("600001"),
+                              QStringLiteral("600002"));
+    definition.rebalanceEveryTradingDays = 2;
+    const PortfolioResult result = PortfolioBacktestEngine::run(definition, series);
+
+    QCOMPARE(result.equityCurve.size(), 4);
+    QCOMPARE(result.trades.size(), 4); // 1/5 建仓；第二个调仓点是第三个共同交易日 1/8。
+    static const QTimeZone shanghai("Asia/Shanghai");
+    for (int index = 2; index < result.trades.size(); ++index) {
+        QCOMPARE(result.trades.at(index).timestamp.toTimeZone(shanghai).date(),
+                 QDate(2026, 1, 8));
+    }
 }
 
 void PortfolioBacktestTest::invalidDefinitionsRejected()

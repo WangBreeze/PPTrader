@@ -63,7 +63,7 @@ PortfolioResult makeResult()
         {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
                                              days, {100.0, 110.0})},
         {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
-                                             days, {100.0, 95.0})}};
+                                             {days.first()}, {100.0})}};
     PortfolioResult result = PortfolioBacktestEngine::run(definition(), series);
     result.datasetVersions = {
         QStringLiteral("sha256:") + QString(64, 'a'),
@@ -88,7 +88,7 @@ void PortfolioBacktestStoreTest::archiveRoundTripAndMigrationVersion()
     const QString path = directory.filePath(QStringLiteral("portfolio.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 5);
+    QCOMPARE(store.schemaVersion(), 6);
 
     const PortfolioResult result = makeResult();
     PortfolioArchiveRecord record;
@@ -122,6 +122,8 @@ void PortfolioBacktestStoreTest::archiveRoundTripAndMigrationVersion()
     QCOMPARE(restored->result.equityCurve.first().equity,
              result.equityCurve.first().equity);
     QCOMPARE(restored->result.equityCurve.first().positions.size(), 2);
+    QVERIFY(result.equityCurve.last().positions.at(1).priceStale);
+    QVERIFY(restored->result.equityCurve.last().positions.at(1).priceStale);
     QCOMPARE(restored->result.trades.size(), result.trades.size());
     QCOMPARE(restored->result.trades.first().side,
              result.trades.first().side);

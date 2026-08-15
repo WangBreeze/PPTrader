@@ -41,6 +41,7 @@ QVariantMap BacktestDatasetIdentity::toVariantMap() const
             {QStringLiteral("periodSeconds"), periodSeconds},
             {QStringLiteral("source"), source},
             {QStringLiteral("aggregatorVersion"), aggregatorVersion},
+            {QStringLiteral("fingerprintVersion"), fingerprintVersion},
             {QStringLiteral("datasetVersion"), datasetVersion},
             {QStringLiteral("firstTradingDate"), firstTradingDate},
             {QStringLiteral("lastTradingDate"), lastTradingDate},
@@ -63,6 +64,7 @@ QString BacktestDatasetIdentity::toJson() const
             {QStringLiteral("tradingDate"), day.tradingDate.toString(Qt::ISODate)},
             {QStringLiteral("rawCount"), day.rawCount},
             {QStringLiteral("rawMaximumId"), day.rawMaximumId},
+            {QStringLiteral("rawContentSha256"), day.rawContentSha256},
             {QStringLiteral("barCount"), day.barCount},
             {QStringLiteral("cacheVersion"), day.cacheVersion}});
     }
@@ -74,6 +76,7 @@ QString BacktestDatasetIdentity::toJson() const
         {QStringLiteral("periodSeconds"), periodSeconds},
         {QStringLiteral("source"), source},
         {QStringLiteral("aggregatorVersion"), aggregatorVersion},
+        {QStringLiteral("fingerprintVersion"), fingerprintVersion},
         {QStringLiteral("datasetVersion"), datasetVersion},
         {QStringLiteral("firstTradingDate"), firstTradingDate.toString(Qt::ISODate)},
         {QStringLiteral("lastTradingDate"), lastTradingDate.toString(Qt::ISODate)},
@@ -110,6 +113,8 @@ bool BacktestDatasetIdentity::fromJson(const QString &json)
     parsed.periodSeconds = root.value(QStringLiteral("periodSeconds")).toInt();
     parsed.source = root.value(QStringLiteral("source")).toString();
     parsed.aggregatorVersion = root.value(QStringLiteral("aggregatorVersion")).toInt();
+    parsed.fingerprintVersion = root.contains(QStringLiteral("fingerprintVersion"))
+        ? root.value(QStringLiteral("fingerprintVersion")).toInt() : 1;
     parsed.firstTradingDate = QDate::fromString(
         root.value(QStringLiteral("firstTradingDate")).toString(), Qt::ISODate);
     parsed.lastTradingDate = QDate::fromString(
@@ -129,6 +134,8 @@ bool BacktestDatasetIdentity::fromJson(const QString &json)
         day.rawCount = dayObject.value(QStringLiteral("rawCount")).toVariant().toLongLong();
         day.rawMaximumId =
             dayObject.value(QStringLiteral("rawMaximumId")).toVariant().toLongLong();
+        day.rawContentSha256 =
+            dayObject.value(QStringLiteral("rawContentSha256")).toString();
         day.barCount = dayObject.value(QStringLiteral("barCount")).toInt();
         day.cacheVersion = dayObject.value(QStringLiteral("cacheVersion")).toInt();
         if (!day.tradingDate.isValid()) return false;

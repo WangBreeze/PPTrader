@@ -154,7 +154,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QCOMPARE(store.schemaVersion(), 5);
+        QCOMPARE(store.schemaVersion(), 6);
         QVERIFY(!store.databaseUuid().isEmpty());
         uuid = store.databaseUuid();
         backupPath = store.lastMigrationBackupPath();
@@ -170,7 +170,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
             QVERIFY(verify.open());
             QSqlQuery query(verify);
             QVERIFY(query.exec(QStringLiteral("pragma user_version")) && query.next());
-            QCOMPARE(query.value(0).toInt(), 5);
+            QCOMPARE(query.value(0).toInt(), 6);
             QVERIFY(query.exec(QStringLiteral(
                 "select migration_name from schema_migration_history where version = 1"))
                 && query.next());
@@ -195,6 +195,11 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
                 && query.next());
             QCOMPARE(query.value(0).toString(),
                      QStringLiteral("portfolio_backtest_archive"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 6"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("raw_tick_content_identity"));
             QVERIFY(query.exec(QStringLiteral("select value from legacy_marker where id = 1"))
                 && query.next());
             QCOMPARE(query.value(0).toString(), QStringLiteral("preserved"));
@@ -224,7 +229,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
     QCOMPARE(reopened.databaseUuid(), uuid);
-    QCOMPARE(reopened.schemaVersion(), 5);
+    QCOMPARE(reopened.schemaVersion(), 6);
     QVERIFY(reopened.lastMigrationBackupPath().isEmpty());
 }
 
@@ -398,10 +403,19 @@ void SqliteLocalDataStoreTest::archivePreservesDatasetIdentity()
     identity.instrument = record.result.config.instrument;
     identity.periodSeconds = 60;
     identity.aggregatorVersion = 1;
-    identity.days = {
-        {QDate(2026, 1, 5), 3, 3, 2, 1},
-        {QDate(2026, 1, 6), 2, 2, 1, 1}
-    };
+    RawTickDayFingerprint firstDay;
+    firstDay.tradingDate = QDate(2026, 1, 5);
+    firstDay.rawCount = 3;
+    firstDay.rawMaximumId = 3;
+    firstDay.barCount = 2;
+    firstDay.cacheVersion = 1;
+    RawTickDayFingerprint secondDay;
+    secondDay.tradingDate = QDate(2026, 1, 6);
+    secondDay.rawCount = 2;
+    secondDay.rawMaximumId = 2;
+    secondDay.barCount = 1;
+    secondDay.cacheVersion = 1;
+    identity.days = {firstDay, secondDay};
     identity.firstTradingDate = QDate(2026, 1, 5);
     identity.lastTradingDate = QDate(2026, 1, 6);
     identity.datasetVersion = computeBacktestDatasetVersion(identity);

@@ -28,6 +28,7 @@ private slots:
     void v1RejectsV2OnlySyntax();
     void nextOpenSignalFillPrice();
     void buildsPreviewSeriesAndSignals();
+    void previewUsesOnlyLocalTickDerivedCandles();
     void compilesCrossConditionsAndResetsDeterministically();
     void validatesCompilesAndExecutesPositionRiskRules();
     void enforcesWorkspaceRunAndResultIdentity();
@@ -810,6 +811,75 @@ void CustomStrategyTest::buildsPreviewSeriesAndSignals()
     QCOMPARE(preview.bars.last().seriesValues.size(), 2);
     QVERIFY(preview.bars.last().seriesValues.at(0).has_value());
     QVERIFY(preview.bars.last().seriesValues.at(1).has_value());
+}
+
+void CustomStrategyTest::previewUsesOnlyLocalTickDerivedCandles()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(validDocument(), &definition, &error), qPrintable(error));
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(QStringLiteral("preview-source.db"))));
+
+    const Instrument instrument {QStringLiteral("600519"), QStringLiteral("Kweichow Moutai"),
+                                 Market::AShare, QStringLiteral("SSE")};
+    QVector<Candle> candles;
+    const QDateTime rawStart(QDate(2026, 8, 1), QTime(1, 30), Qt::UTC);
+    for (int index = 0; index < 6; ++index) {
+        Candle candle;
+        candle.instrument = instrument;
+        candle.startTime = rawStart.addDays(index);
+        candle.periodSeconds = 86400;
+        candle.open = candle.high = candle.low = candle.close = 100.0 + index;
+        candle.volume = 1000.0;
+        candle.source = QStringLiteral("raw_tick_cache_v1");
+        candles.append(candle);
+    }
+    const QDateTime providerStart(QDate(2026, 8, 20), QTime(1, 30), Qt::UTC);
+    for (int index = 0; index < 3; ++index) {
+        Candle candle;
+        candle.instrument = instrument;
+        candle.startTime = providerStart.addDays(index);
+        candle.periodSeconds = 86400;
+        candle.open = candle.high = candle.low = candle.close = 900.0 + index;
+        candle.volume = 2000.0;
+        candle.source = QStringLiteral("mootdx_daily_fixture");
+        candles.append(candle);
+    }
+    QVERIFY(store.upsertCandles(candles));
+
+    const QVector<Candle> genericRecent = store.loadRecentCandles(instrument, 86400, 3);
+    QCOMPARE(genericRecent.size(), 3);
+    QVERIFY(genericRecent.first().close >= 900.0);
+
+    const auto preview = CustomStrategyPreviewService::buildLocalTickPreview(
+        definition, {}, store, instrument, 86400, 3, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.bars.size(), 3);
+    QCOMPARE(preview.bars.first().close, 103.0);
+    QCOMPARE(preview.bars.last().close, 105.0);
+
+    const Instrument providerOnly {QStringLiteral("000001"), QStringLiteral("Ping An Bank"),
+                                   Market::AShare, QStringLiteral("SZSE")};
+    Candle providerCandle;
+    providerCandle.instrument = providerOnly;
+    providerCandle.startTime = providerStart;
+    providerCandle.periodSeconds = 86400;
+    providerCandle.open = providerCandle.high = providerCandle.low = providerCandle.close = 10.0;
+    providerCandle.volume = 1000.0;
+    providerCandle.source = QStringLiteral("mootdx_daily_fixture");
+    QVERIFY(store.upsertCandles({providerCandle}));
+
+    error.clear();
+    const auto missingPreview = CustomStrategyPreviewService::buildLocalTickPreview(
+        definition, {}, store, providerOnly, 86400, 3, &error);
+    QVERIFY(missingPreview.bars.isEmpty());
+    QVERIFY(error.contains(QStringLiteral("raw_tick_cache_v1")));
+    QVERIFY(error.contains(QStringLiteral("未访问网络")));
 }
 
 void CustomStrategyTest::validatesCompilesAndExecutesPositionRiskRules()

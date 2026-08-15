@@ -39,6 +39,7 @@ struct PortfolioPosition {
     double lastPrice = 0.0;
     double marketValue = 0.0;
     double weight = 0.0;
+    bool priceStale = false; // 当日无报价且持仓使用最近已知收盘价估值
 };
 
 struct PortfolioBar {

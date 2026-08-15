@@ -318,7 +318,7 @@ void BatchBacktestTest::runPersistenceRoundTrip()
     const QString path = directory.filePath(QStringLiteral("runs.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 5);
+    QCOMPARE(store.schemaVersion(), 6);
 
     BatchBacktestRunSummary summary;
     summary.runId = QStringLiteral("run-1");

@@ -17,6 +17,7 @@ struct LegState {
     Instrument instrument;
     double quantity = 0.0;
     double lastPrice = 0.0;
+    QDate lastPriceDay;
     double weight = 0.0;
     bool boughtToday = false;
 };
@@ -128,8 +129,10 @@ PortfolioResult PortfolioBacktestEngine::run(
     if (error) error->clear();
 
     QSet<QDate> commonDays;
+    QSet<QDate> observedDays;
     for (int index = 0; index < legCount; ++index) {
         const QList<QDate> days = lastBarByDay.at(index).keys();
+        for (const QDate &day : days) observedDays.insert(day);
         if (index == 0) {
             commonDays = QSet<QDate>(days.cbegin(), days.cend());
         } else {
@@ -140,26 +143,32 @@ PortfolioResult PortfolioBacktestEngine::run(
             commonDays = intersection;
         }
     }
-    QList<QDate> tradingDays = commonDays.values();
-    std::sort(tradingDays.begin(), tradingDays.end());
-    if (tradingDays.isEmpty()) {
+    QList<QDate> commonTradingDays = commonDays.values();
+    std::sort(commonTradingDays.begin(), commonTradingDays.end());
+    if (commonTradingDays.isEmpty()) {
         if (error) *error = QStringLiteral("组合腿没有共同交易日");
         return result;
     }
+    QList<QDate> valuationDays = observedDays.values();
+    std::sort(valuationDays.begin(), valuationDays.end());
+    const QDate inceptionDay = commonTradingDays.first();
+    valuationDays.erase(std::remove_if(
+        valuationDays.begin(), valuationDays.end(),
+        [&inceptionDay](const QDate &day) { return day < inceptionDay; }),
+        valuationDays.end());
     result.periodSeconds = periodSeconds;
 
     double cash = definition.initialCapital;
     double totalCommission = 0.0;
-    QDateTime firstBarTime;
-    QDateTime lastBarTime;
-    for (int dayIndex = 0; dayIndex < tradingDays.size(); ++dayIndex) {
-        const QDate day = tradingDays.at(dayIndex);
+    int commonDayIndex = 0;
+    for (const QDate &day : valuationDays) {
         QDateTime barTime;
         for (int index = 0; index < legCount; ++index) {
-            const QDateTime time = lastBarByDay.at(index).value(day);
-            const double close = closeByDay.at(index).value(day);
-            if (close > 0.0) {
+            if (lastBarByDay.at(index).contains(day)) {
+                const QDateTime time = lastBarByDay.at(index).value(day);
+                const double close = closeByDay.at(index).value(day);
                 states[index].lastPrice = close;
+                states[index].lastPriceDay = day;
                 if (time.isValid()
                     && (!barTime.isValid() || time > barTime)) {
                     barTime = time;
@@ -168,15 +177,15 @@ PortfolioResult PortfolioBacktestEngine::run(
             states[index].boughtToday = false;
         }
         if (!barTime.isValid()) continue;
-        if (!firstBarTime.isValid()) firstBarTime = barTime;
-        lastBarTime = barTime;
 
         double equity = cash;
         for (const LegState &state : states) {
             equity += state.quantity * state.lastPrice;
         }
 
-        if (dayIndex % definition.rebalanceEveryTradingDays == 0) {
+        const bool commonTradingDay = commonDays.contains(day);
+        if (commonTradingDay
+            && commonDayIndex % definition.rebalanceEveryTradingDays == 0) {
             // 先卖后买：超配腿按可卖数量卖至目标市值。
             for (int index = 0; index < legCount; ++index) {
                 LegState &state = states[index];
@@ -241,6 +250,7 @@ PortfolioResult PortfolioBacktestEngine::run(
                 result.trades.append(trade);
             }
         }
+        if (commonTradingDay) ++commonDayIndex;
 
         equity = cash;
         PortfolioBar bar;
@@ -258,6 +268,8 @@ PortfolioResult PortfolioBacktestEngine::run(
             position.marketValue = state.quantity * state.lastPrice;
             position.weight = equity > 0.0
                 ? position.marketValue / equity : 0.0;
+            position.priceStale = state.quantity > 0.0
+                && state.lastPriceDay.isValid() && state.lastPriceDay < day;
             bar.positions.append(position);
         }
         result.equityCurve.append(bar);

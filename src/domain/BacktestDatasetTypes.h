@@ -8,12 +8,13 @@
 
 namespace pp {
 
-// 单个交易日的事实指纹与派生缓存状态。datasetVersion 只由事实（rawCount/rawMaximumId）、
-// 周期和聚合算法版本计算；派生缓存过期不改变版本本身，只反映在 staleDayCount。
+// 单个交易日的事实指纹与派生缓存状态。新身份使用 rawContentSha256；旧归档缺少该字段时
+// 仍按 rawCount/rawMaximumId 解释，以保持历史结果可恢复。
 struct RawTickDayFingerprint {
     QDate tradingDate;
     qint64 rawCount = 0;
     qint64 rawMaximumId = 0;
+    QString rawContentSha256;
     int barCount = 0;
     int cacheVersion = 0;
 };
@@ -25,6 +26,7 @@ struct BacktestDatasetIdentity {
     int periodSeconds = 0;
     QString source = QStringLiteral("raw_tick_cache_v1");
     int aggregatorVersion = 1;
+    int fingerprintVersion = 2;
     QVector<RawTickDayFingerprint> days;
     QString datasetVersion;
     QDate firstTradingDate;

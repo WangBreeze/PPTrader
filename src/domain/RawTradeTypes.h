@@ -29,6 +29,8 @@ struct RawTradeTick {
 struct RawTradeFingerprint {
     qint64 count = 0;
     qint64 maximumId = 0;
+    // 规范化逐笔内容摘要；不包含 SQLite id/imported_at，避免同一事实重导后身份漂移。
+    QString contentSha256;
 };
 
 // 盘中逐笔增量批次的落库与局部缓存刷新结果。sourceLine 在实时接入时

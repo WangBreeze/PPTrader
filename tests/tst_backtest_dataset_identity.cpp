@@ -75,6 +75,10 @@ bool seedCache(SqliteLocalDataStore &store, const QDate &day, int periodSeconds,
     RawTradeFingerprint fingerprint;
     fingerprint.count = rawCount;
     fingerprint.maximumId = rawMaximumId;
+    const RawTradeFingerprint current = store.rawTradeFingerprint(instrument(), day);
+    if (current.count == rawCount && current.maximumId == rawMaximumId) {
+        fingerprint.contentSha256 = current.contentSha256;
+    }
     return store.replaceRawTickCandleCache(instrument(), day, periodSeconds,
                                            fingerprint, candles);
 }
@@ -88,6 +92,8 @@ private slots:
     void emptyDatabaseHasNoIdentity();
     void assemblesFactsAndCacheState();
     void datasetVersionIsDeterministicAndChangesWithFacts();
+    void datasetVersionChangesWhenTickContentChangesInPlace();
+    void legacyIdentityJsonRemainsReadable();
     void staleCacheIsReported();
     void calendarCoverageComputesGaps();
     void v3MigrationAddsColumnsAndHistory();
@@ -99,7 +105,7 @@ void BacktestDatasetIdentityTest::emptyDatabaseHasNoIdentity()
     QVERIFY(directory.isValid());
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(directory.filePath(QStringLiteral("empty.db"))));
-    QCOMPARE(store.schemaVersion(), 5);
+    QCOMPARE(store.schemaVersion(), 6);
     QVERIFY(store.loadBacktestDatasetIdentities().isEmpty());
     QVERIFY(!store.loadBacktestDatasetIdentity(instrument(), 60).has_value());
 }
@@ -122,6 +128,7 @@ void BacktestDatasetIdentityTest::assemblesFactsAndCacheState()
     QCOMPARE(identity->periodSeconds, 60);
     QCOMPARE(identity->source, QStringLiteral("raw_tick_cache_v1"));
     QCOMPARE(identity->aggregatorVersion, 1);
+    QCOMPARE(identity->fingerprintVersion, 2);
     QCOMPARE(identity->days.size(), 2);
     QCOMPARE(identity->firstTradingDate, firstDay);
     QCOMPARE(identity->lastTradingDate, secondDay);
@@ -130,6 +137,7 @@ void BacktestDatasetIdentityTest::assemblesFactsAndCacheState()
     QCOMPARE(identity->staleDayCount, 1);
     QCOMPARE(identity->days.at(0).barCount, 2);
     QCOMPARE(identity->days.at(0).cacheVersion, 1);
+    QVERIFY(identity->days.at(0).rawContentSha256.startsWith(QStringLiteral("sha256:")));
     QCOMPARE(identity->days.at(1).barCount, 0);
     QVERIFY(identity->datasetVersion.startsWith(QStringLiteral("sha256:")));
     QVERIFY(identity->toJson().contains(QStringLiteral("2026-01-05")));
@@ -166,6 +174,18 @@ void BacktestDatasetIdentityTest::datasetVersionIsDeterministicAndChangesWithFac
     QCOMPARE(second->datasetVersion, first->datasetVersion);
     QCOMPARE(computeBacktestDatasetVersion(*first), first->datasetVersion);
 
+    // 相同事实重导只改变 SQLite 物理行 ID，不应改变 v2 内容身份或使缓存过期。
+    QVERIFY(insertFacts(store, day, 3));
+    const auto reimported = store.loadBacktestDatasetIdentity(instrument(), 60);
+    QVERIFY(reimported.has_value());
+    QVERIFY(reimported->days.first().rawMaximumId
+            != first->days.first().rawMaximumId);
+    QCOMPARE(reimported->days.first().rawContentSha256,
+             first->days.first().rawContentSha256);
+    QCOMPARE(reimported->datasetVersion, first->datasetVersion);
+    QCOMPARE(reimported->staleDayCount, 0);
+    QVERIFY(store.rawTickCandleCacheFresh(instrument(), day, 60));
+
     // 追加事实（同日期替换为 4 条）后身份必须变化，旧身份字符串保持不变。
     QVERIFY(insertFacts(store, day, 4));
     const auto changed = store.loadBacktestDatasetIdentity(instrument(), 60);
@@ -182,6 +202,72 @@ void BacktestDatasetIdentityTest::datasetVersionIsDeterministicAndChangesWithFac
     QVERIFY(minute.has_value());
     QVERIFY(fiveMinute.has_value());
     QVERIFY(minute->datasetVersion != fiveMinute->datasetVersion);
+}
+
+void BacktestDatasetIdentityTest::datasetVersionChangesWhenTickContentChangesInPlace()
+{
+    QTemporaryDir directory;
+    const QString path = directory.filePath(QStringLiteral("content-change.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate day(2026, 1, 5);
+    QVERIFY(insertFacts(store, day, 3));
+    QVERIFY(seedCache(store, day, 60, 2, 3, 3));
+    const auto before = store.loadBacktestDatasetIdentity(instrument(), 60);
+    QVERIFY(before.has_value());
+    QCOMPARE(before->staleDayCount, 0);
+
+    const QString connection = QUuid::createUuid().toString();
+    {
+        QSqlDatabase probe = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        probe.setDatabaseName(path);
+        QVERIFY(probe.open());
+        QSqlQuery update(probe);
+        update.prepare(QStringLiteral(
+            "update raw_trade_ticks set price = price + 0.25, amount = amount + 25 "
+            "where symbol = ? and trading_date = ? and source_line = 2"));
+        update.addBindValue(instrument().symbol);
+        update.addBindValue(day.toString(Qt::ISODate));
+        QVERIFY(update.exec());
+        QCOMPARE(update.numRowsAffected(), 1);
+        probe.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+
+    const auto after = store.loadBacktestDatasetIdentity(instrument(), 60);
+    QVERIFY(after.has_value());
+    QCOMPARE(after->rawTickTotal(), before->rawTickTotal());
+    QCOMPARE(after->days.first().rawMaximumId, before->days.first().rawMaximumId);
+    QVERIFY(after->days.first().rawContentSha256
+            != before->days.first().rawContentSha256);
+    QVERIFY(after->datasetVersion != before->datasetVersion);
+    QCOMPARE(after->staleDayCount, 1);
+    QVERIFY(!store.rawTickCandleCacheFresh(instrument(), day, 60));
+}
+
+void BacktestDatasetIdentityTest::legacyIdentityJsonRemainsReadable()
+{
+    BacktestDatasetIdentity legacy;
+    legacy.instrument = instrument();
+    legacy.periodSeconds = 60;
+    legacy.fingerprintVersion = 1;
+    RawTickDayFingerprint day;
+    day.tradingDate = QDate(2026, 1, 5);
+    day.rawCount = 3;
+    day.rawMaximumId = 7;
+    legacy.days.append(day);
+    legacy.firstTradingDate = day.tradingDate;
+    legacy.lastTradingDate = day.tradingDate;
+    legacy.datasetVersion = computeBacktestDatasetVersion(legacy);
+    QString json = legacy.toJson();
+    json.replace(QStringLiteral(",\"fingerprintVersion\":1"), QString());
+    json.replace(QStringLiteral(",\"rawContentSha256\":\"\""), QString());
+
+    BacktestDatasetIdentity restored;
+    QVERIFY(restored.fromJson(json));
+    QCOMPARE(restored.fingerprintVersion, 1);
+    QVERIFY(restored.days.first().rawContentSha256.isEmpty());
+    QCOMPARE(computeBacktestDatasetVersion(restored), legacy.datasetVersion);
 }
 
 void BacktestDatasetIdentityTest::staleCacheIsReported()
@@ -273,7 +359,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(databasePath));
-        QCOMPARE(store.schemaVersion(), 5);
+        QCOMPARE(store.schemaVersion(), 6);
     }
 
     // 模拟旧 v2 库：降低 user_version 后重新打开，应自动备份并升级到当前版本。
@@ -290,7 +376,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-        QCOMPARE(store.schemaVersion(), 5);
+    QCOMPARE(store.schemaVersion(), 6);
     QVERIFY(!store.lastMigrationBackupPath().isEmpty());
 
     {
@@ -311,6 +397,14 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
         QVERIFY(history.exec(QStringLiteral(
             "select count(*) from schema_migration_history where version = 4 "
             "and migration_name = 'batch_backtest_recovery'")));
+        QVERIFY(history.next());
+        QCOMPARE(history.value(0).toInt(), 1);
+    }
+    {
+        QSqlQuery history(verify);
+        QVERIFY(history.exec(QStringLiteral(
+            "select count(*) from schema_migration_history where version = 6 "
+            "and migration_name = 'raw_tick_content_identity'")));
         QVERIFY(history.next());
         QCOMPARE(history.value(0).toInt(), 1);
     }

@@ -124,6 +124,10 @@ private:
     bool verifyRequiredTables(QString *error = nullptr) const;
     bool ensureSchema();
     bool ensureColumn(const QString &tableName, const QString &columnName, const QString &definition);
+    QString loadOrComputeRawTradeContentSha256(const QString &symbol,
+                                               const QDate &tradingDate,
+                                               qint64 rawCount,
+                                               qint64 rawMaximumId);
     int tableRowCount(const QString &tableName) const;
     void emitSqlError(const QString &operation);
 

@@ -43,6 +43,12 @@ QString computeBacktestDataVersion(const QVector<Candle> &candles,
 
 QString computeBacktestDatasetVersion(const BacktestDatasetIdentity &identity)
 {
+    const bool hasContentDigests = !identity.days.isEmpty()
+        && std::all_of(identity.days.cbegin(), identity.days.cend(),
+                       [](const RawTickDayFingerprint &day) {
+            return day.rawContentSha256.startsWith(QStringLiteral("sha256:"))
+                && day.rawContentSha256.size() == 71;
+        });
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(identity.instrument.symbol.toUtf8());
     hash.addData("\n");
@@ -52,6 +58,7 @@ QString computeBacktestDatasetVersion(const BacktestDatasetIdentity &identity)
     hash.addData("\n");
     hash.addData(QByteArray::number(identity.aggregatorVersion));
     hash.addData("\n");
+    if (hasContentDigests) hash.addData("raw-content-sha256-v2\n");
 
     QVector<RawTickDayFingerprint> days = identity.days;
     std::sort(days.begin(), days.end(), [](const RawTickDayFingerprint &left,
@@ -62,8 +69,13 @@ QString computeBacktestDatasetVersion(const BacktestDatasetIdentity &identity)
         hash.addData(day.tradingDate.toString(Qt::ISODate).toUtf8());
         hash.addData(",");
         hash.addData(QByteArray::number(day.rawCount));
-        hash.addData(",");
-        hash.addData(QByteArray::number(day.rawMaximumId));
+        if (hasContentDigests) {
+            hash.addData(",");
+            hash.addData(day.rawContentSha256.toUtf8());
+        } else {
+            hash.addData(",");
+            hash.addData(QByteArray::number(day.rawMaximumId));
+        }
         hash.addData("\n");
     }
     return QStringLiteral("sha256:%1").arg(QString::fromLatin1(hash.result().toHex()));

@@ -8,7 +8,8 @@
 
 namespace pp {
 
-// 组合资金回测引擎：共享资金池，按目标权重在共同交易日收盘定期再平衡。
+// 组合资金回测引擎：共享资金池，在观测交易日并集逐日估值，
+// 仅在共同交易日按目标权重收盘定期再平衡。
 // 与单标的 BacktestEngine 独立，复用 A 股整手、费用、滑点与 T+1 语义。
 class PortfolioBacktestEngine final {
 public:
