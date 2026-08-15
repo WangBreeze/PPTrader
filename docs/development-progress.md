@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 补齐单股回测遗留项：① 买卖点悬停提示（`BacktestCandleChart` hover Tooltip 展示生效条件/成交量/价格）；② 仓位风控（`position.type=fixedAmount` + `risk.maxPositionPercent` 封顶，`BacktestEngine::openPosition` 复用 `FixedAmountPositionSizer` 口径，`tst_custom_strategy` 18/18）；③ `replayBacktestBar(index)` 只读逐 Bar 回放接口（返回 K 线 OHLCV + 该 Bar 买卖信号）。样本窗与验证记录留待后续。
+
 - 完成回测 K 线图买卖点标注：`BacktestResult` 保存回测 K 线（`candles`），新增 `BacktestCandleChart` QML 组件（Canvas 蜡烛 + B/S 买卖点圆点标注），集成到策略页回测结果区（K 线与买卖点、权益曲线、成交记录三栏）。买卖点来自 `candleModel` 的策略信号（`hasSignal`/`signalSide`/`signalPrice`），买入绿 `B`、卖出红 `S`。
 
 - 完成阶段 3.2 多股回测对接：`TradingController` 暴露 `crossSectionalBacktest*` 契约（running/status/error/结果配置/权益曲线/成交模型 + `runCrossSectionalBacktest`/`cancelCrossSectionalBacktest`），新增 `CrossSectionalBacktestPanel` QML 面板（DSL v3 JSON 输入、运行/取消、权益曲线与调仓明细），复用 `PPTheme`/`PpButton`/`BacktestEquityChart` 视觉语言并集成到策略页。`all_qmllint` 通过，主程序加载无 QML 错误。
