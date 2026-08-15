@@ -78,6 +78,12 @@ class TradingController final : public QObject {
     Q_PROPERTY(QAbstractItemModel *signalModel READ signalModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *strategyModel READ strategyModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *strategyIntentModel READ strategyIntentModel CONSTANT)
+    Q_PROPERTY(bool customStrategyReplayRunning READ customStrategyReplayRunning
+               NOTIFY customStrategyReplayStateChanged)
+    Q_PROPERTY(int customStrategyReplayedBars READ customStrategyReplayedBars
+               NOTIFY customStrategyReplayStateChanged)
+    Q_PROPERTY(int customStrategyReplayTotalBars READ customStrategyReplayTotalBars
+               NOTIFY customStrategyReplayStateChanged)
     Q_PROPERTY(QAbstractItemModel *customStrategyModel READ customStrategyModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *searchModel READ searchModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *instrumentModel READ instrumentModel CONSTANT)
@@ -731,6 +737,9 @@ public:
     int strategyCount() const;
     int strategyThreadCount() const;
     int pendingStrategyIntentCount() const;
+    bool customStrategyReplayRunning() const;
+    int customStrategyReplayedBars() const;
+    int customStrategyReplayTotalBars() const;
     int aShareUniverseCount() const;
     int aShareUniverseSourceCount() const;
     int aShareUniverseRejectedCount() const;
@@ -909,6 +918,9 @@ public:
     Q_INVOKABLE bool disableCustomStrategyExecution(const QString &strategyId);
     Q_INVOKABLE bool isCustomStrategyExecuting(const QString &strategyId) const;
     Q_INVOKABLE QVariantList customStrategyRuntimePlugins() const;
+    Q_INVOKABLE bool startCustomStrategyReplay(const QString &strategyId, const QString &symbol,
+                                               int periodSeconds, int barCount, int intervalMs);
+    Q_INVOKABLE void stopCustomStrategyReplay();
     Q_INVOKABLE bool requestMarketSnapshot(const QDateTime &requestedTime);
     Q_INVOKABLE bool requestMarketSnapshotAt(const QString &marketTime);
     Q_INVOKABLE bool requestLatestMarketSnapshot();
@@ -965,6 +977,7 @@ signals:
     void strategyExecutionStateChanged();
     void strategyExecutionConfigChanged(const QString &strategyId);
     void notificationSettingsChanged();
+    void customStrategyReplayStateChanged();
     void crossSectionalFrameUpdated(const pp::FactorFrame &frame);
     void marketSnapshotChanged();
     void snapshotQueryStateChanged();
@@ -986,6 +999,7 @@ private:
     void handleMarketSnapshot(const MarketSnapshot &snapshot);
     void handleRealtimeSignal(const TradeSignal &signal);
     void handleStrategySignal(const QString &strategyId, const TradeSignal &signal);
+    void handleCustomStrategyReplayTick();
     void handleBacktestPoint(const CandlePoint &point);
     void handleBacktestTrade(const BacktestTrade &trade);
     void handleHistoryDownloadReady(quint64 requestId,
@@ -1137,6 +1151,10 @@ private:
     QVector<Instrument> m_aShareUniverse;
     QTimer m_marketClockTimer;
     QTimer m_tradingPersistenceTimer;
+    QTimer m_customStrategyReplayTimer;
+    QVector<Candle> m_customStrategyReplayCandles;
+    int m_customStrategyReplayIndex = 0;
+    QString m_customStrategyReplaySymbol;
     BacktestConfig m_pendingBacktestConfig;
     std::optional<CompiledCustomStrategy> m_pendingCustomBacktestPlan;
     std::optional<BacktestResult> m_displayedBacktestResult;

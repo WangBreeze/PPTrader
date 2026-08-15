@@ -577,10 +577,10 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
-                Layout.fillWidth: true; Layout.preferredHeight: 380
+                Layout.fillWidth: true; Layout.preferredHeight: 480
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "执行审批与通知"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
-                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "模拟执行 · 桌面/Webhook 通知"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "模拟执行 · 回放驱动 · 桌面/Webhook 通知"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                 ExecutionApprovalPanel {
                     x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
                     theme: root.theme; controller: root.controller

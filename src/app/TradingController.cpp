@@ -343,6 +343,9 @@ TradingController::TradingController(QObject *parent)
     connect(&m_strategyEngine, &StrategyEngine::strategyCountChanged, this, &TradingController::strategyStateChanged);
     connect(&m_strategyEngine, &StrategyEngine::maxThreadCountChanged, this, &TradingController::strategyStateChanged);
     connect(&m_marketClockTimer, &QTimer::timeout, this, &TradingController::selectedMarketSessionChanged);
+    m_customStrategyReplayTimer.setSingleShot(false);
+    connect(&m_customStrategyReplayTimer, &QTimer::timeout,
+            this, &TradingController::handleCustomStrategyReplayTick);
     m_tradingPersistenceTimer.setSingleShot(true);
     m_tradingPersistenceTimer.setInterval(1000);
     connect(&m_tradingPersistenceTimer, &QTimer::timeout,
@@ -4667,6 +4670,88 @@ QVariantList TradingController::customStrategyRuntimePlugins() const
         result.append(plugin.toVariantMap());
     }
     return result;
+}
+
+bool TradingController::customStrategyReplayRunning() const
+{
+    return m_customStrategyReplayTimer.isActive();
+}
+
+int TradingController::customStrategyReplayedBars() const
+{
+    return m_customStrategyReplayIndex;
+}
+
+int TradingController::customStrategyReplayTotalBars() const
+{
+    return m_customStrategyReplayCandles.size();
+}
+
+bool TradingController::startCustomStrategyReplay(const QString &strategyId,
+                                                 const QString &symbol,
+                                                 int periodSeconds, int barCount,
+                                                 int intervalMs)
+{
+    if (m_customStrategyReplayTimer.isActive()) {
+        stopCustomStrategyReplay();
+    }
+    if (m_customStrategyRuntimeManager.state(strategyId) != CustomStrategyRuntimeState::Active) {
+        setStatusText(QStringLiteral("策略未处于模拟执行状态，请先启用模拟执行：%1").arg(strategyId));
+        return false;
+    }
+    if (barCount <= 0) barCount = 300;
+    if (barCount > 2000) barCount = 2000;
+    if (periodSeconds <= 0) periodSeconds = 60;
+    if (intervalMs < 20) intervalMs = 20;
+
+    Instrument instrument = findInstrument(symbol.trimmed());
+    if (instrument.symbol.isEmpty()) {
+        instrument.symbol = symbol.trimmed();
+        instrument.name = symbol.trimmed();
+        instrument.market = Market::AShare;
+    }
+
+    const QVector<Candle> candles = m_dataStore.loadRecentCandlesFromSource(
+        instrument, periodSeconds, barCount, QStringLiteral("raw_tick_cache_v1"));
+    if (candles.isEmpty()) {
+        setStatusText(QStringLiteral("没有可用于回放的 raw_tick_cache_v1 本地 K 线：%1").arg(symbol));
+        return false;
+    }
+
+    m_customStrategyReplayCandles = candles;
+    m_customStrategyReplayIndex = 0;
+    m_customStrategyReplaySymbol = instrument.symbol;
+    m_customStrategyReplayTimer.setInterval(intervalMs);
+    m_customStrategyReplayTimer.start();
+    emit customStrategyReplayStateChanged();
+    setStatusText(QStringLiteral("模拟回放开始：%1 · %2 根 · 间隔 %3 ms")
+        .arg(instrument.symbol).arg(candles.size()).arg(intervalMs));
+    return true;
+}
+
+void TradingController::stopCustomStrategyReplay()
+{
+    if (m_customStrategyReplayTimer.isActive()) {
+        m_customStrategyReplayTimer.stop();
+    }
+    m_customStrategyReplayCandles.clear();
+    m_customStrategyReplayIndex = 0;
+    emit customStrategyReplayStateChanged();
+    setStatusText(QStringLiteral("模拟回放已停止"));
+}
+
+void TradingController::handleCustomStrategyReplayTick()
+{
+    if (m_customStrategyReplayIndex >= m_customStrategyReplayCandles.size()) {
+        const int total = m_customStrategyReplayCandles.size();
+        stopCustomStrategyReplay();
+        setStatusText(QStringLiteral("模拟回放完成：共 %1 根").arg(total));
+        return;
+    }
+    const Candle candle = m_customStrategyReplayCandles.at(m_customStrategyReplayIndex);
+    ++m_customStrategyReplayIndex;
+    m_strategyEngine.dispatchCandle(candle);
+    emit customStrategyReplayStateChanged();
 }
 
 bool TradingController::requestMarketSnapshot(const QDateTime &requestedTime)
