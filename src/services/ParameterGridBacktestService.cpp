@@ -20,7 +20,9 @@ ParameterGridBacktestService::~ParameterGridBacktestService()
 {
     cancel();
     m_thread.quit();
-    m_thread.wait(5000);
+    // 无界等待：scan 组合数有限（≤512）且 cancel 标志在组合间检查，任务必然终止，
+    // 避免固定超时后 QThread 运行中被析构 + worker 访问已析构成员。
+    m_thread.wait();
     m_worker = nullptr;
 }
 

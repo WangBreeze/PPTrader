@@ -104,7 +104,10 @@ Item {
     function addCondition() {
         const model = root.activeConditionSide === 0 ? entryConditionsModel : exitConditionsModel
         const alias = seriesModel.count > 0 ? seriesModel.get(0).alias : "close"
-        model.append({ leftOperand: "close", op: "gt", rightOperand: alias, rightConstant: 0 })
+        // leftKind/rightKind 与种子行保持同构；无序列时右侧回退为字段 close。
+        const rightKind = seriesModel.count > 0 ? "series" : "field"
+        model.append({ leftOperand: "close", leftKind: "field", op: "gt",
+                       rightOperand: alias, rightKind: rightKind, rightConstant: 0 })
         root.statusText = "草稿未保存"
         root.saveDraft()
         root.previewDirty = true
@@ -895,8 +898,9 @@ Item {
                                         onActivated: {
                                             const values = ["close", "open", "high", "low", "volume"].concat(root.seriesNames())
                                             root.conditionModel().setProperty(parent.index, "leftOperand", values[currentIndex])
+                                            // 前 5 项为字段，其余为序列别名（勿用字符串长度启发式，短别名会被误判为字段）。
                                             root.conditionModel().setProperty(parent.index, "leftKind",
-                                                values[currentIndex].length <= 6 ? "field" : "series")
+                                                currentIndex < 5 ? "field" : "series")
                                             root.previewDirty = true
                                         }
                                         delegate: ItemDelegate {

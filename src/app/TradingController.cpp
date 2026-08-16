@@ -4713,6 +4713,16 @@ bool TradingController::loadStrategyPlugin(const QString &fileName)
 
 bool TradingController::unloadStrategyPlugin(const QString &pluginId)
 {
+    // 先停用该插件创建的所有策略（其 vtable 位于插件 DLL，卸载后调用即悬空崩溃）。
+    const QStringList strategyIds = m_pluginStrategyIds.value(pluginId);
+    for (const QString &strategyId : strategyIds) {
+        m_strategyEngine.removeStrategy(strategyId);
+        m_strategyModel.removeStrategy(strategyId);
+        m_strategyExecutionCoordinator.removeConfiguration(strategyId);
+    }
+    m_pluginStrategyIds.remove(pluginId);
+    if (!strategyIds.isEmpty()) emit strategyStateChanged();
+
     QString error;
     if (!m_strategyPluginManager.unload(pluginId, &error)) {
         setStatusText(QStringLiteral("插件卸载失败：%1").arg(error));
@@ -4776,6 +4786,7 @@ bool TradingController::activateStrategyPluginStrategy(const QString &pluginId,
         return false;
     }
     m_strategyEngine.addStrategy(strategy);
+    m_pluginStrategyIds[pluginId].append(strategyId);
     ensureStrategyExecutionConfiguration(strategyId, 0);
     m_strategyModel.addStrategy({strategyId, strategy->subscribedSymbols().value(0),
         strategy->displayName(), QStringLiteral("第三方插件策略 %1").arg(pluginId),

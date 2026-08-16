@@ -101,6 +101,8 @@ void StrategyEngine::clearStrategies()
         return;
     }
 
+    // 等待在途 onTick/onCandle 结束，避免 deleteLater 与 pool 任务竞态导致 use-after-free。
+    m_pool.waitForDone();
     for (Strategy *strategy : std::as_const(m_strategies)) {
         strategy->deleteLater();
     }
@@ -123,6 +125,8 @@ bool StrategyEngine::removeStrategy(const QString &id)
         }
         m_enabledById.remove(id);
         m_strategies.removeAt(index);
+        // 等待在途任务结束，再删除策略（QPointer 只防「已删后启动」，不防「执行中并发删」）。
+        m_pool.waitForDone();
         strategy->deleteLater();
         emit strategyCountChanged();
         return true;

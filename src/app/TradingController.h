@@ -1172,6 +1172,7 @@ private:
     NotificationDispatcher m_notificationDispatcher;
     StrategyEngine m_strategyEngine;
     StrategyPluginManager m_strategyPluginManager;
+    QHash<QString, QStringList> m_pluginStrategyIds; // 插件 pluginId → 其创建的策略 id（卸载前停用）
     CustomStrategyRuntimeManager m_customStrategyRuntimeManager;
     WorkspaceInstrumentSelectionState m_workspaceInstrumentSelections;
     InstrumentListModel m_instrumentModel;
