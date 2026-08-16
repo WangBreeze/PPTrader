@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 按 Figma 稿（节点 `1409:577`「二级导航骨架」）实现二级导航：顶部保留 3 个一级 tab（主页面/指标与策略/全市场时刻股价），新增左侧 318px 二级抽屉（仅「指标与策略」tab 显示，主页/全市场无二级分类则收起；标题「策略研究」+ 副标题）；抽屉 3 组 7 入口（研究与构建：回测研究/自定义策略/组合回测/多股回测/参数网格扫描；策略执行：执行与审批；数据管理：数据导入与同步），菜单项做 `subPage` 索引跳转切换面板显隐，选中态 cyan 高亮 + `bgSelected`(#102B38) 底 + cyan 描边；「指标与策略」页 14 个功能区重新归类为 7 个二级入口，多股回测 `CrossSectionalBacktestPanel` 挂载到「多股回测」入口。仅改入口与面板显隐，未改面板内部逻辑。`all_qmllint` 通过，主程序加载无 QML 错误。
+
 - 完成插件参数 schema：`StrategyPlugin` 接口新增 `parameterSchema()`（`PluginParameterSpec` key/displayName/type/defaultValue/min/max/step），示例插件声明 `threshold`（real，默认 100，范围 1–10000），`TradingController` 暴露 `strategyPluginParameterSchema(pluginId)` 供 UI 动态生成参数表单；`tst_strategy_plugin` 增补 schema 断言（8 用例），CTest 30/30。QML 动态参数表单待插件管理 UI 按 Figma 稿实现时一并落地。
 
 - 完成文件日志系统：`LogService` 单例（分级 Debug/Info/Warning/Error、按大小滚动保留有限备份、线程安全、QTextStream UTF-8），`TradingController` 启动配置日志到 `应用目录/logs/pptrader.log`（5MB × 3 备份），`setStatusText` 同步写 Info 日志；新增 `tst_log_service`（5 用例：写入分级/按大小滚动/重新配置切路径），CTest 30/30。已实测启动日志与状态日志正确落盘（UTF-8）。
