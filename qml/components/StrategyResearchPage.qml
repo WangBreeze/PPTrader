@@ -8,6 +8,7 @@ Item {
     required property var theme
     required property var controller
     property int strategyMode: 0
+    property int subPage: 0 // 二级入口索引：0回测研究 1自定义策略 2组合回测 3多股回测 4参数网格扫描 5执行与审批 6数据管理
     property bool identityExpanded: false
     readonly property bool hasBacktestResult: controller.completedBacktestTaskId > 0
     readonly property bool customMode: strategyMode === 1
@@ -94,6 +95,7 @@ Item {
 
             Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: 450
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 LocalBacktestSelector {
                     anchors.fill: parent; anchors.margins: 18
@@ -103,6 +105,7 @@ Item {
 
             Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: 270
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Item {
                     anchors.fill: parent; visible: !root.customMode
@@ -136,6 +139,7 @@ Item {
 
             Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: 270
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 16; text: "回测状态与摘要"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { x: 18; y: 52; width: parent.width - 36; text: root.controller.backtestStatusText; color: root.controller.backtestRunning ? root.theme.yellow : root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 13; font.weight: Font.Bold }
@@ -154,6 +158,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 340
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "远端 K 线研究缓存（不用于回测）"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "仅显式下载；不会进入回测数据选择器"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -166,6 +171,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 270
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "NAS Tick 按需同步"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "HTTPS catalog · SHA-256 · 本地事务入库"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -178,6 +184,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 392
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "TickData 本地 CSV 导入"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "单代码 · 单交易日 · 只读显式选择的本地文件"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -190,6 +197,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 500
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "TickData 多交易日受控导入"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "先生成确定性计划 · 单文件事务 · 可取消/继续"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -202,6 +210,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 470
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "本地分钟序列"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "SQLite 分页 · OHLCV 桶聚合 · Scene Graph 批量几何"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -214,7 +223,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 250
-                visible: !root.customMode
+                visible: root.subPage === 0 && !root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 16; text: "内置回测策略"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 18; text: "单击选择 · 参数按策略独立校验"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -250,7 +259,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 236
-                visible: !root.customMode
+                visible: root.subPage === 0 && !root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 16; text: "回测配置与策略参数"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Flow {
@@ -371,7 +380,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 610
-                visible: root.customMode
+                visible: root.subPage === 1 && root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "自定义策略版本与 JSON"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "声明式 DSL · SQLite 严格本地 · 不进入订单链路"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -385,6 +394,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 250
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 BacktestArchivePanel {
                     anchors.fill: parent; anchors.margins: 18
@@ -395,6 +405,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 500
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 BatchBacktestPanel {
                     anchors.fill: parent; anchors.margins: 18
@@ -405,6 +416,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 620
+                visible: root.subPage === 2
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 PortfolioBacktestPanel {
                     anchors.fill: parent; anchors.margins: 18
@@ -417,6 +429,7 @@ Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.customMode
                     ? (root.identityExpanded ? 540 : 438) : 390
+                visible: root.subPage === 0
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 16; text: "权益曲线与成交明细"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: root.customMode ? 132 : 18; y: 18; text: root.hasBacktestResult ? (root.controller.backtestResultHistoricalSnapshot ? "历史归档 · " : "当前任务 · ") + root.controller.backtestResultSymbol + " · " + root.controller.backtestResultStrategyId + " · 任务 " + root.controller.completedBacktestTaskId : "尚无结果"; color: root.customResultMismatch || root.controller.backtestResultHistoricalSnapshot ? root.theme.yellow : root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -578,6 +591,7 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 480
+                visible: root.subPage === 5
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "执行审批与通知"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "模拟执行 · 回放驱动 · 桌面/Webhook 通知"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
@@ -590,11 +604,24 @@ Item {
             Rectangle {
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 420
-                visible: root.customMode
+                visible: root.subPage === 4 && root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "参数网格扫描"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
                 Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "笛卡尔积回测 · 收益率降序"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                 ParameterGridPanel {
+                    x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 640
+                visible: root.subPage === 3
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                Text { x: 18; y: 14; text: "多股横截面回测"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "DSL v3 · 横截面选股/轮动 · 只读取 raw_tick_cache_v1"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                CrossSectionalBacktestPanel {
                     x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
                     theme: root.theme; controller: root.controller
                 }
