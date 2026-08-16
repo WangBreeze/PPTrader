@@ -37,3 +37,7 @@ Git history is not available in this checkout, so no repository-specific message
 ## Data & Configuration Safety
 
 Do not commit generated databases, credentials, API tokens, or machine-specific Qt paths. Treat `data/pptrader.db` and downloaded market caches as local runtime data unless a fixture is intentionally documented.
+
+## 代码图谱 / codebase-memory MCP 注意事项
+
+`codebase-memory` MCP（`mcp__codebase__*` 工具）运行在 Linux 环境，**无法访问 Windows 工作区 `I:\workspace\PPTrader`**——`index_repository` 对 `I:\workspace\PPTrader` 会报 `repo_path exists and contains source files`，这是跨文件系统隔离，不是路径写错。现有索引 `home-wanglc-PPTrader` 是过时副本，不含本工作区近期改动；图谱对 QML 隐式组件引用也捕捉有限。查最新代码结构/进度时以本地 `git log` + `docs/development-progress.md` 为准，页面切换/组件关系读 QML 源码确认。
