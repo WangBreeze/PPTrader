@@ -50,14 +50,15 @@ Item {
         }
     }
 
-    component ToggleRow: Row {
+    component ToggleRow: Item {
         id: toggleRow
         property string toggleLabel: ""
         property bool toggleChecked: false
-        spacing: 8
+        width: toggleLabel.length * 11 + 26
+        height: 18
         Rectangle {
             id: box
-            width: 14; height: 14; radius: 3
+            x: 0; width: 14; height: 14; radius: 3
             anchors.verticalCenter: toggleRow.verticalCenter
             color: toggleRow.toggleChecked ? root.theme.cyan : root.theme.bgInput
             border.width: 1
@@ -70,8 +71,9 @@ Item {
             }
         }
         Text {
-            text: toggleRow.toggleLabel
+            x: 22
             anchors.verticalCenter: toggleRow.verticalCenter
+            text: toggleRow.toggleLabel
             color: root.theme.textPrimary
             font.family: root.theme.fontFamily; font.pixelSize: 10
         }
