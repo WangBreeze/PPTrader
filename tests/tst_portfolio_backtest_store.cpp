@@ -88,7 +88,7 @@ void PortfolioBacktestStoreTest::archiveRoundTripAndMigrationVersion()
     const QString path = directory.filePath(QStringLiteral("portfolio.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 6);
+    QCOMPARE(store.schemaVersion(), 7);
 
     const PortfolioResult result = makeResult();
     PortfolioArchiveRecord record;

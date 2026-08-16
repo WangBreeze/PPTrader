@@ -126,7 +126,7 @@ void ParameterGridScannerTest::scanRunsAllCombinationsAndSorts()
         {QStringLiteral("sellLevel"), {90.0, 80.0}},
     };
     const auto results = ParameterGridScanner::scan(
-        definition, axes, makeCandles(), makeConfig(), 512, &error);
+        definition, axes, makeCandles(), makeConfig(), 512, nullptr, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(results.size(), 4);
 
@@ -150,7 +150,7 @@ void ParameterGridScannerTest::scanRejectsTooManyCombinations()
         {QStringLiteral("sellLevel"), {90.0, 80.0, 70.0}},
     };
     const auto results = ParameterGridScanner::scan(
-        definition, axes, makeCandles(), makeConfig(), 8, &error);
+        definition, axes, makeCandles(), makeConfig(), 8, nullptr, &error);
     QVERIFY(results.isEmpty());
     QVERIFY(error.contains(QStringLiteral("组合过多")));
 }
@@ -160,7 +160,7 @@ void ParameterGridScannerTest::scanReportsEmptyGrid()
     QString error;
     const CustomStrategyDefinition definition = validatedDefinition(&error);
     const auto results = ParameterGridScanner::scan(
-        definition, {}, makeCandles(), makeConfig(), 512, &error);
+        definition, {}, makeCandles(), makeConfig(), 512, nullptr, &error);
     // 空轴 → 笛卡尔积只有 1 个空组合，用默认参数回测一次。
     QCOMPARE(results.size(), 1);
 }
