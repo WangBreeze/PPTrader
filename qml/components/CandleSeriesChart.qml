@@ -201,7 +201,8 @@ Control {
         color: root.theme.bgRaised; border.color: root.theme.cyan
         Text {
             anchors.centerIn: parent
-            text: Qt.formatDateTime(root.hoverPoint.timestamp, "MM-dd HH:mm:ss")
+            text: root.hoverPoint.timestamp
+                  ? Qt.formatDateTime(root.hoverPoint.timestamp, "MM-dd HH:mm:ss") : "--"
             color: root.theme.textPrimary
             font.family: root.theme.fontFamily; font.pixelSize: 8
         }
@@ -213,13 +214,15 @@ Control {
                                               ? root.theme.yellow : root.theme.cyan
         Text {
             anchors.fill: parent; anchors.margins: 7
-            text: Qt.formatDateTime(root.hoverPoint.timestamp, "yyyy-MM-dd HH:mm:ss")
-                  + "  O " + Number(root.hoverPoint.open).toFixed(2)
-                  + " H " + Number(root.hoverPoint.high).toFixed(2)
-                  + " L " + Number(root.hoverPoint.low).toFixed(2)
-                  + " C " + Number(root.hoverPoint.close).toFixed(2)
-                  + "\n量 " + Number(root.hoverPoint.volume).toFixed(0)
-                  + (root.crosshairLocked ? " · 已锁定" : "")
+            text: root.hoverPoint.timestamp
+                  ? (Qt.formatDateTime(root.hoverPoint.timestamp, "yyyy-MM-dd HH:mm:ss")
+                     + "  O " + Number(root.hoverPoint.open).toFixed(2)
+                     + " H " + Number(root.hoverPoint.high).toFixed(2)
+                     + " L " + Number(root.hoverPoint.low).toFixed(2)
+                     + " C " + Number(root.hoverPoint.close).toFixed(2)
+                     + "\n量 " + Number(root.hoverPoint.volume).toFixed(0)
+                     + (root.crosshairLocked ? " · 已锁定" : ""))
+                  : ""
             color: root.theme.textPrimary
             font.family: root.theme.fontFamily; font.pixelSize: 8
             wrapMode: Text.Wrap

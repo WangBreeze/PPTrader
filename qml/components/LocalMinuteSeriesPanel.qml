@@ -175,14 +175,16 @@ Item {
                 color: root.theme.bgRaised; border.color: root.theme.cyan
                 Text {
                     anchors.fill: parent; anchors.margins: 8
-                    text: Qt.formatDateTime(root.hoverPoint.timestamp, "yyyy-MM-dd HH:mm")
-                          + "  开 " + Number(root.hoverPoint.open).toFixed(2)
-                          + "  高 " + Number(root.hoverPoint.high).toFixed(2)
-                          + "  低 " + Number(root.hoverPoint.low).toFixed(2)
-                          + "  收 " + Number(root.hoverPoint.close).toFixed(2)
-                          + "\n成交量 " + Number(root.hoverPoint.volume).toFixed(0)
-                          + (root.hoverPoint.sourceCount > 1
-                             ? " · 聚合 " + root.hoverPoint.sourceCount + " 根" : "")
+                    text: root.hoverPoint.timestamp
+                          ? (Qt.formatDateTime(root.hoverPoint.timestamp, "yyyy-MM-dd HH:mm")
+                             + "  开 " + Number(root.hoverPoint.open).toFixed(2)
+                             + "  高 " + Number(root.hoverPoint.high).toFixed(2)
+                             + "  低 " + Number(root.hoverPoint.low).toFixed(2)
+                             + "  收 " + Number(root.hoverPoint.close).toFixed(2)
+                             + "\n成交量 " + Number(root.hoverPoint.volume).toFixed(0)
+                             + (root.hoverPoint.sourceCount > 1
+                                ? " · 聚合 " + root.hoverPoint.sourceCount + " 根" : ""))
+                          : ""
                     color: root.theme.textPrimary; font.family: root.theme.fontFamily
                     font.pixelSize: 9; wrapMode: Text.Wrap
                 }
