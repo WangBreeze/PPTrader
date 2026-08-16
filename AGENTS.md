@@ -40,4 +40,4 @@ Do not commit generated databases, credentials, API tokens, or machine-specific 
 
 ## 代码图谱 / codebase-memory MCP 注意事项
 
-`codebase-memory` MCP（`mcp__codebase__*` 工具）运行在 Linux 环境，**无法访问 Windows 工作区 `I:\workspace\PPTrader`**——`index_repository` 对 `I:\workspace\PPTrader` 会报 `repo_path exists and contains source files`，这是跨文件系统隔离，不是路径写错。现有索引 `home-wanglc-PPTrader` 是过时副本，不含本工作区近期改动；图谱对 QML 隐式组件引用也捕捉有限。查最新代码结构/进度时以本地 `git log` + `docs/development-progress.md` 为准，页面切换/组件关系读 QML 源码确认。
+`codebase-memory` MCP（`mcp__codebase__*` 工具）运行在 Linux 服务器 `192.168.3.7`，无法直接访问 Windows 路径 `I:\workspace\PPTrader`，但通过**共享文件夹自动同步**：Linux 侧 `/home/wanglc/PPTrader` 与 Windows 工作区约等于实时同步。**重新索引用 `repo_path="/home/wanglc/PPTrader"`**，不要用 `I:\workspace\PPTrader`（会报 `repo_path exists...`）。最新索引项目名 `PPTrader`（2026-08-16 索引）；旧项目 `home-wanglc-PPTrader` 是过时快照勿引用。图谱对 QML 隐式组件引用捕捉有限，页面切换/组件关系读 QML 源码确认；C++ 调用链/符号定义可用 `trace_path`/`search_graph`/`get_code_snippet`。

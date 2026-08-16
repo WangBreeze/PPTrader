@@ -79,6 +79,7 @@ When in doubt, check the inherited C++ type's `Q_PROPERTY` declarations or the Q
 
 ## 代码图谱 / codebase-memory MCP 注意事项
 
-- `codebase-memory` MCP（`mcp__codebase__*` 工具，代码图谱）运行在 **Linux 环境**（root `/home/wanglc/...`），**无法访问 Windows 工作区 `I:\workspace\PPTrader`**。`index_repository` 对 `I:\workspace\PPTrader` 会报 `repo_path exists and contains source files` 错误——这是跨文件系统隔离，不是路径写错，不要重试其他写法。
-- 现有索引项目 `home-wanglc-PPTrader`（root `/home/wanglc/PPTrader`）是 MCP 服务器上一份**过时副本**，不含本工作区近期改动（二级导航、插件系统、参数扫描、日志等）。查最新代码结构/进度时，以**本地 `git log` + `docs/development-progress.md` 为准**，不要依赖图谱结论。
-- 图谱对 **QML 组件间引用**（QML 的隐式组件引用，无显式 import 边）捕捉有限，且索引器把 `Q_PROPERTY`/宏行标为 `parse_partial`。页面切换/组件引用关系需**读 QML 源码确认**（`qml/Main.qml` 的 TabBar/StackLayout/subNav + 各 Page 的 `subPage` 显隐）。
+- `codebase-memory` MCP（`mcp__codebase__*` 工具，代码图谱）运行在 **Linux 服务器 `192.168.3.7`**（root `/home/wanglc/`），**无法直接访问 Windows 路径 `I:\workspace\PPTrader`**。它通过**共享文件夹自动同步**访问代码：Linux 侧 `/home/wanglc/PPTrader` 与 Windows 侧 `I:\workspace\PPTrader` 自动同步（约等于实时）。
+- **重新索引**：用 `index_repository(repo_path="/home/wanglc/PPTrader", ...)`，**不要**用 `I:\workspace\PPTrader`（跨文件系统会报 `repo_path exists and contains source files`）。
+- 最新索引项目名 **`PPTrader`**（2026-08-16 重新索引，约 5514 节点，含二级导航/插件系统/参数扫描/日志等近期改动）。旧项目 `home-wanglc-PPTrader` 是过时快照，勿再引用。
+- 图谱对 **QML 组件间引用**（QML 的隐式组件引用，无显式 import 边）捕捉有限，且索引器把 `Q_PROPERTY`/宏行标为 `parse_partial`。页面切换/组件引用关系仍需**读 QML 源码确认**（`qml/Main.qml` 的 TabBar/StackLayout/subNav + 各 Page 的 `subPage` 显隐）；C++ 调用链/符号定义可放心用图谱（`trace_path`/`search_graph`/`get_code_snippet`）。
