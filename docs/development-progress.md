@@ -25,6 +25,8 @@
 
 ## 本次完成
 
+- 代码审查修复 P0/P1 级问题（5 项）：① 插件卸载悬空 vtable——`TradingController` 记录插件→策略 id 映射，`unloadStrategyPlugin` 先停用该插件创建的所有策略再卸载 DLL；② `StrategyEngine` 策略删除竞态——`removeStrategy`/`clearStrategies` 在 `deleteLater` 前 `waitForDone()`，消除在途 pool 任务 use-after-free；③ `ParameterGridBacktestService` 析构 `wait(5000)` 改无界 `wait()`，避免 QThread 运行中被析构 + worker 访问已析构成员；④ `addCondition()` 补 `leftKind`/`rightKind` 角色，修复 DSL 把字段 `close` 误序列化为 series；⑤ 左操作数 field/series 判定从「字符串长度 ≤6」改为「前 5 项为字段」，修复 `sma/ema/rsi/macd` 等短别名被误判。CTest 30/30，`all_qmllint` 通过，主程序加载无 QML 错误。
+
 - 按 Figma 稿（节点 `1409:577`「二级导航骨架」）实现二级导航：顶部保留 3 个一级 tab（主页面/指标与策略/全市场时刻股价），新增左侧 318px 二级抽屉（仅「指标与策略」tab 显示，主页/全市场无二级分类则收起；标题「策略研究」+ 副标题）；抽屉 3 组 7 入口（研究与构建：回测研究/自定义策略/组合回测/多股回测/参数网格扫描；策略执行：执行与审批；数据管理：数据导入与同步），菜单项做 `subPage` 索引跳转切换面板显隐，选中态 cyan 高亮 + `bgSelected`(#102B38) 底 + cyan 描边；「指标与策略」页 14 个功能区重新归类为 7 个二级入口，多股回测 `CrossSectionalBacktestPanel` 挂载到「多股回测」入口。仅改入口与面板显隐，未改面板内部逻辑。`all_qmllint` 通过，主程序加载无 QML 错误。
 
 - 完成插件参数 schema：`StrategyPlugin` 接口新增 `parameterSchema()`（`PluginParameterSpec` key/displayName/type/defaultValue/min/max/step），示例插件声明 `threshold`（real，默认 100，范围 1–10000），`TradingController` 暴露 `strategyPluginParameterSchema(pluginId)` 供 UI 动态生成参数表单；`tst_strategy_plugin` 增补 schema 断言（8 用例），CTest 30/30。QML 动态参数表单待插件管理 UI 按 Figma 稿实现时一并落地。
