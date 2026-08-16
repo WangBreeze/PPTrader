@@ -35,7 +35,7 @@ Item {
     }
 
     component ReplayField: TextField {
-        height: 30
+        implicitHeight: 30
         color: root.theme.textPrimary
         selectionColor: root.theme.cyan
         selectedTextColor: root.theme.bgCanvas

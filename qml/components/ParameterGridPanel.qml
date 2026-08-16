@@ -102,7 +102,7 @@ Item {
             }
             Column { spacing: 4; Layout.fillWidth: true
                 FieldLabel { text: "轴 1 候选值（逗号分隔）" }
-                ScanField { id: axis1Values; Layout.fillWidth: true; placeholderText: "如 5,10,20"; placeholderTextColor: root.theme.textMuted }
+                ScanField { id: axis1Values; width: parent.width; placeholderText: "如 5,10,20"; placeholderTextColor: root.theme.textMuted }
             }
             Column { spacing: 4; Layout.preferredWidth: 130
                 FieldLabel { text: "轴 2 参数名" }
@@ -110,7 +110,7 @@ Item {
             }
             Column { spacing: 4; Layout.fillWidth: true
                 FieldLabel { text: "轴 2 候选值（逗号分隔）" }
-                ScanField { id: axis2Values; Layout.fillWidth: true; placeholderText: "如 20,40,60"; placeholderTextColor: root.theme.textMuted }
+                ScanField { id: axis2Values; width: parent.width; placeholderText: "如 20,40,60"; placeholderTextColor: root.theme.textMuted }
             }
         }
 

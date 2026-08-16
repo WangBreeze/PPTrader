@@ -1,6 +1,7 @@
 #include "services/LogService.h"
 
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
 #include <QFileInfo>
 #include <QTextStream>
@@ -46,7 +47,10 @@ void LogService::configure(const QString &filePath,
     QFileInfo info(m_filePath);
     QDir().mkpath(info.absolutePath());
     m_file.setFileName(m_filePath);
-    m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    if (!m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning().noquote() << QStringLiteral("LogService: 无法打开日志文件 %1：%2")
+            .arg(m_filePath, m_file.errorString());
+    }
 }
 
 bool LogService::isConfigured() const
@@ -122,7 +126,10 @@ void LogService::rotateIfNeeded()
         QFile::remove(m_filePath);
     }
     m_file.setFileName(m_filePath);
-    m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    if (!m_file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning().noquote() << QStringLiteral("LogService: 滚动后无法重新打开日志文件 %1：%2")
+            .arg(m_filePath, m_file.errorString());
+    }
 }
 
 } // namespace pp

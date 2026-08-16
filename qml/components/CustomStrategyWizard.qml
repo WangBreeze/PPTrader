@@ -26,6 +26,7 @@ Item {
     property string takeProfitPercent: "0"
     property string maximumHoldingBars: "0"
     property string signalPriceMode: "triggerClose"
+    property bool previewDirty: false
 
     readonly property var catalog: [
         { name: "SMA", hasPeriod: true },
@@ -636,7 +637,7 @@ Item {
                                         model: root.catalog
                                         delegate: Rectangle {
                                             width: 142; height: 26; radius: 4
-                                            color: hovered ? theme.bgSelected : "transparent"
+                                            color: hoverArea.containsMouse ? theme.bgSelected : "transparent"
                                             Text {
                                                 x: 10; anchors.verticalCenter: parent.verticalCenter
                                                 text: modelData.name
