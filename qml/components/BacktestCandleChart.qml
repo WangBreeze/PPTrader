@@ -9,7 +9,7 @@ Control {
     property string emptyText: "完成回测后显示 K 线与买卖点"
     readonly property bool hasData: root.model && root.model.count > 0
 
-    readonly property int candleCount: root.model ? root.model.count : 0
+    readonly property int candleCount: root.model && root.model.count ? root.model.count : 0
     property int hoveredIndex: -1
 
     function signalAt(relativeX) {
@@ -140,21 +140,21 @@ Control {
             anchors.fill: parent; anchors.margins: 8; spacing: 3
             Text {
                 width: parent.width
-                text: (info && info.side === "买入" ? "买入 · 进场" : "卖出 · 出场")
-                      + "  @ " + (info ? info.price : "--")
-                color: info && info.side === "买入" ? root.theme.green : root.theme.red
+                text: (tooltip.info && tooltip.info.side === "买入" ? "买入 · 进场" : "卖出 · 出场")
+                      + "  @ " + (tooltip.info ? tooltip.info.price : "--")
+                color: tooltip.info && tooltip.info.side === "买入" ? root.theme.green : root.theme.red
                 font.family: root.theme.fontFamily; font.pixelSize: 9; font.weight: Font.Bold
             }
             Text {
                 width: parent.width
-                text: "条件：" + (info ? info.reason : "--")
+                text: "条件：" + (tooltip.info ? tooltip.info.reason : "--")
                 color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 8
                 elide: Text.ElideRight
             }
             Text {
                 width: parent.width
-                text: "成交量 " + (info ? info.volume : "--")
-                      + " · " + (info ? info.time : "--")
+                text: "成交量 " + (tooltip.info ? tooltip.info.volume : "--")
+                      + " · " + (tooltip.info ? tooltip.info.time : "--")
                 color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8
                 elide: Text.ElideRight
             }

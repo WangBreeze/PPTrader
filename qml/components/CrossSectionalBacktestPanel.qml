@@ -140,13 +140,13 @@ Item {
             readonly property var config: root.controller.crossSectionalResultConfiguration
             Text {
                 Layout.fillWidth: true
-                text: config && config.finalEquity
-                      ? "最终权益 " + Number(config.finalEquity).toFixed(2)
-                        + " · 收益 " + Number(config.totalReturnPercent).toFixed(2) + "%"
-                        + " · 回撤 " + Number(config.maxDrawdownPercent).toFixed(2) + "%"
-                        + " · Sharpe " + Number(config.sharpeRatio).toFixed(3)
-                        + " · 手续费 " + Number(config.totalCommission).toFixed(2)
-                        + " · 调仓 " + config.totalTrades + " 笔"
+                text: parent.config && parent.config.finalEquity
+                      ? "最终权益 " + Number(parent.config.finalEquity).toFixed(2)
+                        + " · 收益 " + Number(parent.config.totalReturnPercent).toFixed(2) + "%"
+                        + " · 回撤 " + Number(parent.config.maxDrawdownPercent).toFixed(2) + "%"
+                        + " · Sharpe " + Number(parent.config.sharpeRatio).toFixed(3)
+                        + " · 手续费 " + Number(parent.config.totalCommission).toFixed(2)
+                        + " · 调仓 " + parent.config.totalTrades + " 笔"
                       : "尚未运行多股回测"
                 color: root.theme.textPrimary; elide: Text.ElideRight
                 font.family: root.theme.fontFamily; font.pixelSize: 9

@@ -7,6 +7,8 @@ Item {
     id: root
     required property var theme
     required property var controller
+    property bool showWorkspaceActions: false
+    signal backtestWorkspaceRequested()
 
     function syncIndex() {
         const catalog = root.controller.localBacktestDataCatalog
@@ -87,6 +89,7 @@ Item {
                 border.color: keyboardFocus ? root.theme.cyan : root.theme.border
             }
             delegate: ItemDelegate {
+                required property int index
                 required property var modelData
                 width: datasetCombo.width
                 highlighted: datasetCombo.highlightedIndex === index
@@ -162,6 +165,30 @@ Item {
             color: root.theme.yellow
             font.family: root.theme.fontFamily; font.pixelSize: 9
             Accessible.name: text
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            visible: root.showWorkspaceActions
+            spacing: 8
+            PpButton {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 30
+                theme: root.theme
+                text: "打开回测任务"
+                primary: true
+                available: root.controller.selectedBacktestDataAvailable
+                toolTip: available ? "进入任务化回测、结果和归档工作区"
+                                   : "请先选择本地历史 Tick 数据集"
+                onClicked: root.backtestWorkspaceRequested()
+            }
+            PpButton {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 30
+                theme: root.theme
+                text: "回测多窗口"
+                available: false
+                toolTip: "回测多窗口接口尚未接入"
+            }
         }
         Item { Layout.fillHeight: true }
     }
