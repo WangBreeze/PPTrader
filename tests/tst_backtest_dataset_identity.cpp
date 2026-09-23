@@ -90,12 +90,17 @@ class BacktestDatasetIdentityTest final : public QObject {
 
 private slots:
     void emptyDatabaseHasNoIdentity();
+    void rawImportPrewarmsContentIdentity();
+    void rawContentHashQueryUsesOrderedIndex();
+    void catalogUsesCleanFingerprintMetadata();
+    void catalogTreatsDirtyFingerprintAsStale();
     void assemblesFactsAndCacheState();
     void datasetVersionIsDeterministicAndChangesWithFacts();
     void datasetVersionChangesWhenTickContentChangesInPlace();
     void legacyIdentityJsonRemainsReadable();
     void staleCacheIsReported();
     void calendarCoverageComputesGaps();
+    void authoritativeCalendarSnapshotKeepsUnknownExplicit();
     void v3MigrationAddsColumnsAndHistory();
 };
 
@@ -105,9 +110,152 @@ void BacktestDatasetIdentityTest::emptyDatabaseHasNoIdentity()
     QVERIFY(directory.isValid());
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(directory.filePath(QStringLiteral("empty.db"))));
-    QCOMPARE(store.schemaVersion(), 7);
+    QCOMPARE(store.schemaVersion(), 25);
     QVERIFY(store.loadBacktestDatasetIdentities().isEmpty());
     QVERIFY(!store.loadBacktestDatasetIdentity(instrument(), 60).has_value());
+}
+
+void BacktestDatasetIdentityTest::rawImportPrewarmsContentIdentity()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("prewarmed-identity.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate day(2026, 1, 5);
+    QVERIFY(insertFacts(store, day, 128));
+
+    const QString connection = QUuid::createUuid().toString();
+    {
+        QSqlDatabase probe = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        probe.setDatabaseName(path);
+        QVERIFY(probe.open());
+        QSqlQuery query(probe);
+        query.prepare(QStringLiteral(
+            "select raw_count, raw_max_id, content_sha256, dirty "
+            "from raw_tick_content_fingerprints where symbol = ? and trading_date = ?"));
+        query.addBindValue(instrument().symbol);
+        query.addBindValue(day.toString(Qt::ISODate));
+        QVERIFY(query.exec());
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toLongLong(), 128);
+        QVERIFY(query.value(1).toLongLong() > 0);
+        QVERIFY(query.value(2).toString().startsWith(QStringLiteral("sha256:")));
+        QCOMPARE(query.value(3).toInt(), 0);
+        probe.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+}
+
+void BacktestDatasetIdentityTest::rawContentHashQueryUsesOrderedIndex()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("content-order-index.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate day(2026, 1, 5);
+    QVERIFY(insertFacts(store, day, 4));
+
+    const QString connection = QUuid::createUuid().toString();
+    bool usesTemporarySort = false;
+    bool usesOrderedIndex = false;
+    {
+        QSqlDatabase probe = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        probe.setDatabaseName(path);
+        QVERIFY(probe.open());
+        QSqlQuery query(probe);
+        query.prepare(QStringLiteral(
+            "explain query plan select timestamp_utc, source_line, price, volume_shares, "
+            "amount, direction, source from raw_trade_ticks "
+            "where symbol = ? and trading_date = ? "
+            "order by timestamp_utc asc, source asc, source_line asc, id asc"));
+        query.addBindValue(instrument().symbol);
+        query.addBindValue(day.toString(Qt::ISODate));
+        QVERIFY(query.exec());
+        while (query.next()) {
+            const QString detail = query.value(3).toString();
+            usesTemporarySort = usesTemporarySort
+                || detail.contains(QStringLiteral("TEMP B-TREE"), Qt::CaseInsensitive);
+            usesOrderedIndex = usesOrderedIndex
+                || detail.contains(QStringLiteral("idx_raw_trade_content_order"));
+        }
+        probe.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+    QVERIFY(usesOrderedIndex);
+    QVERIFY(!usesTemporarySort);
+}
+
+void BacktestDatasetIdentityTest::catalogUsesCleanFingerprintMetadata()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("catalog-clean-metadata.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate day(2026, 1, 5);
+    QVERIFY(insertFacts(store, day, 4));
+    const RawTradeFingerprint fingerprint = store.rawTradeFingerprint(instrument(), day);
+    QVERIFY(seedCache(store, day, 60, 2, fingerprint.count, fingerprint.maximumId));
+
+    // dirty=0 是应用自有数据库中的强身份承诺；目录刷新必须直接复用，
+    // 而不是重新扫描 raw_trade_ticks 并用物理行数覆盖它。
+    const QString connection = QUuid::createUuid().toString();
+    {
+        QSqlDatabase probe = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        probe.setDatabaseName(path);
+        QVERIFY(probe.open());
+        QSqlQuery query(probe);
+        QVERIFY(query.exec(QStringLiteral(
+            "update raw_tick_content_fingerprints set raw_count=400, raw_max_id=400 "
+            "where symbol='600519' and trading_date='2026-01-05' and dirty=0")));
+        QVERIFY(query.exec(QStringLiteral(
+            "update raw_tick_candle_cache_state set raw_count=400, raw_max_id=400 "
+            "where symbol='600519' and trading_date='2026-01-05' and period_seconds=60")));
+        probe.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+
+    const QVector<BacktestDatasetIdentity> identities =
+        store.loadBacktestDatasetIdentities();
+    QCOMPARE(identities.size(), 1);
+    QCOMPARE(identities.first().rawTickTotal(), 400);
+    QCOMPARE(identities.first().staleDayCount, 0);
+    QVERIFY(identities.first().days.first().cacheFresh);
+}
+
+void BacktestDatasetIdentityTest::catalogTreatsDirtyFingerprintAsStale()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("catalog-dirty-stale.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate day(2026, 1, 5);
+    QVERIFY(insertFacts(store, day, 4));
+    const RawTradeFingerprint fingerprint = store.rawTradeFingerprint(instrument(), day);
+    QVERIFY(seedCache(store, day, 60, 2, fingerprint.count, fingerprint.maximumId));
+
+    const QString connection = QUuid::createUuid().toString();
+    {
+        QSqlDatabase probe = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        probe.setDatabaseName(path);
+        QVERIFY(probe.open());
+        QSqlQuery query(probe);
+        QVERIFY(query.exec(QStringLiteral(
+            "update raw_trade_ticks set price=price+1 where symbol='600519' "
+            "and trading_date='2026-01-05' and source_line=1")));
+        probe.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+
+    const QVector<BacktestDatasetIdentity> identities =
+        store.loadBacktestDatasetIdentities();
+    QCOMPARE(identities.size(), 1);
+    QCOMPARE(identities.first().rawTickTotal(), 4);
+    QCOMPARE(identities.first().staleDayCount, 1);
+    QVERIFY(!identities.first().days.first().cacheFresh);
 }
 
 void BacktestDatasetIdentityTest::assemblesFactsAndCacheState()
@@ -137,8 +285,10 @@ void BacktestDatasetIdentityTest::assemblesFactsAndCacheState()
     QCOMPARE(identity->staleDayCount, 1);
     QCOMPARE(identity->days.at(0).barCount, 2);
     QCOMPARE(identity->days.at(0).cacheVersion, 1);
+    QVERIFY(identity->days.at(0).cacheFresh);
     QVERIFY(identity->days.at(0).rawContentSha256.startsWith(QStringLiteral("sha256:")));
     QCOMPARE(identity->days.at(1).barCount, 0);
+    QVERIFY(!identity->days.at(1).cacheFresh);
     QVERIFY(identity->datasetVersion.startsWith(QStringLiteral("sha256:")));
     QVERIFY(identity->toJson().contains(QStringLiteral("2026-01-05")));
     QCOMPARE(identity->toVariantMap().value(QStringLiteral("dayCount")).toInt(), 2);
@@ -294,6 +444,7 @@ void BacktestDatasetIdentityTest::staleCacheIsReported()
     QVERIFY(identity->hasStaleCache());
     QCOMPARE(identity->days.first().barCount, 2);
     QCOMPARE(identity->days.first().cacheVersion, 1);
+    QVERIFY(!identity->days.first().cacheFresh);
 }
 
 void BacktestDatasetIdentityTest::calendarCoverageComputesGaps()
@@ -352,6 +503,52 @@ void BacktestDatasetIdentityTest::calendarCoverageComputesGaps()
     QVERIFY(!fallbackIdentity->calendarNote.isEmpty());
 }
 
+void BacktestDatasetIdentityTest::authoritativeCalendarSnapshotKeepsUnknownExplicit()
+{
+    const AShareTradingDayStatus holiday2024 =
+        AShareTradingCalendar::status(QDate(2024, 2, 12));
+    QVERIFY(holiday2024.holiday);
+    QVERIFY(holiday2024.coverageKnown);
+    QCOMPARE(holiday2024.source, QStringLiteral("SSE-2023-47"));
+
+    const AShareTradingDayStatus trading2025 =
+        AShareTradingCalendar::status(QDate(2025, 1, 2));
+    QVERIFY(trading2025.tradingDay);
+    QVERIFY(trading2025.coverageKnown);
+    QCOMPARE(trading2025.source, QStringLiteral("SSE-2024-38"));
+
+    Instrument suspendedInstrument = instrument();
+    suspendedInstrument.symbol = QStringLiteral("600001");
+    AShareInstrumentDayRecord suspended;
+    suspended.instrument = suspendedInstrument;
+    suspended.tradingDate = QDate(2026, 1, 5);
+    suspended.state = AShareInstrumentDayState::Suspended;
+    suspended.reason = QStringLiteral("公告停牌");
+    suspended.source = QStringLiteral("test-fixture");
+    suspended.sourceVersion = QStringLiteral("fixture-v1");
+
+    const AShareCalendarSnapshot snapshot = AShareTradingCalendar::snapshot(
+        QDate(2026, 1, 5), QDate(2026, 1, 5),
+        {QStringLiteral("600001"), QStringLiteral("600002")}, {suspended});
+    QVERIFY(snapshot.marketCoverageComplete);
+    QVERIFY(!snapshot.instrumentCoverageComplete);
+    QCOMPARE(snapshot.tradingDays.size(), 1);
+    QCOMPARE(snapshot.suspendedInstrumentDays, 1);
+    QCOMPARE(snapshot.unknownInstrumentDays, 1);
+    QCOMPARE(snapshot.instrumentState(QStringLiteral("600001"), QDate(2026, 1, 5)),
+             AShareInstrumentDayState::Suspended);
+    QCOMPARE(snapshot.instrumentState(QStringLiteral("600002"), QDate(2026, 1, 5)),
+             AShareInstrumentDayState::Unknown);
+    QVERIFY(snapshot.snapshotVersion.startsWith(QStringLiteral("sha256:")));
+
+    const AShareCalendarSnapshot fallback = AShareTradingCalendar::snapshot(
+        QDate(2027, 1, 4), QDate(2027, 1, 5),
+        {QStringLiteral("600001")});
+    QVERIFY(!fallback.marketCoverageComplete);
+    QVERIFY(!fallback.instrumentCoverageComplete);
+    QVERIFY(fallback.marketSource.contains(QStringLiteral("weekday-fallback")));
+}
+
 void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
 {
     QTemporaryDir directory;
@@ -359,7 +556,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(databasePath));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 25);
     }
 
     // 模拟旧 v2 库：降低 user_version 后重新打开，应自动备份并升级到当前版本。
@@ -376,7 +573,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-    QCOMPARE(store.schemaVersion(), 7);
+    QCOMPARE(store.schemaVersion(), 25);
     QVERIFY(!store.lastMigrationBackupPath().isEmpty());
 
     {
@@ -416,6 +613,14 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
         QVERIFY(history.next());
         QCOMPARE(history.value(0).toInt(), 1);
     }
+    {
+        QSqlQuery history(verify);
+        QVERIFY(history.exec(QStringLiteral(
+            "select count(*) from schema_migration_history where version = 18 "
+            "and migration_name = 'backtest_candle_snapshot'")));
+        QVERIFY(history.next());
+        QCOMPARE(history.value(0).toInt(), 1);
+    }
         {
             QSqlQuery columns(verify);
             QVERIFY(columns.exec(QStringLiteral("pragma table_info(backtest_results)")));
@@ -432,6 +637,15 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
             QVERIFY(names.contains(QStringLiteral("dataset_stale_day_count")));
             QVERIFY(names.contains(QStringLiteral("dataset_calendar_source")));
             QVERIFY(names.contains(QStringLiteral("dataset_calendar_coverage_known")));
+            QVERIFY(names.contains(QStringLiteral("candle_series_version")));
+        }
+        {
+            QSqlQuery table(verify);
+            QVERIFY(table.exec(QStringLiteral(
+                "select count(*) from sqlite_master where type = 'table' "
+                "and name = 'backtest_candles'")));
+            QVERIFY(table.next());
+            QCOMPARE(table.value(0).toInt(), 1);
         }
         verify.close();
     }

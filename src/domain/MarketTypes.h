@@ -1,5 +1,7 @@
 #pragma once
 
+#include "domain/RawTradeDirection.h"
+
 #include <QDateTime>
 #include <QMetaType>
 #include <QString>
@@ -38,6 +40,8 @@ struct Tick {
     double amount = 0.0;
     double bid = 0.0;
     double ask = 0.0;
+    RawTradeDirection rawTradeDirection = RawTradeDirection::Neutral;
+    bool rawTradeDirectionKnown = false;
 };
 
 struct Candle {

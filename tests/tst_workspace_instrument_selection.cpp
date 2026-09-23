@@ -10,6 +10,7 @@ class WorkspaceInstrumentSelectionTest final : public QObject {
 private slots:
     void keepsLiveBacktestAndLegacyResearchSelectionsIndependent();
     void rejectsMissingLocalDataAndSymbolsOutsideLiveUniverse();
+    void sharesBacktestSampleDateRangeAcrossWorkspaceEditors();
 };
 
 static Instrument instrument(const QString &symbol, const QString &name)
@@ -93,6 +94,37 @@ void WorkspaceInstrumentSelectionTest::rejectsMissingLocalDataAndSymbolsOutsideL
     state.setLocalHistoryCatalog({});
     QCOMPARE(state.backtestInstrument().symbol, cached.symbol);
     QVERIFY(!state.selectedBacktestDataset());
+}
+
+void WorkspaceInstrumentSelectionTest::sharesBacktestSampleDateRangeAcrossWorkspaceEditors()
+{
+    WorkspaceInstrumentSelectionState state;
+    QString error;
+
+    QVERIFY(state.setBacktestSampleDateRange(QStringLiteral("2026-08-01"),
+                                             QStringLiteral("2026-08-01"), &error));
+    QCOMPARE(state.backtestSampleFromDate(), QStringLiteral("2026-08-01"));
+    QCOMPARE(state.backtestSampleToDate(), QStringLiteral("2026-08-01"));
+    QCOMPARE(state.backtestSampleFrom().date(), QDate(2026, 8, 1));
+    QCOMPARE(state.backtestSampleTo().date(), QDate(2026, 8, 1));
+
+    // 回测任务页修改结束日期时，保留已选起始日期并更新共享结束日期。
+    QVERIFY(state.setBacktestSampleDateRange(state.backtestSampleFromDate(),
+                                             QStringLiteral("2026-08-07"), &error));
+    QCOMPARE(state.backtestSampleFromDate(), QStringLiteral("2026-08-01"));
+    QCOMPARE(state.backtestSampleToDate(), QStringLiteral("2026-08-07"));
+
+    QVERIFY(!state.setBacktestSampleDateRange(QStringLiteral("2026-08-08"),
+                                              QStringLiteral("2026-08-07"), &error));
+    QVERIFY(error.contains(QStringLiteral("不能晚于")));
+    QCOMPARE(state.backtestSampleFromDate(), QStringLiteral("2026-08-01"));
+    QCOMPARE(state.backtestSampleToDate(), QStringLiteral("2026-08-07"));
+
+    state.clearBacktestSampleWindow();
+    QVERIFY(state.backtestSampleFromDate().isEmpty());
+    QVERIFY(state.backtestSampleToDate().isEmpty());
+    QVERIFY(!state.backtestSampleFrom().isValid());
+    QVERIFY(!state.backtestSampleTo().isValid());
 }
 
 } // namespace pp

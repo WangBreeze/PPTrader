@@ -2,6 +2,35 @@
 
 namespace pp {
 
+namespace {
+
+bool sameSeriesIdentity(const Candle &left, const Candle &right)
+{
+    return left.instrument.symbol == right.instrument.symbol
+        && left.instrument.market == right.instrument.market
+        && left.instrument.venue == right.instrument.venue
+        && left.periodSeconds == right.periodSeconds
+        && left.source == right.source
+        && left.adjustment == right.adjustment;
+}
+
+bool samePoint(const LocalCandleSeriesPoint &left,
+               const LocalCandleSeriesPoint &right)
+{
+    const Candle &a = left.candle;
+    const Candle &b = right.candle;
+    return sameSeriesIdentity(a, b)
+        && a.startTime == b.startTime && left.endTime == right.endTime
+        && a.open == b.open && a.high == b.high && a.low == b.low
+        && a.close == b.close && a.volume == b.volume
+        && a.buyVolume == b.buyVolume && a.sellVolume == b.sellVolume
+        && a.neutralVolume == b.neutralVolume
+        && a.directionalVolumeKnown == b.directionalVolumeKnown
+        && a.source == b.source && left.sourceCount == right.sourceCount;
+}
+
+} // namespace
+
 LocalCandleSeriesListModel::LocalCandleSeriesListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
@@ -54,10 +83,64 @@ const QVector<LocalCandleSeriesPoint> &LocalCandleSeriesListModel::points() cons
 
 void LocalCandleSeriesListModel::setPoints(const QVector<LocalCandleSeriesPoint> &points)
 {
+    bool compatible = points.size() >= m_points.size() && !m_points.isEmpty()
+        && sameSeriesIdentity(m_points.first().candle, points.first().candle);
+    int changedFirst = -1;
+    int changedLast = -1;
+    if (compatible) {
+        for (int index = 0; index < m_points.size(); ++index) {
+            if (m_points.at(index).candle.startTime != points.at(index).candle.startTime) {
+                compatible = false;
+                break;
+            }
+            if (!samePoint(m_points.at(index), points.at(index))) {
+                if (changedFirst < 0) changedFirst = index;
+                changedLast = index;
+                m_points[index] = points.at(index);
+            }
+        }
+    }
+    if (compatible) {
+        const int oldCount = m_points.size();
+        if (changedFirst >= 0)
+            emit dataChanged(this->index(changedFirst), this->index(changedLast));
+        if (points.size() > oldCount) {
+            beginInsertRows({}, oldCount, points.size() - 1);
+            m_points.reserve(points.size());
+            for (int index = oldCount; index < points.size(); ++index)
+                m_points.append(points.at(index));
+            endInsertRows();
+            emit countChanged();
+        }
+        return;
+    }
     beginResetModel();
     m_points = points;
     endResetModel();
     emit countChanged();
+}
+
+bool LocalCandleSeriesListModel::prependPoints(
+    const QVector<LocalCandleSeriesPoint> &points)
+{
+    if (points.isEmpty()) return true;
+    if (m_points.isEmpty()) {
+        setPoints(points);
+        return true;
+    }
+    if (!sameSeriesIdentity(points.first().candle, m_points.first().candle)
+        || points.last().endTime >= m_points.first().candle.startTime) {
+        return false;
+    }
+    QVector<LocalCandleSeriesPoint> combined;
+    combined.reserve(points.size() + m_points.size());
+    combined.append(points);
+    combined.append(m_points);
+    beginInsertRows({}, 0, points.size() - 1);
+    m_points = std::move(combined);
+    endInsertRows();
+    emit countChanged();
+    return true;
 }
 
 QVariantMap LocalCandleSeriesListModel::get(int row) const

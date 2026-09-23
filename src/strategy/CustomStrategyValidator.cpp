@@ -692,6 +692,52 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
                                            : std::optional<double>{it->defaultValue};
     };
 
+    auto validateIntegerOption = [&](const QString &key, int minimum, int maximum) {
+        if (!validateNumericOption(key, minimum, maximum)) return false;
+        const QJsonValue value = operand.value(key);
+        if (value.isDouble()) return std::floor(value.toDouble()) == value.toDouble();
+        const auto it = parameters.constFind(
+            value.toObject().value(QStringLiteral("parameter")).toString());
+        return it != parameters.constEnd() && it->type == QStringLiteral("integer");
+    };
+    if (v2 && (indicator == QStringLiteral("WMA") || indicator == QStringLiteral("BIAS")
+               || indicator == QStringLiteral("CCI") || indicator == QStringLiteral("WR")
+               || indicator == QStringLiteral("MFI"))) {
+        QSet<QString> allowed {QStringLiteral("indicator"), QStringLiteral("period"),
+                               QStringLiteral("alias")};
+        if (!hasOnlyKeys(operand, allowed, path, error)
+            || !validateIntegerOption(QStringLiteral("period"), 2, 500)) {
+            return fail(error, QStringLiteral("%1.%2 的 period 必须是 2–500 的整数").arg(path, indicator));
+        }
+        return true;
+    }
+    if (v2 && indicator == QStringLiteral("KDJ")) {
+        if (!hasOnlyKeys(operand, {QStringLiteral("indicator"), QStringLiteral("period"),
+                                  QStringLiteral("kPeriod"), QStringLiteral("dPeriod"),
+                                  QStringLiteral("output"), QStringLiteral("alias")}, path, error)) return false;
+        for (const QString &key : {QStringLiteral("period"), QStringLiteral("kPeriod"),
+                                   QStringLiteral("dPeriod")}) {
+            const bool window = key == QStringLiteral("period");
+            if (!validateIntegerOption(key, window ? 2 : 1, window ? 500 : 100)) {
+                return fail(error, QStringLiteral("%1.KDJ 的 %2 必须为范围内的整数").arg(path, key));
+            }
+        }
+        if (!QSet<QString>{QStringLiteral("k"), QStringLiteral("d"), QStringLiteral("j")}
+                 .contains(operand.value(QStringLiteral("output")).toString())) {
+            return fail(error, QStringLiteral("%1.KDJ 的输出必须是 k/d/j").arg(path));
+        }
+        return true;
+    }
+    if (v2 && indicator == QStringLiteral("DONCHIAN")) {
+        if (!hasOnlyKeys(operand, {QStringLiteral("indicator"), QStringLiteral("period"),
+                                  QStringLiteral("output"), QStringLiteral("alias")}, path, error)
+            || !validateIntegerOption(QStringLiteral("period"), 2, 500)
+            || !QSet<QString>{QStringLiteral("upper"), QStringLiteral("middle"), QStringLiteral("lower")}
+                    .contains(operand.value(QStringLiteral("output")).toString())) {
+            return fail(error, QStringLiteral("%1 的 DONCHIAN 配置无效：整数周期 2–500，输出 upper/middle/lower").arg(path));
+        }
+        return true;
+    }
     if (indicator == QStringLiteral("SMA") || indicator == QStringLiteral("EMA")
         || indicator == QStringLiteral("RSI") || indicator == QStringLiteral("ATR")
         || indicator == QStringLiteral("VOLUME_SMA")
@@ -736,7 +782,7 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
         return true;
     }
     if (v2 && (indicator == QStringLiteral("VWAP")
-               || indicator == QStringLiteral("PP_FLOW"))) {
+               || indicator == QStringLiteral("PP_FLOW") || indicator == QStringLiteral("OBV"))) {
         QSet<QString> allowed {QStringLiteral("indicator")};
         if (v2) allowed.insert(QStringLiteral("alias"));
         if (!hasOnlyKeys(operand, allowed, path, error)) return false;
@@ -747,6 +793,125 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
 
 QVariantMap CustomStrategyValidator::schemaDescriptor() const
 {
+    const auto integerParameter = [](const QString &key, const QString &displayName,
+                                     int defaultValue, int minimumValue,
+                                     int maximumValue) {
+        return QVariantMap{{QStringLiteral("key"), key},
+                           {QStringLiteral("displayName"), displayName},
+                           {QStringLiteral("type"), QStringLiteral("integer")},
+                           {QStringLiteral("defaultValue"), defaultValue},
+                           {QStringLiteral("minimumValue"), minimumValue},
+                           {QStringLiteral("maximumValue"), maximumValue},
+                           {QStringLiteral("step"), 1}};
+    };
+    const auto realParameter = [](const QString &key, const QString &displayName,
+                                  double defaultValue, double minimumValue,
+                                  double maximumValue, double step) {
+        return QVariantMap{{QStringLiteral("key"), key},
+                           {QStringLiteral("displayName"), displayName},
+                           {QStringLiteral("type"), QStringLiteral("real")},
+                           {QStringLiteral("defaultValue"), defaultValue},
+                           {QStringLiteral("minimumValue"), minimumValue},
+                           {QStringLiteral("maximumValue"), maximumValue},
+                           {QStringLiteral("step"), step}};
+    };
+    const auto choiceParameter = [](const QString &key, const QString &displayName,
+                                    const QString &defaultValue,
+                                    const QStringList &choices,
+                                    const QStringList &choiceLabels) {
+        return QVariantMap{{QStringLiteral("key"), key},
+                           {QStringLiteral("displayName"), displayName},
+                           {QStringLiteral("type"), QStringLiteral("choice")},
+                           {QStringLiteral("defaultValue"), defaultValue},
+                           {QStringLiteral("choices"), choices},
+                           {QStringLiteral("choiceLabels"), choiceLabels}};
+    };
+    const auto periodSchema = [&integerParameter](const QString &name,
+                                                  const QString &displayName,
+                                                  int defaultPeriod = 14) {
+        return QVariantMap{{QStringLiteral("name"), name},
+                           {QStringLiteral("displayName"), displayName},
+                           {QStringLiteral("parameters"), QVariantList{
+                               integerParameter(QStringLiteral("period"),
+                                                QStringLiteral("周期"), defaultPeriod, 2, 500)}}};
+    };
+
+    const QVariantList indicatorSchemas {
+        periodSchema(QStringLiteral("SMA"), QStringLiteral("简单移动平均")),
+        periodSchema(QStringLiteral("EMA"), QStringLiteral("指数移动平均")),
+        periodSchema(QStringLiteral("RSI"), QStringLiteral("相对强弱指标")),
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("MACD")},
+                    {QStringLiteral("displayName"), QStringLiteral("MACD")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("fastPeriod"),
+                                         QStringLiteral("快速周期"), 12, 2, 120),
+                        integerParameter(QStringLiteral("slowPeriod"),
+                                         QStringLiteral("慢速周期"), 26, 3, 250),
+                        integerParameter(QStringLiteral("signalPeriod"),
+                                         QStringLiteral("信号周期"), 9, 2, 120),
+                        choiceParameter(QStringLiteral("output"),
+                                        QStringLiteral("输出序列"),
+                                        QStringLiteral("histogram"),
+                                        {QStringLiteral("macd"), QStringLiteral("signal"),
+                                         QStringLiteral("histogram")},
+                                        {QStringLiteral("MACD 线"), QStringLiteral("信号线"),
+                                         QStringLiteral("柱状图")})}},
+                    {QStringLiteral("relations"), QVariantList{QVariantMap{
+                        {QStringLiteral("left"), QStringLiteral("fastPeriod")},
+                        {QStringLiteral("op"), QStringLiteral("lt")},
+                        {QStringLiteral("right"), QStringLiteral("slowPeriod")},
+                        {QStringLiteral("message"), QStringLiteral("快速周期必须小于慢速周期")}}}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("BOLLINGER")},
+                    {QStringLiteral("displayName"), QStringLiteral("布林带")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("period"), QStringLiteral("周期"),
+                                         20, 2, 500),
+                        realParameter(QStringLiteral("standardDeviations"),
+                                      QStringLiteral("标准差倍数"), 2.0, 0.1, 10.0, 0.1),
+                        choiceParameter(QStringLiteral("output"),
+                                        QStringLiteral("输出序列"),
+                                        QStringLiteral("middle"),
+                                        {QStringLiteral("upper"), QStringLiteral("middle"),
+                                         QStringLiteral("lower")},
+                                        {QStringLiteral("上轨"), QStringLiteral("中轨"),
+                                         QStringLiteral("下轨")})}}},
+        periodSchema(QStringLiteral("ATR"), QStringLiteral("平均真实波幅")),
+        periodSchema(QStringLiteral("VOLUME_SMA"), QStringLiteral("成交量移动平均")),
+        periodSchema(QStringLiteral("ROC"), QStringLiteral("变动率")),
+        periodSchema(QStringLiteral("WMA"), QStringLiteral("线性加权移动平均")),
+        periodSchema(QStringLiteral("BIAS"), QStringLiteral("乖离率（百分比）")),
+        periodSchema(QStringLiteral("CCI"), QStringLiteral("商品通道指标（典型价绝对偏差）"), 20),
+        periodSchema(QStringLiteral("WR"), QStringLiteral("威廉指标（−100～0）")),
+        periodSchema(QStringLiteral("MFI"), QStringLiteral("资金流量指标（N 次比较需 N+1 根 Bar）")),
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("KDJ")},
+                    {QStringLiteral("displayName"), QStringLiteral("随机指标（K/D 初值 50，递归平滑）")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("period"), QStringLiteral("RSV 周期"), 9, 2, 500),
+                        integerParameter(QStringLiteral("kPeriod"), QStringLiteral("K 平滑周期"), 3, 1, 100),
+                        integerParameter(QStringLiteral("dPeriod"), QStringLiteral("D 平滑周期"), 3, 1, 100),
+                        choiceParameter(QStringLiteral("output"), QStringLiteral("输出序列"),
+                                        QStringLiteral("k"),
+                                        {QStringLiteral("k"), QStringLiteral("d"), QStringLiteral("j")},
+                                        {QStringLiteral("K 线"), QStringLiteral("D 线"), QStringLiteral("J 线（不截断）")})}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("OBV")},
+                    {QStringLiteral("displayName"), QStringLiteral("能量潮（首根为零，不按日重置）")},
+                    {QStringLiteral("parameters"), QVariantList{}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("DONCHIAN")},
+                    {QStringLiteral("displayName"), QStringLiteral("唐奇安通道（含当前 Bar）")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("period"), QStringLiteral("周期"), 20, 2, 500),
+                        choiceParameter(QStringLiteral("output"), QStringLiteral("输出序列"),
+                                        QStringLiteral("middle"),
+                                        {QStringLiteral("upper"), QStringLiteral("middle"), QStringLiteral("lower")},
+                                        {QStringLiteral("上轨"), QStringLiteral("中轨"), QStringLiteral("下轨")})}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("VWAP")},
+                    {QStringLiteral("displayName"), QStringLiteral("会话成交量加权均价")},
+                    {QStringLiteral("parameters"), QVariantList{}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("PP_FLOW")},
+                    {QStringLiteral("displayName"), QStringLiteral("价量趋势流")},
+                    {QStringLiteral("parameters"), QVariantList{}}},
+    };
+
     return {{QStringLiteral("schemaVersion"), 3},
             {QStringLiteral("stage"), QStringLiteral("backtest_ready")},
             {QStringLiteral("executionScope"), QStringLiteral("backtest_only")},
@@ -755,7 +920,11 @@ QVariantMap CustomStrategyValidator::schemaDescriptor() const
             {QStringLiteral("indicators"), QStringList{QStringLiteral("SMA"), QStringLiteral("EMA"),
                 QStringLiteral("RSI"), QStringLiteral("MACD"), QStringLiteral("BOLLINGER"),
                 QStringLiteral("ATR"), QStringLiteral("VOLUME_SMA"), QStringLiteral("ROC"),
-                QStringLiteral("VWAP"), QStringLiteral("PP_FLOW")}},
+                QStringLiteral("VWAP"), QStringLiteral("PP_FLOW"), QStringLiteral("WMA"),
+                QStringLiteral("BIAS"), QStringLiteral("CCI"), QStringLiteral("WR"),
+                QStringLiteral("DONCHIAN"), QStringLiteral("OBV"), QStringLiteral("MFI"),
+                QStringLiteral("KDJ")}},
+            {QStringLiteral("indicatorSchemas"), indicatorSchemas},
             {QStringLiteral("crossIndicators"), QStringList{QStringLiteral("RANK"), QStringLiteral("ZSCORE"),
                 QStringLiteral("PERCENTILE"), QStringLiteral("MEAN"), QStringLiteral("MEDIAN"),
                 QStringLiteral("PEER")}},

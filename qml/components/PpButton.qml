@@ -10,6 +10,7 @@ Control {
     property bool active: false
     property bool primary: false
     property bool success: false
+    property bool danger: false
     property bool available: true
     property real visualHeight: 28
     property real visualWidth: 86
@@ -17,7 +18,8 @@ Control {
 
     implicitWidth: visualWidth
     implicitHeight: Math.max(36, visualHeight)
-    opacity: available ? 1.0 : 0.45
+    // 禁用态只降低按钮本体透明度；悬停说明必须保持完全不透明、可读。
+    opacity: 1.0
     activeFocusOnTab: available
     focusPolicy: available ? Qt.TabFocus : Qt.NoFocus
 
@@ -53,12 +55,15 @@ Control {
         anchors.centerIn: parent
         width: root.visualWidth
         height: root.visualHeight
+        opacity: root.available ? 1.0 : 0.45
         radius: 6
         color: root.success ? root.theme.bgSuccess
+                            : root.danger ? root.theme.bgRaised
                             : root.primary ? root.theme.cyan
                             : root.active ? root.theme.bgSelected : root.theme.bgRaised
         border.width: 1
         border.color: root.success ? root.theme.green
+                      : root.danger ? root.theme.red
                       : root.active || mouse.containsMouse
                         ? root.theme.cyan : root.theme.border
 
@@ -66,11 +71,12 @@ Control {
             anchors.centerIn: parent
             text: root.text
             color: root.success ? root.theme.green
+                   : root.danger ? root.theme.red
                    : root.primary ? root.theme.bgCanvas
                    : root.active ? root.theme.cyan : root.theme.textMuted
             font.family: root.theme.fontFamily
             font.pixelSize: 11
-            font.weight: root.primary || root.active || root.success
+            font.weight: root.primary || root.active || root.success || root.danger
                          ? Font.Bold : Font.Medium
         }
     }
@@ -105,13 +111,15 @@ Control {
         width: tipText.implicitWidth + 16
         height: 26
         radius: 6
-        color: root.theme.bgRaised
-        border.color: root.theme.border
+        opacity: 1.0
+        color: root.theme.bgBar
+        border.width: 1
+        border.color: root.theme.cyan
         Text {
             id: tipText
             anchors.centerIn: parent
             text: root.toolTip
-            color: root.theme.textMuted
+            color: root.theme.textPrimary
             font.family: root.theme.fontFamily
             font.pixelSize: 10
         }

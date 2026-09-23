@@ -17,6 +17,8 @@ public:
 
     void start(const QVector<Instrument> &instruments) override;
     void stop() override;
+    // Synchronously drains the provider worker for application shutdown only.
+    void shutdown();
 
 private:
     RealtimeProviderRouter *m_router = nullptr;

@@ -41,7 +41,13 @@ void MarketSessionTest::aShareSessionBoundaries()
     QVERIFY(MarketSession::isOpen(instrument, toUtc(monday, QTime(9, 30), "Asia/Shanghai")));
     QVERIFY(!MarketSession::isOpen(instrument, toUtc(monday, QTime(11, 30), "Asia/Shanghai")));
     QVERIFY(MarketSession::isOpen(instrument, toUtc(monday, QTime(13, 0), "Asia/Shanghai")));
-    QVERIFY(!MarketSession::isOpen(instrument, toUtc(monday, QTime(15, 0), "Asia/Shanghai")));
+    QVERIFY(MarketSession::isOpen(instrument, toUtc(monday, QTime(15, 0), "Asia/Shanghai")));
+    QVERIFY(MarketSession::isOpen(
+        instrument, toUtc(monday, QTime(15, 29, 59), "Asia/Shanghai")));
+    QVERIFY(!MarketSession::isOpen(instrument, toUtc(monday, QTime(15, 30), "Asia/Shanghai")));
+    QVERIFY(MarketSession::statusText(
+        instrument, toUtc(monday, QTime(15, 29, 59), "Asia/Shanghai"))
+        .contains(QStringLiteral("13:00-15:30")));
 }
 
 void MarketSessionTest::weekendsAreClosed()

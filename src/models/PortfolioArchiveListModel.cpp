@@ -29,8 +29,11 @@ QVariant PortfolioArchiveListModel::data(const QModelIndex &index, int role) con
     const PortfolioArchiveSummary &item = m_summaries.at(index.row());
     switch (role) {
     case ResultIdRole: return item.resultId;
+    case ResultKindRole: return item.resultKind;
     case PortfolioIdRole: return item.portfolioId;
     case NameRole: return item.name;
+    case StrategyIdRole: return item.strategyId;
+    case StrategyVersionRole: return item.strategyVersion;
     case CompletedAtRole: return item.completedAt;
     case LegCountRole: return item.legCount;
     case PeriodSecondsRole: return item.periodSeconds;
@@ -50,8 +53,11 @@ QVariant PortfolioArchiveListModel::data(const QModelIndex &index, int role) con
 
 QHash<int, QByteArray> PortfolioArchiveListModel::roleNames() const
 {
-    return {{ResultIdRole, "resultId"}, {PortfolioIdRole, "portfolioId"},
-            {NameRole, "name"}, {CompletedAtRole, "completedAt"},
+    return {{ResultIdRole, "resultId"}, {ResultKindRole, "resultKind"},
+            {PortfolioIdRole, "portfolioId"}, {NameRole, "name"},
+            {StrategyIdRole, "strategyId"},
+            {StrategyVersionRole, "strategyVersion"},
+            {CompletedAtRole, "completedAt"},
             {LegCountRole, "legCount"}, {PeriodSecondsRole, "periodSeconds"},
             {BarCountRole, "barCount"}, {SymbolsRole, "symbols"},
             {DatasetVersionsRole, "datasetVersions"},

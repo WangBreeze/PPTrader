@@ -20,6 +20,9 @@ public:
         QDate lastPriceDay;
         double weight = 0.0;
         bool boughtToday = false;
+        QDate lastBuyDay;
+        bool quoteAvailable = false; // 当前执行帧存在真实报价；旧价仅允许估值
+        QString marketStatus = QStringLiteral("missing_unknown");
     };
 
     struct ExecutionState {

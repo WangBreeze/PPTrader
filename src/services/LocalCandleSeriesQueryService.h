@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 #include "domain/LocalCandleSeriesTypes.h"
 
@@ -10,7 +11,8 @@ class LocalCandleSeriesQueryService final {
 public:
     explicit LocalCandleSeriesQueryService(SqliteLocalDataStore *store);
 
-    LocalCandleSeriesResult query(const LocalCandleSeriesQuery &request) const;
+    LocalCandleSeriesResult query(const LocalCandleSeriesQuery &request,
+                                 const std::atomic_bool *cancelled = nullptr) const;
     bool refreshRawTickCandleCacheDay(const Instrument &instrument,
                                       const QDate &tradingDate, int periodSeconds,
                                       bool *regenerated = nullptr,

@@ -23,6 +23,9 @@ QVariant BatchBacktestResultListModel::data(const QModelIndex &index, int role) 
     switch (role) {
     case SymbolRole: return item.instrument.symbol;
     case NameRole: return item.instrument.name;
+    case DataModeRole: return backtestDataModeCode(item.dataMode);
+    case StartDateRole: return item.startDate;
+    case EndDateRole: return item.endDate;
     case FrequencyRole: return item.frequency;
     case RequestedBarsRole: return item.requestedBars;
     case ActualBarsRole: return item.actualBars;
@@ -34,7 +37,11 @@ QVariant BatchBacktestResultListModel::data(const QModelIndex &index, int role) 
     case DatasetRawTickCountRole: return item.datasetRawTickCount;
     case DatasetGapDayCountRole: return item.datasetGapDayCount;
     case DatasetStaleDayCountRole: return item.datasetStaleDayCount;
+    case DataQualityStatusRole: return item.dataQualityStatus;
+    case DataQualityEligibleRole: return item.dataQualityEligible;
+    case DataQualityAssessmentRole: return item.dataQualityAssessment;
     case ArchivedRole: return item.archived;
+    case ArchivableRole: return item.archivable;
     case ArchivedResultIdRole: return item.archivedResultId;
     case FinalEquityRole: return item.summary.finalEquity;
     case TotalReturnPercentRole: return item.summary.totalReturnPercent;
@@ -43,7 +50,72 @@ QVariant BatchBacktestResultListModel::data(const QModelIndex &index, int role) 
     case SharpeRatioRole: return item.summary.sharpeRatio;
     case TotalCommissionRole: return item.summary.totalCommission;
     case TotalTradesRole: return item.summary.totalTrades;
+    case HasOpenPositionRole: return item.finalPosition.quantity > 0.0;
+    case OpenPositionQuantityRole: return item.finalPosition.quantity;
+    case OpenPositionAveragePriceRole: return item.finalPosition.averagePrice;
+    case OpenPositionEntryTimeRole: return item.finalPosition.entryTime;
     case ElapsedMillisecondsRole: return item.elapsedMilliseconds;
+    case HoldoutEnabledRole: return item.holdoutEnabled;
+    case HoldoutTradingDaysRole: return item.holdoutTradingDays;
+    case TrainingStartDateRole: return item.trainingStartDate;
+    case TrainingEndDateRole: return item.trainingEndDate;
+    case HoldoutStartDateRole: return item.holdoutStartDate;
+    case HoldoutEndDateRole: return item.holdoutEndDate;
+    case TrainingActualTicksRole: return item.trainingActualTicks;
+    case HoldoutActualTicksRole: return item.holdoutActualTicks;
+    case TrainingDataVersionRole: return item.trainingDataVersion;
+    case HoldoutDataVersionRole: return item.holdoutDataVersion;
+    case TrainingDatasetVersionRole: return item.trainingDatasetVersion;
+    case HoldoutDatasetVersionRole: return item.holdoutDatasetVersion;
+    case TrainingTotalReturnPercentRole:
+        return item.trainingSummary.totalReturnPercent;
+    case TrainingMaxDrawdownPercentRole:
+        return item.trainingSummary.maxDrawdownPercent;
+    case TrainingTotalTradesRole: return item.trainingSummary.totalTrades;
+    case HoldoutTotalReturnPercentRole:
+        return item.holdoutSummary.totalReturnPercent;
+    case HoldoutMaxDrawdownPercentRole:
+        return item.holdoutSummary.maxDrawdownPercent;
+    case HoldoutTotalTradesRole: return item.holdoutSummary.totalTrades;
+    case WalkForwardEnabledRole: return item.walkForwardEnabled;
+    case WalkForwardFoldCountRole: return item.walkForwardFoldCount;
+    case ResearchOnlyRole: return item.researchOnly;
+    case WalkForwardFoldsRole: {
+        QVariantList folds;
+        folds.reserve(item.walkForwardFolds.size());
+        for (const RawTickWalkForwardFoldResult &fold : item.walkForwardFolds) {
+            folds.append(fold.toVariantMap());
+        }
+        return folds;
+    }
+    case WalkForwardMeanReturnPercentRole:
+        return item.walkForwardMeanReturnPercent;
+    case WalkForwardMedianReturnPercentRole:
+        return item.walkForwardMedianReturnPercent;
+    case WalkForwardWorstReturnPercentRole:
+        return item.walkForwardWorstReturnPercent;
+    case WalkForwardBestReturnPercentRole:
+        return item.walkForwardBestReturnPercent;
+    case SegmentedResearchRole: return item.segmentedResearch;
+    case ResearchSegmentsRole: {
+        QVariantList segments;
+        segments.reserve(item.researchSegments.size());
+        for (const RawTickResearchSegmentResult &segment : item.researchSegments) {
+            segments.append(segment.toVariantMap());
+        }
+        return segments;
+    }
+    case ResearchSegmentCountRole: return item.researchSegments.size();
+    case SegmentedMeanReturnPercentRole:
+        return item.segmentedMeanReturnPercent;
+    case SegmentedMedianReturnPercentRole:
+        return item.segmentedMedianReturnPercent;
+    case SegmentedWorstReturnPercentRole:
+        return item.segmentedWorstReturnPercent;
+    case SegmentedBestReturnPercentRole:
+        return item.segmentedBestReturnPercent;
+    case SegmentedWorstDrawdownPercentRole:
+        return item.segmentedWorstDrawdownPercent;
     default: return {};
     }
 }
@@ -51,6 +123,8 @@ QVariant BatchBacktestResultListModel::data(const QModelIndex &index, int role) 
 QHash<int, QByteArray> BatchBacktestResultListModel::roleNames() const
 {
     return {{SymbolRole, "symbol"}, {NameRole, "name"},
+            {DataModeRole, "dataMode"}, {StartDateRole, "startDate"},
+            {EndDateRole, "endDate"},
             {FrequencyRole, "frequency"}, {RequestedBarsRole, "requestedBars"},
             {ActualBarsRole, "actualBars"}, {SucceededRole, "succeeded"},
             {ErrorRole, "error"}, {DataVersionRole, "dataVersion"},
@@ -59,14 +133,70 @@ QHash<int, QByteArray> BatchBacktestResultListModel::roleNames() const
             {DatasetRawTickCountRole, "datasetRawTickCount"},
             {DatasetGapDayCountRole, "datasetGapDayCount"},
             {DatasetStaleDayCountRole, "datasetStaleDayCount"},
+            {DataQualityStatusRole, "dataQualityStatus"},
+            {DataQualityEligibleRole, "dataQualityEligible"},
+            {DataQualityAssessmentRole, "dataQualityAssessment"},
             {ArchivedRole, "archived"},
+            {ArchivableRole, "archivable"},
             {ArchivedResultIdRole, "archivedResultId"},
             {FinalEquityRole, "finalEquity"},
             {TotalReturnPercentRole, "totalReturnPercent"},
             {MaxDrawdownPercentRole, "maxDrawdownPercent"},
             {WinRatePercentRole, "winRatePercent"}, {SharpeRatioRole, "sharpeRatio"},
             {TotalCommissionRole, "totalCommission"}, {TotalTradesRole, "totalTrades"},
-            {ElapsedMillisecondsRole, "elapsedMilliseconds"}};
+            {HasOpenPositionRole, "hasOpenPosition"},
+            {OpenPositionQuantityRole, "openPositionQuantity"},
+            {OpenPositionAveragePriceRole, "openPositionAveragePrice"},
+            {OpenPositionEntryTimeRole, "openPositionEntryTime"},
+            {ElapsedMillisecondsRole, "elapsedMilliseconds"},
+            {HoldoutEnabledRole, "holdoutEnabled"},
+            {HoldoutTradingDaysRole, "holdoutTradingDays"},
+            {TrainingStartDateRole, "trainingStartDate"},
+            {TrainingEndDateRole, "trainingEndDate"},
+            {HoldoutStartDateRole, "holdoutStartDate"},
+            {HoldoutEndDateRole, "holdoutEndDate"},
+            {TrainingActualTicksRole, "trainingActualTicks"},
+            {HoldoutActualTicksRole, "holdoutActualTicks"},
+            {TrainingDataVersionRole, "trainingDataVersion"},
+            {HoldoutDataVersionRole, "holdoutDataVersion"},
+            {TrainingDatasetVersionRole, "trainingDatasetVersion"},
+            {HoldoutDatasetVersionRole, "holdoutDatasetVersion"},
+            {TrainingTotalReturnPercentRole, "trainingTotalReturnPercent"},
+            {TrainingMaxDrawdownPercentRole, "trainingMaxDrawdownPercent"},
+            {TrainingTotalTradesRole, "trainingTotalTrades"},
+            {HoldoutTotalReturnPercentRole, "holdoutTotalReturnPercent"},
+            {HoldoutMaxDrawdownPercentRole, "holdoutMaxDrawdownPercent"},
+            {HoldoutTotalTradesRole, "holdoutTotalTrades"},
+            {WalkForwardEnabledRole, "walkForwardEnabled"},
+            {WalkForwardFoldCountRole, "walkForwardFoldCount"},
+            {ResearchOnlyRole, "researchOnly"},
+            {WalkForwardFoldsRole, "walkForwardFolds"},
+            {WalkForwardMeanReturnPercentRole, "walkForwardMeanReturnPercent"},
+            {WalkForwardMedianReturnPercentRole, "walkForwardMedianReturnPercent"},
+            {WalkForwardWorstReturnPercentRole, "walkForwardWorstReturnPercent"},
+            {WalkForwardBestReturnPercentRole, "walkForwardBestReturnPercent"},
+            {SegmentedResearchRole, "segmentedResearch"},
+            {ResearchSegmentsRole, "researchSegments"},
+            {ResearchSegmentCountRole, "researchSegmentCount"},
+            {SegmentedMeanReturnPercentRole,
+             "segmentedMeanReturnPercent"},
+            {SegmentedMedianReturnPercentRole,
+             "segmentedMedianReturnPercent"},
+            {SegmentedWorstReturnPercentRole,
+             "segmentedWorstReturnPercent"},
+            {SegmentedBestReturnPercentRole,
+             "segmentedBestReturnPercent"},
+            {SegmentedWorstDrawdownPercentRole,
+             "segmentedWorstDrawdownPercent"}};
+}
+
+void BatchBacktestResultListModel::updateArchivableState(
+    const QString &symbol, bool archivable)
+{
+    const int row = indexOfSymbol(symbol);
+    if (row < 0 || m_results.at(row).archivable == archivable) return;
+    m_results[row].archivable = archivable;
+    emit dataChanged(index(row), index(row), {ArchivableRole});
 }
 
 QVariantMap BatchBacktestResultListModel::get(int row) const

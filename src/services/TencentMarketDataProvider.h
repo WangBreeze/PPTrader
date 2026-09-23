@@ -4,6 +4,7 @@
 #include "services/MarketSnapshotAssembler.h"
 
 #include <QHash>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QPointer>
 #include <QTimer>
@@ -31,8 +32,8 @@ private:
                       const QString &error = {}, int receivedCount = -1,
                       const QString &batchId = {});
 
-    QNetworkAccessManager m_network;
-    QTimer m_pollTimer;
+    QNetworkAccessManager *m_network = nullptr;
+    QTimer *m_pollTimer = nullptr;
     QPointer<QNetworkReply> m_activeReply;
     QVector<Instrument> m_instruments;
     QHash<QString, Instrument> m_instrumentBySymbol;
@@ -40,6 +41,7 @@ private:
     QString m_batchId;
     QStringList m_errors;
     QDateTime m_startedAt;
+    QElapsedTimer m_batchTimer;
     QDateTime m_latestQuoteTime;
     QDateTime m_lastEmittedQuoteTime;
     int m_offset = 0;

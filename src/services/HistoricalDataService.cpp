@@ -1,5 +1,7 @@
 #include "services/HistoricalDataService.h"
 
+#include "domain/LocalHistoryTypes.h"
+
 #include "services/BacktestDataVersion.h"
 
 #include <QTimer>
@@ -50,13 +52,7 @@ HistoricalDataService::HistoricalDataService(LocalDataStore *store, HistoricalDa
 
 int HistoricalDataService::periodSecondsForFrequency(const QString &frequency)
 {
-    if (frequency == QStringLiteral("1m")) return 60;
-    if (frequency == QStringLiteral("5m")) return 300;
-    if (frequency == QStringLiteral("15m")) return 900;
-    if (frequency == QStringLiteral("30m")) return 1800;
-    if (frequency == QStringLiteral("60m")) return 3600;
-    if (frequency == QStringLiteral("day")) return 86400;
-    return 0;
+    return localHistoryPeriodSeconds(frequency);
 }
 
 quint64 HistoricalDataService::request(const Instrument &instrument, const QString &frequency,

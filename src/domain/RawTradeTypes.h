@@ -8,12 +8,6 @@
 
 namespace pp {
 
-enum class RawTradeDirection {
-    Buy,
-    Sell,
-    Neutral
-};
-
 struct RawTradeTick {
     Instrument instrument;
     QDateTime timestamp;

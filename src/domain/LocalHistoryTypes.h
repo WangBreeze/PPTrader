@@ -31,6 +31,7 @@ struct LocalHistoryDataset {
 };
 
 QString localHistoryFrequency(int periodSeconds);
+int localHistoryPeriodSeconds(const QString &frequency);
 
 } // namespace pp
 

@@ -30,7 +30,10 @@ void RealtimeProviderRouter::addProvider(
             [this, index](const Tick &tick) {
         if (index == m_activeIndex) {
             m_entries[index].lastSignal.restart();
-            emit tickReceived(tick);
+            // 全市场 Provider 会先逐只组装报价、再发布完整快照。批次内
+            // Tick 只作为 watchdog 活性信号，不能跨线程转发 5000+ 个
+            // 队列事件；快照由 Controller 在主线程一次性展开。
+            if (tick.batchId.isEmpty()) emit tickReceived(tick);
         }
     });
     connect(provider, &MarketDataProvider::snapshotReceived, this,
@@ -143,6 +146,10 @@ void RealtimeProviderRouter::activateBest(const QString &reason, int excludedInd
     }
     m_activeIndex = selected;
     Entry &entry = m_entries[selected];
+    // 每次激活都是新一轮健康评估。上一次熔断前的失败连续数不能
+    // 穿透冷却期，否则 provider 在发布 Starting 时会立刻再次熔断。
+    entry.failureStreak = 0;
+    entry.lastDegradedBatchId.clear();
     entry.health = static_cast<int>(ProviderHealthState::Starting);
     entry.expectedCount = m_instruments.size();
     entry.receivedCount = 0;
@@ -198,10 +205,17 @@ void RealtimeProviderRouter::handleState(
     emit providerStateChanged(health, routedMessage, error, expectedCount,
                               receivedCount, batchId, updatedAt);
     publishRoute(routedMessage);
-    if (health == static_cast<int>(ProviderHealthState::Error)) {
+    if (health == static_cast<int>(ProviderHealthState::Stopped)) {
+        // 有限批次预检完成后 Provider 会主动进入 Stopped。此时必须同步
+        // 结束 Router 的运行态与 watchdog，否则静默超时会错误拉起备用源，
+        // 并把预检桥进程带入后续正式验收。
+        m_running = false;
+        m_watchdog->stop();
+    } else if (health == static_cast<int>(ProviderHealthState::Error)) {
         failover(QStringLiteral("%1 进入错误状态，切换备用源")
                      .arg(entry.capability.displayName));
-    } else if (entry.failureStreak >= m_degradedBatchThreshold) {
+    } else if (health == static_cast<int>(ProviderHealthState::Degraded)
+               && entry.failureStreak >= m_degradedBatchThreshold) {
         failover(QStringLiteral("%1 连续 %2 个批次降级，切换备用源")
                      .arg(entry.capability.displayName)
                      .arg(entry.failureStreak));

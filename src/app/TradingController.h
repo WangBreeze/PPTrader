@@ -7,26 +7,38 @@
 #include "models/CandleListModel.h"
 #include "models/CustomStrategyListModel.h"
 #include "models/EquityCurveListModel.h"
+#include "models/FactorResearchComparisonListModel.h"
 #include "models/InstrumentListModel.h"
 #include "models/LocalCandleSeriesListModel.h"
+#include "models/LocalTickSeriesListModel.h"
 #include "models/MarketSnapshotListModel.h"
 #include "models/ExecutionListModel.h"
 #include "models/OrderListModel.h"
 #include "models/PositionListModel.h"
 #include "models/PortfolioArchiveListModel.h"
 #include "models/PortfolioTradeListModel.h"
+#include "models/RealtimeChartWindowListModel.h"
 #include "models/SignalListModel.h"
 #include "models/StockSearchModel.h"
 #include "models/StrategyListModel.h"
 #include "models/StrategyIntentListModel.h"
 #include "models/TickListModel.h"
 #include "services/BacktestEngine.h"
+#include "services/BatchBacktestResultRetention.h"
 #include "services/BatchBacktestService.h"
 #include "services/AShareRelativeStrengthIndicator.h"
 #include "services/AShareUniverseLoader.h"
+#include "services/AShareInstrumentDayCsvImporter.h"
+#include "services/AShareIndustryCsvImporter.h"
+#include "services/AuthorizedFactorCsvImporter.h"
+#include "services/ExternalFactorResearchService.h"
 #include "services/AsyncMarketSnapshotQueryService.h"
 #include "services/AsyncLocalCandleSeriesQueryService.h"
-#include "services/AsyncTickWriter.h"
+#include "services/AsyncLocalTickSeriesQueryService.h"
+#include "services/AsyncCustomStrategyWorkspaceService.h"
+#include "services/AsyncBacktestArchiveService.h"
+#include "services/AsyncRawTickAvailabilityService.h"
+#include "services/AsyncFactorResearchReportService.h"
 #include "services/BacktestDatasetService.h"
 #include "services/NasDataNodeClient.h"
 #include "services/NasSyncStateStore.h"
@@ -43,6 +55,7 @@
 #include "services/SimulatedBrokerGateway.h"
 #include "services/SqliteLocalDataStore.h"
 #include "services/TradingAccountService.h"
+#include "services/PaperStrategyBook.h"
 #include "services/TickDataCsvImporter.h"
 #include "services/TickDataBatchPlanner.h"
 #include "services/TencentMinuteBarService.h"
@@ -57,6 +70,7 @@
 #include "strategy/FixedAmountPositionSizer.h"
 #include "plugin/StrategyPluginManager.h"
 #include "services/ParameterGridBacktestService.h"
+#include "services/RawTickParameterSensitivityService.h"
 #include "services/LogService.h"
 #include "strategy/StrategyEngine.h"
 #include "strategy/StrategyExecutionCoordinator.h"
@@ -74,6 +88,8 @@ namespace pp {
 
 class TradingController final : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QVariantList paperStrategyRuns READ paperStrategyRuns NOTIFY paperStrategyStateChanged)
+    Q_PROPERTY(QString paperStrategyError READ paperStrategyError NOTIFY paperStrategyStateChanged)
     Q_PROPERTY(QAbstractItemModel *tickModel READ tickModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *candleModel READ candleModel CONSTANT)
     Q_PROPERTY(QVariantList validationRuns READ validationRuns NOTIFY validationRunsChanged)
@@ -87,27 +103,61 @@ class TradingController final : public QObject {
                NOTIFY customStrategyReplayStateChanged)
     Q_PROPERTY(int customStrategyReplayTotalBars READ customStrategyReplayTotalBars
                NOTIFY customStrategyReplayStateChanged)
+    Q_PROPERTY(QVariantList customStrategyExecutionCatalog READ customStrategyExecutionCatalog
+               NOTIFY strategyPluginStateChanged)
+    Q_PROPERTY(QVariantList loadedStrategyPlugins READ loadedStrategyPlugins
+               NOTIFY strategyPluginStateChanged)
+    Q_PROPERTY(QString strategyPluginDirectory READ strategyPluginDirectory
+               NOTIFY strategyPluginStateChanged)
     Q_PROPERTY(bool parameterGridRunning READ parameterGridRunning NOTIFY parameterGridStateChanged)
     Q_PROPERTY(QString parameterGridError READ parameterGridError NOTIFY parameterGridStateChanged)
     Q_PROPERTY(QVariantList parameterGridResults READ parameterGridResults NOTIFY parameterGridStateChanged)
+    Q_PROPERTY(bool rawTickSensitivityRunning READ rawTickSensitivityRunning
+               NOTIFY rawTickSensitivityStateChanged)
+    Q_PROPERTY(qulonglong rawTickSensitivityRequestId READ rawTickSensitivityRequestId
+               NOTIFY rawTickSensitivityStateChanged)
+    Q_PROPERTY(QString rawTickSensitivityError READ rawTickSensitivityError
+               NOTIFY rawTickSensitivityStateChanged)
+    Q_PROPERTY(QVariantMap rawTickSensitivityResult READ rawTickSensitivityResult
+               NOTIFY rawTickSensitivityStateChanged)
+    Q_PROPERTY(QVariantList rawTickSensitivityHistory READ rawTickSensitivityHistory
+               NOTIFY rawTickSensitivityStateChanged)
     Q_PROPERTY(QAbstractItemModel *customStrategyModel READ customStrategyModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *searchModel READ searchModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *instrumentModel READ instrumentModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *backtestTradeModel READ backtestTradeModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *equityCurveModel READ equityCurveModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *backtestArchiveModel READ backtestArchiveModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *backtestArchiveRawTickModel
+               READ backtestArchiveRawTickModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *batchBacktestModel READ batchBacktestModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *orderModel READ orderModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *executionModel READ executionModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *positionModel READ positionModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *marketSnapshotModel READ marketSnapshotModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *localCandleSeriesModel READ localCandleSeriesModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *localTickSeriesModel READ localTickSeriesModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *liveDayCandleSeriesModel READ liveDayCandleSeriesModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *realtimeMinuteCandleModel READ realtimeMinuteCandleModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *realtimeChartWindowModel READ realtimeChartWindowModel CONSTANT)
+    Q_PROPERTY(int realtimeChartWindowCount READ realtimeChartWindowCount
+               NOTIFY realtimeChartWindowsChanged)
+    Q_PROPERTY(QString realtimeChartWindowError READ realtimeChartWindowError
+               NOTIFY realtimeChartWindowsChanged)
     Q_PROPERTY(QVariantList backtestStrategyCatalog READ backtestStrategyCatalog CONSTANT)
     Q_PROPERTY(QVariantMap customStrategySchema READ customStrategySchema CONSTANT)
     Q_PROPERTY(int customStrategyCount READ customStrategyCount NOTIFY customStrategyStateChanged)
     Q_PROPERTY(QString customStrategyError READ customStrategyError NOTIFY customStrategyStateChanged)
+    Q_PROPERTY(bool customStrategyPreviewLoading READ customStrategyPreviewLoading NOTIFY customStrategyPreviewStateChanged)
+    Q_PROPERTY(qulonglong customStrategyPreviewRequestId READ customStrategyPreviewRequestId NOTIFY customStrategyPreviewStateChanged)
+    Q_PROPERTY(qulonglong customStrategyPreviewResolvedRequestId READ customStrategyPreviewResolvedRequestId NOTIFY customStrategyPreviewStateChanged)
+    Q_PROPERTY(QVariantMap customStrategyPreviewResult READ customStrategyPreviewResult NOTIFY customStrategyPreviewStateChanged)
+    Q_PROPERTY(QString customStrategyPreviewError READ customStrategyPreviewError NOTIFY customStrategyPreviewStateChanged)
+    Q_PROPERTY(bool customStrategySaveLoading READ customStrategySaveLoading NOTIFY customStrategySaveStateChanged)
+    Q_PROPERTY(qulonglong customStrategySaveRequestId READ customStrategySaveRequestId NOTIFY customStrategySaveStateChanged)
+    Q_PROPERTY(qulonglong customStrategySaveResolvedRequestId READ customStrategySaveResolvedRequestId NOTIFY customStrategySaveStateChanged)
+    Q_PROPERTY(QVariantMap customStrategySaveResult READ customStrategySaveResult NOTIFY customStrategySaveStateChanged)
+    Q_PROPERTY(QString customStrategySaveError READ customStrategySaveError NOTIFY customStrategySaveStateChanged)
     Q_PROPERTY(bool liveRunning READ liveRunning NOTIFY liveRunningChanged)
     Q_PROPERTY(bool backtestRunning READ backtestRunning NOTIFY backtestRunningChanged)
     Q_PROPERTY(double backtestProgress READ backtestProgress NOTIFY backtestStateChanged)
@@ -137,6 +187,10 @@ class TradingController final : public QObject {
                NOTIFY backtestConfigurationChanged)
     Q_PROPERTY(double backtestSlippageRate READ backtestSlippageRate
                NOTIFY backtestConfigurationChanged)
+    Q_PROPERTY(QString backtestSampleFromDate READ backtestSampleFromDate
+               NOTIFY backtestSampleWindowChanged)
+    Q_PROPERTY(QString backtestSampleToDate READ backtestSampleToDate
+               NOTIFY backtestSampleWindowChanged)
     Q_PROPERTY(QString backtestConfigurationError READ backtestConfigurationError
                NOTIFY backtestConfigurationChanged)
     Q_PROPERTY(QVariantMap backtestResultConfiguration READ backtestResultConfiguration
@@ -155,6 +209,11 @@ class TradingController final : public QObject {
                NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(bool backtestArchiveLoading READ backtestArchiveLoading
                NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(qulonglong backtestArchiveRequestId READ backtestArchiveRequestId
+               NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(qulonglong backtestArchiveResolvedRequestId
+               READ backtestArchiveResolvedRequestId
+               NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(QString backtestArchiveError READ backtestArchiveError
                NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(QString backtestArchiveSaveError READ backtestArchiveSaveError
@@ -163,6 +222,36 @@ class TradingController final : public QObject {
                NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(bool backtestResultHistoricalSnapshot READ backtestResultHistoricalSnapshot
                NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(bool backtestArchiveRawTickPageLoading
+               READ backtestArchiveRawTickPageLoading
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(qulonglong backtestArchiveRawTickPageRequestId
+               READ backtestArchiveRawTickPageRequestId
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(qulonglong backtestArchiveRawTickPageResolvedRequestId
+               READ backtestArchiveRawTickPageResolvedRequestId
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(QString backtestArchiveRawTickPageResultId
+               READ backtestArchiveRawTickPageResultId
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(int backtestArchiveRawTickPageOffset
+               READ backtestArchiveRawTickPageOffset
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(int backtestArchiveRawTickPageSize
+               READ backtestArchiveRawTickPageSize
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(int backtestArchiveRawTickTotalCount
+               READ backtestArchiveRawTickTotalCount
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(bool backtestArchiveRawTickHasPrevious
+               READ backtestArchiveRawTickHasPrevious
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(bool backtestArchiveRawTickHasNext
+               READ backtestArchiveRawTickHasNext
+               NOTIFY backtestArchiveRawTickPageStateChanged)
+    Q_PROPERTY(QString backtestArchiveRawTickPageError
+               READ backtestArchiveRawTickPageError
+               NOTIFY backtestArchiveRawTickPageStateChanged)
     Q_PROPERTY(bool batchBacktestRunning READ batchBacktestRunning
                NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(qulonglong batchBacktestRequestId READ batchBacktestRequestId
@@ -181,8 +270,33 @@ class TradingController final : public QObject {
                NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(QString batchBacktestError READ batchBacktestError
                NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(bool batchBacktestArchiveLoading READ batchBacktestArchiveLoading
+               NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(qulonglong batchBacktestArchiveRequestId
+               READ batchBacktestArchiveRequestId NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(qulonglong batchBacktestArchiveResolvedRequestId
+               READ batchBacktestArchiveResolvedRequestId NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(QString batchBacktestArchiveSymbol READ batchBacktestArchiveSymbol
+               NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(QString batchBacktestArchiveResultId READ batchBacktestArchiveResultId
+               NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(QString batchBacktestArchiveError READ batchBacktestArchiveError
+               NOTIFY batchBacktestStateChanged)
     Q_PROPERTY(QVariantList batchBacktestRunHistory READ batchBacktestRunHistory
                NOTIFY batchBacktestStateChanged)
+    Q_PROPERTY(bool rawTickAvailabilityLoading READ rawTickAvailabilityLoading
+               NOTIFY rawTickAvailabilityStateChanged)
+    Q_PROPERTY(qulonglong rawTickAvailabilityRequestId
+               READ rawTickAvailabilityRequestId
+               NOTIFY rawTickAvailabilityStateChanged)
+    Q_PROPERTY(qulonglong rawTickAvailabilityResolvedRequestId
+               READ rawTickAvailabilityResolvedRequestId
+               NOTIFY rawTickAvailabilityStateChanged)
+    Q_PROPERTY(QVariantMap rawTickAvailabilityResult
+               READ rawTickAvailabilityResult
+               NOTIFY rawTickAvailabilityStateChanged)
+    Q_PROPERTY(QString rawTickAvailabilityError READ rawTickAvailabilityError
+               NOTIFY rawTickAvailabilityStateChanged)
     Q_PROPERTY(bool portfolioBacktestRunning READ portfolioBacktestRunning
                NOTIFY portfolioBacktestStateChanged)
     Q_PROPERTY(QString portfolioBacktestStatusText READ portfolioBacktestStatusText
@@ -210,6 +324,15 @@ class TradingController final : public QObject {
                NOTIFY crossSectionalBacktestStateChanged)
     Q_PROPERTY(QString crossSectionalBacktestError READ crossSectionalBacktestError
                NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap crossSectionalRiskConfiguration
+               READ crossSectionalRiskConfiguration
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalRiskConfigurationError
+               READ crossSectionalRiskConfigurationError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList crossSectionalFactorDefinitionCatalog
+               READ crossSectionalFactorDefinitionCatalog
+               NOTIFY crossSectionalBacktestStateChanged)
     Q_PROPERTY(QVariantMap crossSectionalResultConfiguration
                READ crossSectionalResultConfiguration
                NOTIFY crossSectionalBacktestStateChanged)
@@ -217,6 +340,88 @@ class TradingController final : public QObject {
                READ crossSectionalEquityCurveModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *crossSectionalTradeModel
                READ crossSectionalTradeModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *crossSectionalArchiveModel
+               READ crossSectionalArchiveModel CONSTANT)
+    Q_PROPERTY(int crossSectionalArchiveCount READ crossSectionalArchiveCount
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(bool crossSectionalArchiveLoading READ crossSectionalArchiveLoading
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalArchiveError READ crossSectionalArchiveError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QAbstractItemModel *crossSectionalFactorComparisonModel
+               READ crossSectionalFactorComparisonModel CONSTANT)
+    Q_PROPERTY(int crossSectionalFactorComparisonCount
+               READ crossSectionalFactorComparisonCount
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(int crossSectionalMultipleTestingCandidateCount
+               READ crossSectionalMultipleTestingCandidateCount
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalMultipleTestingCandidateSetSha256
+               READ crossSectionalMultipleTestingCandidateSetSha256
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalMultipleTestingStatusText
+               READ crossSectionalMultipleTestingStatusText
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalFactorComparisonError
+               READ crossSectionalFactorComparisonError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList factorCandidateCatalog READ factorCandidateCatalog
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList factorCandidateEvaluationCatalog
+               READ factorCandidateEvaluationCatalog
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString selectedFactorCandidateId READ selectedFactorCandidateId
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(int selectedFactorCandidateVersion READ selectedFactorCandidateVersion
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString factorCandidateGovernanceStatusText
+               READ factorCandidateGovernanceStatusText
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString factorCandidateGovernanceError
+               READ factorCandidateGovernanceError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap authorizedFactorImportState
+               READ authorizedFactorImportState
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList externalFactorDatasetCatalog
+               READ externalFactorDatasetCatalog
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList selectedFactorCandidateDatasetBindings
+               READ selectedFactorCandidateDatasetBindings
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap externalFactorResearchState
+               READ externalFactorResearchState
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap externalFactorResearchPreflightState
+               READ externalFactorResearchPreflightState
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantList externalFactorResearchArchiveCatalog
+               READ externalFactorResearchArchiveCatalog
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QVariantMap selectedExternalFactorResearchArchive
+               READ selectedExternalFactorResearchArchive
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString selectedCrossSectionalArchiveId
+               READ selectedCrossSectionalArchiveId
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(bool crossSectionalResultHistoricalSnapshot
+               READ crossSectionalResultHistoricalSnapshot
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(bool crossSectionalReportExporting
+               READ crossSectionalReportExporting
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(qulonglong crossSectionalReportExportRequestId
+               READ crossSectionalReportExportRequestId
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalReportExportStatusText
+               READ crossSectionalReportExportStatusText
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalReportExportError
+               READ crossSectionalReportExportError
+               NOTIFY crossSectionalBacktestStateChanged)
+    Q_PROPERTY(QString crossSectionalReportExportPath
+               READ crossSectionalReportExportPath
+               NOTIFY crossSectionalBacktestStateChanged)
     Q_PROPERTY(QString brokerName READ brokerName CONSTANT)
     Q_PROPERTY(bool brokerLoggedIn READ brokerLoggedIn NOTIFY brokerStateChanged)
     Q_PROPERTY(QString tradingError READ tradingError NOTIFY tradingStateChanged)
@@ -275,11 +480,15 @@ class TradingController final : public QObject {
                NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(QString localCandleSeriesFrequency READ localCandleSeriesFrequency
                NOTIFY localCandleSeriesStateChanged)
+    Q_PROPERTY(int localCandleSeriesPeriodSeconds READ localCandleSeriesPeriodSeconds
+               NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(int localCandleSeriesPage READ localCandleSeriesPage
                NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(int localCandleSeriesPageCount READ localCandleSeriesPageCount
                NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(int localCandleSeriesPageSize READ localCandleSeriesPageSize
+               NOTIFY localCandleSeriesStateChanged)
+    Q_PROPERTY(bool localCandleSeriesHasOlderData READ localCandleSeriesHasOlderData
                NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(int localCandleSeriesTotalBars READ localCandleSeriesTotalBars
                NOTIFY localCandleSeriesStateChanged)
@@ -299,6 +508,16 @@ class TradingController final : public QObject {
                NOTIFY localCandleSeriesStateChanged)
     Q_PROPERTY(QString localCandleSeriesError READ localCandleSeriesError
                NOTIFY localCandleSeriesStateChanged)
+    Q_PROPERTY(bool localTickSeriesLoading READ localTickSeriesLoading NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(qulonglong localTickSeriesRequestId READ localTickSeriesRequestId NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(qulonglong localTickSeriesResolvedRequestId READ localTickSeriesResolvedRequestId NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(QString localTickSeriesSymbol READ localTickSeriesSymbol NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(QDate localTickSeriesTradingDate READ localTickSeriesTradingDate NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(qint64 localTickSeriesRawCount READ localTickSeriesRawCount NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(int localTickSeriesDisplayCount READ localTickSeriesDisplayCount NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(bool localTickSeriesDownsampled READ localTickSeriesDownsampled NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(QString localTickSeriesStatusText READ localTickSeriesStatusText NOTIFY localTickSeriesStateChanged)
+    Q_PROPERTY(QString localTickSeriesError READ localTickSeriesError NOTIFY localTickSeriesStateChanged)
     Q_PROPERTY(bool liveDayCandleSeriesLoading READ liveDayCandleSeriesLoading
                NOTIFY liveDayCandleSeriesStateChanged)
     Q_PROPERTY(QString liveDayCandleSeriesStatusText READ liveDayCandleSeriesStatusText
@@ -321,6 +540,9 @@ class TradingController final : public QObject {
                NOTIFY realtimeMinuteStateChanged)
     Q_PROPERTY(QString realtimeMinuteSource READ realtimeMinuteSource
                NOTIFY realtimeMinuteStateChanged)
+    Q_PROPERTY(int realtimeMinutePeriodSeconds READ realtimeMinutePeriodSeconds
+               NOTIFY realtimeMinuteStateChanged)
+    Q_PROPERTY(QVariantList realtimeMinutePeriodOptions READ realtimeMinutePeriodOptions CONSTANT)
     Q_PROPERTY(int realtimeMinuteCount READ realtimeMinuteCount
                NOTIFY realtimeMinuteStateChanged)
     Q_PROPERTY(QDateTime realtimeMinuteLastBarTime READ realtimeMinuteLastBarTime
@@ -411,6 +633,69 @@ class TradingController final : public QObject {
                NOTIFY tickDataImportStateChanged)
     Q_PROPERTY(QString tickDataImportError READ tickDataImportError
                NOTIFY tickDataImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportFilePath
+               READ aShareInstrumentDayImportFilePath
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportSource
+               READ aShareInstrumentDayImportSource
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportSourceVersion
+               READ aShareInstrumentDayImportSourceVersion
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(bool aShareInstrumentDayImportRunning
+               READ aShareInstrumentDayImportRunning
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qulonglong aShareInstrumentDayImportRequestId
+               READ aShareInstrumentDayImportRequestId
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportLinesRead
+               READ aShareInstrumentDayImportLinesRead
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportValidRecords
+               READ aShareInstrumentDayImportValidRecords
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportWrittenRecords
+               READ aShareInstrumentDayImportWrittenRecords
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportNewRecords
+               READ aShareInstrumentDayImportNewRecords
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportUnchangedRecords
+               READ aShareInstrumentDayImportUnchangedRecords
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(qint64 aShareInstrumentDayImportCorrectedRecords
+               READ aShareInstrumentDayImportCorrectedRecords
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(bool aShareInstrumentDayImportPreviewReady
+               READ aShareInstrumentDayImportPreviewReady
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(bool aShareInstrumentDayImportReused
+               READ aShareInstrumentDayImportReused
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportContentSha256
+               READ aShareInstrumentDayImportContentSha256
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportDateRange
+               READ aShareInstrumentDayImportDateRange
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QVariantList aShareInstrumentDayImportDiagnostics
+               READ aShareInstrumentDayImportDiagnostics
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QVariantList aShareInstrumentDayImportHistory
+               READ aShareInstrumentDayImportHistory
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportStatusText
+               READ aShareInstrumentDayImportStatusText
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QString aShareInstrumentDayImportError
+               READ aShareInstrumentDayImportError
+               NOTIFY aShareInstrumentDayImportStateChanged)
+    Q_PROPERTY(QVariantMap aShareIndustryImportState
+               READ aShareIndustryImportState
+               NOTIFY aShareIndustryImportStateChanged)
+    Q_PROPERTY(QVariantList aShareIndustryImportHistory
+               READ aShareIndustryImportHistory
+               NOTIFY aShareIndustryImportStateChanged)
     Q_PROPERTY(QVariantList tickDataBatchPlan READ tickDataBatchPlan
                NOTIFY tickDataBatchStateChanged)
     Q_PROPERTY(QVariantMap tickDataBatchSummary READ tickDataBatchSummary
@@ -453,6 +738,8 @@ class TradingController final : public QObject {
     Q_PROPERTY(qint64 nasDataNodeExpectedBytes READ nasDataNodeExpectedBytes NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(QString nasDataNodeStatusText READ nasDataNodeStatusText NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(QString nasDataNodeError READ nasDataNodeError NOTIFY nasDataNodeStateChanged)
+    Q_PROPERTY(QVariantMap nasBacktestPreparationSummary READ nasBacktestPreparationSummary
+               NOTIFY nasDataNodeStateChanged)
     Q_PROPERTY(int persistedTickCount READ persistedTickCount NOTIFY storageStateChanged)
     Q_PROPERTY(int persistedSignalCount READ persistedSignalCount NOTIFY storageStateChanged)
     Q_PROPERTY(int strategyCount READ strategyCount NOTIFY strategyStateChanged)
@@ -507,6 +794,10 @@ public:
     Q_ENUM(SnapshotHealthState)
 
     explicit TradingController(QObject *parent = nullptr);
+    ~TradingController() override;
+
+    // Idempotent shutdown used before QApplication tears down its event loop.
+    void shutdown();
 
     QAbstractItemModel *tickModel();
     QAbstractItemModel *candleModel();
@@ -521,18 +812,33 @@ public:
     QAbstractItemModel *backtestTradeModel();
     QAbstractItemModel *equityCurveModel();
     QAbstractItemModel *backtestArchiveModel();
+    QAbstractItemModel *backtestArchiveRawTickModel();
     QAbstractItemModel *batchBacktestModel();
     QAbstractItemModel *orderModel();
     QAbstractItemModel *executionModel();
     QAbstractItemModel *positionModel();
     QAbstractItemModel *marketSnapshotModel();
     QAbstractItemModel *localCandleSeriesModel();
+    QAbstractItemModel *localTickSeriesModel();
     QAbstractItemModel *liveDayCandleSeriesModel();
     QAbstractItemModel *realtimeMinuteCandleModel();
+    QAbstractItemModel *realtimeChartWindowModel();
+    int realtimeChartWindowCount() const;
+    QString realtimeChartWindowError() const;
     QVariantList backtestStrategyCatalog() const;
     QVariantMap customStrategySchema() const;
     int customStrategyCount() const;
     QString customStrategyError() const;
+    bool customStrategyPreviewLoading() const;
+    qulonglong customStrategyPreviewRequestId() const;
+    qulonglong customStrategyPreviewResolvedRequestId() const;
+    QVariantMap customStrategyPreviewResult() const;
+    QString customStrategyPreviewError() const;
+    bool customStrategySaveLoading() const;
+    qulonglong customStrategySaveRequestId() const;
+    qulonglong customStrategySaveResolvedRequestId() const;
+    QVariantMap customStrategySaveResult() const;
+    QString customStrategySaveError() const;
 
     bool liveRunning() const;
     bool backtestRunning() const;
@@ -556,6 +862,8 @@ public:
     double backtestConfiguredInitialCapital() const;
     double backtestCommissionRate() const;
     double backtestSlippageRate() const;
+    QString backtestSampleFromDate() const;
+    QString backtestSampleToDate() const;
     QString backtestConfigurationError() const;
     QVariantMap backtestResultConfiguration() const;
     qulonglong backtestTaskId() const;
@@ -566,10 +874,22 @@ public:
     int backtestArchiveCount() const;
     QString selectedBacktestArchiveId() const;
     bool backtestArchiveLoading() const;
+    qulonglong backtestArchiveRequestId() const;
+    qulonglong backtestArchiveResolvedRequestId() const;
     QString backtestArchiveError() const;
     QString backtestArchiveSaveError() const;
     bool backtestResultArchived() const;
     bool backtestResultHistoricalSnapshot() const;
+    bool backtestArchiveRawTickPageLoading() const;
+    qulonglong backtestArchiveRawTickPageRequestId() const;
+    qulonglong backtestArchiveRawTickPageResolvedRequestId() const;
+    QString backtestArchiveRawTickPageResultId() const;
+    int backtestArchiveRawTickPageOffset() const;
+    int backtestArchiveRawTickPageSize() const;
+    int backtestArchiveRawTickTotalCount() const;
+    bool backtestArchiveRawTickHasPrevious() const;
+    bool backtestArchiveRawTickHasNext() const;
+    QString backtestArchiveRawTickPageError() const;
     bool batchBacktestRunning() const;
     bool portfolioBacktestRunning() const;
     qulonglong batchBacktestRequestId() const;
@@ -580,7 +900,18 @@ public:
     double batchBacktestProgress() const;
     QString batchBacktestStatusText() const;
     QString batchBacktestError() const;
+    bool batchBacktestArchiveLoading() const;
+    qulonglong batchBacktestArchiveRequestId() const;
+    qulonglong batchBacktestArchiveResolvedRequestId() const;
+    QString batchBacktestArchiveSymbol() const;
+    QString batchBacktestArchiveResultId() const;
+    QString batchBacktestArchiveError() const;
     QVariantList batchBacktestRunHistory() const;
+    bool rawTickAvailabilityLoading() const;
+    qulonglong rawTickAvailabilityRequestId() const;
+    qulonglong rawTickAvailabilityResolvedRequestId() const;
+    QVariantMap rawTickAvailabilityResult() const;
+    QString rawTickAvailabilityError() const;
     QString portfolioBacktestStatusText() const;
     QString portfolioBacktestError() const;
     QVariantMap portfolioResultConfiguration() const;
@@ -593,9 +924,42 @@ public:
     bool crossSectionalBacktestRunning() const;
     QString crossSectionalBacktestStatusText() const;
     QString crossSectionalBacktestError() const;
+    QVariantMap crossSectionalRiskConfiguration() const;
+    QString crossSectionalRiskConfigurationError() const;
+    QVariantList crossSectionalFactorDefinitionCatalog() const;
     QVariantMap crossSectionalResultConfiguration() const;
     QAbstractItemModel *crossSectionalEquityCurveModel();
     QAbstractItemModel *crossSectionalTradeModel();
+    QAbstractItemModel *crossSectionalArchiveModel();
+    int crossSectionalArchiveCount() const;
+    bool crossSectionalArchiveLoading() const;
+    QString crossSectionalArchiveError() const;
+    QAbstractItemModel *crossSectionalFactorComparisonModel();
+    int crossSectionalFactorComparisonCount() const;
+    int crossSectionalMultipleTestingCandidateCount() const;
+    QString crossSectionalMultipleTestingCandidateSetSha256() const;
+    QString crossSectionalMultipleTestingStatusText() const;
+    QString crossSectionalFactorComparisonError() const;
+    QVariantList factorCandidateCatalog() const;
+    QVariantList factorCandidateEvaluationCatalog() const;
+    QString selectedFactorCandidateId() const;
+    int selectedFactorCandidateVersion() const;
+    QString factorCandidateGovernanceStatusText() const;
+    QString factorCandidateGovernanceError() const;
+    QVariantMap authorizedFactorImportState() const;
+    QVariantList externalFactorDatasetCatalog() const;
+    QVariantList selectedFactorCandidateDatasetBindings() const;
+    QVariantMap externalFactorResearchState() const;
+    QVariantMap externalFactorResearchPreflightState() const;
+    QVariantList externalFactorResearchArchiveCatalog() const;
+    QVariantMap selectedExternalFactorResearchArchive() const;
+    QString selectedCrossSectionalArchiveId() const;
+    bool crossSectionalResultHistoricalSnapshot() const;
+    bool crossSectionalReportExporting() const;
+    qulonglong crossSectionalReportExportRequestId() const;
+    QString crossSectionalReportExportStatusText() const;
+    QString crossSectionalReportExportError() const;
+    QString crossSectionalReportExportPath() const;
     QString brokerName() const;
     bool brokerLoggedIn() const;
     QString tradingError() const;
@@ -637,9 +1001,11 @@ public:
     qulonglong localCandleSeriesResolvedRequestId() const;
     QString localCandleSeriesSymbol() const;
     QString localCandleSeriesFrequency() const;
+    int localCandleSeriesPeriodSeconds() const;
     int localCandleSeriesPage() const;
     int localCandleSeriesPageCount() const;
     int localCandleSeriesPageSize() const;
+    bool localCandleSeriesHasOlderData() const;
     int localCandleSeriesTotalBars() const;
     int localCandleSeriesRawBars() const;
     int localCandleSeriesDisplayPoints() const;
@@ -649,6 +1015,16 @@ public:
     QDateTime localCandleSeriesLastTime() const;
     QString localCandleSeriesStatusText() const;
     QString localCandleSeriesError() const;
+    bool localTickSeriesLoading() const;
+    qulonglong localTickSeriesRequestId() const;
+    qulonglong localTickSeriesResolvedRequestId() const;
+    QString localTickSeriesSymbol() const;
+    QDate localTickSeriesTradingDate() const;
+    qint64 localTickSeriesRawCount() const;
+    int localTickSeriesDisplayCount() const;
+    bool localTickSeriesDownsampled() const;
+    QString localTickSeriesStatusText() const;
+    QString localTickSeriesError() const;
     bool liveDayCandleSeriesLoading() const;
     QString liveDayCandleSeriesStatusText() const;
     QString liveDayCandleSeriesError() const;
@@ -660,6 +1036,8 @@ public:
     QString realtimeMinuteError() const;
     QString realtimeMinuteSymbol() const;
     QString realtimeMinuteSource() const;
+    int realtimeMinutePeriodSeconds() const;
+    QVariantList realtimeMinutePeriodOptions() const;
     int realtimeMinuteCount() const;
     QDateTime realtimeMinuteLastBarTime() const;
     bool realtimeMinuteStale() const;
@@ -705,6 +1083,27 @@ public:
     QVariantList tickDataImportDiagnostics() const;
     QString tickDataImportStatusText() const;
     QString tickDataImportError() const;
+    QString aShareInstrumentDayImportFilePath() const;
+    QString aShareInstrumentDayImportSource() const;
+    QString aShareInstrumentDayImportSourceVersion() const;
+    bool aShareInstrumentDayImportRunning() const;
+    qulonglong aShareInstrumentDayImportRequestId() const;
+    qint64 aShareInstrumentDayImportLinesRead() const;
+    qint64 aShareInstrumentDayImportValidRecords() const;
+    qint64 aShareInstrumentDayImportWrittenRecords() const;
+    qint64 aShareInstrumentDayImportNewRecords() const;
+    qint64 aShareInstrumentDayImportUnchangedRecords() const;
+    qint64 aShareInstrumentDayImportCorrectedRecords() const;
+    bool aShareInstrumentDayImportPreviewReady() const;
+    bool aShareInstrumentDayImportReused() const;
+    QString aShareInstrumentDayImportContentSha256() const;
+    QString aShareInstrumentDayImportDateRange() const;
+    QVariantList aShareInstrumentDayImportDiagnostics() const;
+    QVariantList aShareInstrumentDayImportHistory() const;
+    QString aShareInstrumentDayImportStatusText() const;
+    QString aShareInstrumentDayImportError() const;
+    QVariantMap aShareIndustryImportState() const;
+    QVariantList aShareIndustryImportHistory() const;
     QVariantList tickDataBatchPlan() const;
     QVariantMap tickDataBatchSummary() const;
     QVariantList tickDataImportRunHistory() const;
@@ -738,6 +1137,7 @@ public:
     qint64 nasDataNodeExpectedBytes() const;
     QString nasDataNodeStatusText() const;
     QString nasDataNodeError() const;
+    QVariantMap nasBacktestPreparationSummary() const;
     int persistedTickCount() const;
     int persistedSignalCount() const;
     int strategyCount() const;
@@ -749,6 +1149,11 @@ public:
     bool parameterGridRunning() const;
     QString parameterGridError() const;
     QVariantList parameterGridResults() const;
+    bool rawTickSensitivityRunning() const;
+    qulonglong rawTickSensitivityRequestId() const;
+    QString rawTickSensitivityError() const;
+    QVariantMap rawTickSensitivityResult() const;
+    QVariantList rawTickSensitivityHistory() const;
     int aShareUniverseCount() const;
     int aShareUniverseSourceCount() const;
     int aShareUniverseRejectedCount() const;
@@ -804,7 +1209,10 @@ public:
     Q_INVOKABLE QVariantMap customStrategyLocalRunAvailability(
         const QString &strategyId, int version,
         const QVariantMap &strategyParameters = {}) const;
-    Q_INVOKABLE QVariantMap customStrategyPreview(
+    QVariantMap customStrategyPreview(
+        const QString &json, const QString &symbol,
+        int periodSeconds, int barCount);
+    Q_INVOKABLE qulonglong requestCustomStrategyPreview(
         const QString &json, const QString &symbol,
         int periodSeconds, int barCount);
     Q_INVOKABLE qulonglong runSelectedLocalCustomStrategyBacktest(
@@ -822,9 +1230,24 @@ public:
                                                double slippageRate);
     Q_INVOKABLE QVariantMap backtestStrategyDescriptor(const QString &strategyId) const;
     Q_INVOKABLE QVariantMap validateCustomStrategyJson(const QString &json) const;
+    QVariantList paperStrategyRuns() const;
+    QString paperStrategyError() const;
+    Q_INVOKABLE qulonglong publishPaperStrategyVersion(const QString &strategyId, int version);
+    Q_INVOKABLE QString startPaperStrategyRun(const QString &strategyId, int version,
+        const QString &symbol, double initialCapital, double commissionRate, double slippageRate);
+    Q_INVOKABLE bool stopPaperStrategyRun(const QString &runId);
+    Q_INVOKABLE void stopAllPaperStrategies();
+    Q_INVOKABLE bool exportPaperStrategyReport(const QUrl &destination);
+    QString startPaperReplayRun(const QString &strategyId, int version, const QString &symbol,
+                                const QDateTime &sourceStart, double initialCapital = 100000);
+    QString startPaperReplayPortfolio(const QString &strategyId, int version, const QStringList &symbols,
+                                     const QDateTime &sourceStart, const PaperStrategyConfig &config);
+    bool acceptPaperReplayBar(const Candle &bar, const QDateTime &sourceClock, bool warmup);
+    void acceptPaperReplayQuote(const Tick &quote);
     Q_INVOKABLE QVariantMap analyzeCustomStrategyJson(
         const QString &json, const QVariantMap &runtimeParameters = {}) const;
-    Q_INVOKABLE bool saveCustomStrategyJson(const QString &json);
+    bool saveCustomStrategyJson(const QString &json);
+    Q_INVOKABLE qulonglong requestSaveCustomStrategyJson(const QString &json);
     Q_INVOKABLE QVariantMap customStrategyDefinition(const QString &strategyId,
                                                      int version = 0) const;
     Q_INVOKABLE QString exportCustomStrategyJson(const QString &strategyId,
@@ -833,8 +1256,17 @@ public:
     Q_INVOKABLE qulonglong runLocalBatchBacktest(
         const QString &strategyId, const QVariantMap &strategyParameters,
         const QString &frequency, int barCount, int maximumSymbols = 5207);
+    Q_INVOKABLE qulonglong runLocalBatchBacktestRange(
+        const QString &strategyId, const QVariantMap &strategyParameters,
+        const QString &dataMode, const QString &frequency,
+        const QString &startDate, const QString &endDate,
+        int maximumSymbols = 5207, int holdoutTradingDays = 0,
+        int walkForwardFoldCount = 0, bool segmentedResearch = false);
+    Q_INVOKABLE qulonglong analyzeLocalRawTickAvailability(
+        const QString &startDate, const QString &endDate,
+        int maximumSymbols = 5207);
     Q_INVOKABLE void cancelLocalBatchBacktest();
-    Q_INVOKABLE QString archiveBatchBacktestItem(const QString &symbol);
+    Q_INVOKABLE qulonglong archiveBatchBacktestItem(const QString &symbol);
     Q_INVOKABLE QString resumeBatchBacktest(const QString &runId);
     Q_INVOKABLE qulonglong runPortfolioBacktest(const QString &portfolioJson,
                                                 int barCount);
@@ -843,15 +1275,76 @@ public:
     Q_INVOKABLE void refreshPortfolioBacktestArchiveList();
     Q_INVOKABLE qulonglong runCrossSectionalBacktest(const QString &strategyJson,
                                                       int barCount);
+    Q_INVOKABLE qulonglong runCrossSectionalBacktestForPeriod(
+        const QString &strategyJson, int barCount, int periodSeconds);
+    Q_INVOKABLE bool setCrossSectionalRiskConfiguration(
+        double maximumLegWeight, int maximumActiveLegs,
+        int maximumConsecutiveMissingBars);
+    Q_INVOKABLE bool setCrossSectionalCircuitBreakerConfiguration(
+        double maximumPortfolioLossPercent,
+        double maximumPortfolioDrawdownPercent);
+    Q_INVOKABLE bool setCrossSectionalIndustryConfiguration(
+        double maximumIndustryWeight, const QString &industryDatasetId);
+    Q_INVOKABLE bool setCrossSectionalFactorExposureConfiguration(
+        double maximumAbsoluteFactorExposure, const QString &factorExposureAlias);
+    Q_INVOKABLE bool setCrossSectionalFactorResearchConfiguration(
+        const QString &factorAlias, double lowerPercentile,
+        double upperPercentile, int minimumPairs, double oneWayCostBps,
+        bool industryNeutralization, int minimumIndustryGroupSize);
+    Q_INVOKABLE QVariantMap validateCrossSectionalBacktestRequest(
+        const QString &strategyJson, int barCount, int periodSeconds) const;
     Q_INVOKABLE void cancelCrossSectionalBacktest();
+    Q_INVOKABLE bool loadCrossSectionalBacktestArchive(const QString &resultId);
+    Q_INVOKABLE void refreshCrossSectionalBacktestArchiveList();
+    Q_INVOKABLE bool toggleCrossSectionalFactorComparison(
+        const QString &resultId);
+    Q_INVOKABLE bool isCrossSectionalFactorComparisonSelected(
+        const QString &resultId) const;
+    Q_INVOKABLE void clearCrossSectionalFactorComparison();
+    Q_INVOKABLE bool registerFactorCandidate(
+        const QString &candidateId, const QString &name,
+        const QString &hypothesis, const QString &sourceKind,
+        const QString &sourceReference, const QVariantMap &factorDefinition);
+    Q_INVOKABLE bool selectFactorCandidate(const QString &candidateId,
+                                           int version);
+    Q_INVOKABLE bool freezeFactorCandidate(const QString &candidateId,
+                                           int version);
+    Q_INVOKABLE bool linkSelectedArchiveToFactorCandidate(bool prospective);
+    Q_INVOKABLE void refreshFactorCandidateCatalog();
+    Q_INVOKABLE bool setAuthorizedFactorImportFile(const QString &pathOrUrl);
+    Q_INVOKABLE qulonglong previewAuthorizedFactorImport(
+        const QString &factorKey, const QString &sourceVersion,
+        const QString &sourceReference);
+    Q_INVOKABLE qulonglong commitAuthorizedFactorImport(
+        const QString &factorKey, const QString &sourceVersion,
+        const QString &sourceReference);
+    Q_INVOKABLE void cancelAuthorizedFactorImport();
+    Q_INVOKABLE void refreshExternalFactorDatasetCatalog();
+    Q_INVOKABLE bool bindSelectedExternalFactorDataset(
+        const QString &datasetId);
+    Q_INVOKABLE qulonglong preflightExternalFactorResearch(
+        const QString &datasetId, int periodSeconds,
+        int minimumPairs = 3, double oneWayCostBps = 0.0);
+    Q_INVOKABLE qulonglong startExternalFactorResearch(
+        const QString &datasetId, int periodSeconds,
+        int minimumPairs = 3, double oneWayCostBps = 0.0);
+    Q_INVOKABLE void cancelExternalFactorResearch();
+    Q_INVOKABLE void refreshExternalFactorResearchArchives();
+    Q_INVOKABLE bool loadExternalFactorResearchArchive(
+        const QString &resultId);
+    Q_INVOKABLE qulonglong exportCrossSectionalFactorReport(
+        const QString &pathOrUrl);
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE QVariantMap replayBacktestBar(int index) const;
-    Q_INVOKABLE void saveValidationRun(const QString &name);
+    Q_INVOKABLE bool saveValidationRun(const QString &name);
     Q_INVOKABLE bool loadValidationRun(int index);
     Q_INVOKABLE void setBacktestSampleWindow(const QDateTime &from, const QDateTime &to);
+    Q_INVOKABLE bool setBacktestSampleDateRange(const QString &from, const QString &to);
     Q_INVOKABLE void clearBacktestSampleWindow();
     Q_INVOKABLE void refreshBacktestArchiveList();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
+    Q_INVOKABLE qulonglong requestBacktestArchiveRawTickPage(
+        const QString &resultId, int offset, int pageSize = 256);
     Q_INVOKABLE void clear();
     Q_INVOKABLE void selectInstrument(const QString &symbol);
     Q_INVOKABLE bool selectLiveInstrument(const QString &symbol);
@@ -865,9 +1358,31 @@ public:
     Q_INVOKABLE qulonglong requestLocalCandleSeriesPeriod(
         const QString &symbol, int periodSeconds, int page = 0,
         int pageSize = 1000, int maximumPoints = 800);
+    Q_INVOKABLE qulonglong requestOlderLocalCandleSeries();
+    Q_INVOKABLE qulonglong prepareLocalBacktestPeriod(
+        const QString &symbol, int periodSeconds);
+    Q_INVOKABLE qulonglong requestLocalTickSeries(
+        const QString &symbol, const QString &tradingDate = {},
+        int maximumPoints = 100000);
     Q_INVOKABLE qulonglong requestLiveDayCandleSeries(
         const QString &symbol, int periodSeconds, int maximumPoints = 800);
     Q_INVOKABLE qulonglong requestRealtimeMinuteSeries(const QString &symbol = {});
+    Q_INVOKABLE qulonglong requestRealtimeMinuteSeriesPeriod(
+        const QString &symbol, int periodSeconds);
+    Q_INVOKABLE bool setRealtimeMinutePeriod(int periodSeconds);
+    Q_INVOKABLE QString openRealtimeChartWindow(const QString &symbol = {});
+    Q_INVOKABLE bool closeRealtimeChartWindow(const QString &windowId);
+    Q_INVOKABLE bool setRealtimeChartWindowInstrument(
+        const QString &windowId, const QString &symbol);
+    Q_INVOKABLE QVariantList searchRealtimeChartWindowInstruments(
+        const QString &windowId, const QString &query, int limit = 30) const;
+    Q_INVOKABLE QString addRealtimeChart(
+        const QString &windowId, int periodSeconds = 0);
+    Q_INVOKABLE bool removeRealtimeChart(
+        const QString &windowId, const QString &chartId);
+    Q_INVOKABLE bool setRealtimeChartPeriod(
+        const QString &windowId, const QString &chartId, int periodSeconds);
+    Q_INVOKABLE qulonglong refreshRealtimeChartWindow(const QString &windowId);
     Q_INVOKABLE bool selectHistoryDownloadInstrument(const QString &symbol);
     Q_INVOKABLE qulonglong downloadAndStoreHistory(const QString &frequency,
                                                    int targetBars);
@@ -879,6 +1394,25 @@ public:
                                                int format, int periodSeconds,
                                                int fiveMinuteVolumeUnit);
     Q_INVOKABLE void cancelTickDataImport();
+    Q_INVOKABLE bool setAShareInstrumentDayImportFile(const QString &pathOrUrl);
+    Q_INVOKABLE qulonglong startAShareInstrumentDayImport(
+        const QString &source, const QString &sourceVersion);
+    Q_INVOKABLE qulonglong previewAShareInstrumentDayImport(
+        const QString &source, const QString &sourceVersion);
+    Q_INVOKABLE qulonglong commitAShareInstrumentDayImport(
+        const QString &source, const QString &sourceVersion,
+        const QString &revisionReason);
+    Q_INVOKABLE void cancelAShareInstrumentDayImport();
+    Q_INVOKABLE void refreshAShareInstrumentDayImportHistory();
+    Q_INVOKABLE bool setAShareIndustryImportFile(const QString &pathOrUrl);
+    Q_INVOKABLE qulonglong previewAShareIndustryImport(
+        const QString &classification, const QString &source,
+        const QString &sourceVersion);
+    Q_INVOKABLE qulonglong commitAShareIndustryImport(
+        const QString &classification, const QString &source,
+        const QString &sourceVersion, const QString &revisionReason);
+    Q_INVOKABLE void cancelAShareIndustryImport();
+    Q_INVOKABLE void refreshAShareIndustryImportHistory();
     Q_INVOKABLE bool prepareTickDataBatchImport(const QString &startDate,
                                                 const QString &endDate,
                                                 int format, int periodSeconds,
@@ -926,6 +1460,7 @@ public:
                                                    const QString &symbol);
     Q_INVOKABLE bool disableCustomStrategyExecution(const QString &strategyId);
     Q_INVOKABLE bool isCustomStrategyExecuting(const QString &strategyId) const;
+    QVariantList customStrategyExecutionCatalog() const;
     Q_INVOKABLE QVariantList customStrategyRuntimePlugins() const;
     Q_INVOKABLE QVariantList strategyPluginScan();
     Q_INVOKABLE bool loadStrategyPlugin(const QString &fileName);
@@ -940,6 +1475,17 @@ public:
                                                     const QString &symbol, int periodSeconds,
                                                     int barCount, const QVariantList &axes);
     Q_INVOKABLE void cancelParameterGridBacktest();
+    Q_INVOKABLE qulonglong runRawTickParameterSensitivity(
+        const QString &strategyId, const QVariantMap &strategyParameters,
+        const QString &symbol, const QString &startDate, const QString &endDate,
+        int validationTradingDays, const QVariantList &axes);
+    Q_INVOKABLE qulonglong runRawTickParameterSensitivity(
+        const QString &strategyId, const QVariantMap &strategyParameters,
+        const QString &symbol, const QString &startDate, const QString &endDate,
+        int validationTradingDays, int walkForwardFoldCount,
+        const QVariantList &axes);
+    Q_INVOKABLE void cancelRawTickParameterSensitivity();
+    Q_INVOKABLE bool loadRawTickParameterSensitivityResult(const QString &resultId);
     Q_INVOKABLE bool startCustomStrategyReplay(const QString &strategyId, const QString &symbol,
                                                int periodSeconds, int barCount, int intervalMs);
     Q_INVOKABLE void stopCustomStrategyReplay();
@@ -960,21 +1506,31 @@ public:
     Q_INVOKABLE qulonglong syncNasTickManifest();
     Q_INVOKABLE void cancelNasTickSync();
     Q_INVOKABLE bool resumeNasTickSync();
+    Q_INVOKABLE bool configureNasBacktestPreparation(int periodSeconds,
+                                                     int minimumBars = 2);
+    Q_INVOKABLE qulonglong prepareNasBacktestDatasets();
+    Q_INVOKABLE void cancelNasBacktestPreparation();
     Q_INVOKABLE void refreshNasTickCacheSummary();
     Q_INVOKABLE bool pruneNasTickCache(int maximumAgeDays);
 
 signals:
+    void paperStrategyStateChanged();
     void liveRunningChanged();
     void backtestRunningChanged();
     void backtestStateChanged();
     void backtestSummaryChanged();
+    void backtestSampleWindowChanged();
     void validationRunsChanged();
     void backtestArchiveStateChanged();
+    void backtestArchiveRawTickPageStateChanged();
     void backtestConfigurationChanged();
     void batchBacktestStateChanged();
+    void rawTickAvailabilityStateChanged();
     void portfolioBacktestStateChanged();
     void crossSectionalBacktestStateChanged();
     void customStrategyStateChanged();
+    void customStrategyPreviewStateChanged();
+    void customStrategySaveStateChanged();
     void statusTextChanged();
     void stockSearchTextChanged();
     void selectedInstrumentChanged();
@@ -982,10 +1538,14 @@ signals:
     void backtestInstrumentChanged();
     void localBacktestDataCatalogChanged();
     void localCandleSeriesStateChanged();
+    void localTickSeriesStateChanged();
     void liveDayCandleSeriesStateChanged();
     void realtimeMinuteStateChanged();
+    void realtimeChartWindowsChanged();
     void historyDownloadStateChanged();
     void tickDataImportStateChanged();
+    void aShareInstrumentDayImportStateChanged();
+    void aShareIndustryImportStateChanged();
     void tickDataBatchStateChanged();
     void instrumentResearchRequested(const QString &symbol);
     void selectedMarketSessionChanged();
@@ -1000,7 +1560,9 @@ signals:
     void strategyExecutionConfigChanged(const QString &strategyId);
     void notificationSettingsChanged();
     void customStrategyReplayStateChanged();
+    void strategyPluginStateChanged();
     void parameterGridStateChanged();
+    void rawTickSensitivityStateChanged();
     void crossSectionalFrameUpdated(const pp::FactorFrame &frame);
     void marketSnapshotChanged();
     void snapshotQueryStateChanged();
@@ -1009,6 +1571,14 @@ signals:
     void selectedTickPoint(const QDateTime &timestamp, double price, const QString &symbol);
 
 private:
+    void initializePaperTrading();
+    void refreshPaperMinuteSubscriptions();
+    void clearUnusedPaperMinuteSubscriptions();
+    bool canStartPaperStrategy();
+    QHash<QString, TencentMinuteBarService *> m_paperMinuteServices;
+    QTimer m_paperMinuteTimer;
+    QTimer m_paperStateNotifyTimer;
+    QString m_paperStrategyError;
     QVector<Instrument> buildWatchlist() const;
     QVector<Instrument> buildMarketUniverse() const;
     Instrument findInstrument(const QString &symbol) const;
@@ -1026,6 +1596,10 @@ private:
     void handleParameterGridCompleted(quint64 requestId,
                                       const QVector<ParameterGridResult> &results);
     void handleParameterGridFailed(quint64 requestId, const QString &error);
+    void handleRawTickSensitivityCompleted(
+        quint64 requestId, const RawTickParameterSensitivityResult &result);
+    void handleRawTickSensitivityFailed(quint64 requestId, const QString &error);
+    void reloadRawTickParameterSensitivityHistory();
     void handleBacktestPoint(const CandlePoint &point);
     void handleBacktestTrade(const BacktestTrade &trade);
     void handleHistoryDownloadReady(quint64 requestId,
@@ -1034,6 +1608,18 @@ private:
     void handleHistoryDownloadError(quint64 requestId, const QString &message);
     void handleTickDataImportFinished(quint64 requestId,
                                       const TickDataImportResult &result);
+    void handleAShareInstrumentDayImportFinished(
+        quint64 requestId, const AShareInstrumentDayImportResult &result);
+    void handleAShareIndustryImportFinished(
+        quint64 requestId, const AShareIndustryImportResult &result);
+    void handleAuthorizedFactorImportFinished(
+        quint64 requestId, const AuthorizedFactorImportResult &result);
+    void handleExternalFactorResearchFinished(
+        quint64 requestId,
+        const ExternalFactorResearchExecutionResult &result);
+    void handleExternalFactorResearchPreflightFinished(
+        quint64 requestId,
+        const ExternalFactorResearchPreflightResult &result);
     void startNextTickDataBatchFile();
     void handleTickDataBatchFileFinished(const TickDataImportResult &result);
     void recomputeTickDataBatchSummary();
@@ -1048,12 +1634,24 @@ private:
         quint64 requestId, const BacktestDatasetIdentity &identity,
         const QVector<Candle> &candles);
     void handleBacktestDatasetFailed(quint64 requestId, const QString &message);
+    void handleBatchBacktestArchiveFinished(
+        quint64 requestId, const QString &symbol,
+        const QString &resultId, const QString &error);
+    void finishBacktestArchiveLoad(
+        quint64 requestId, const BacktestArchiveRecord &record,
+        const QString &error);
+    void finishBacktestArchiveRawTickPage(
+        quint64 requestId, const BacktestRawTickPage &page,
+        const QString &error);
+    void clearBacktestArchiveRawTickPage();
     void handlePortfolioBacktestCompleted(
         quint64 requestId, const PortfolioResult &result);
     void handleCrossSectionalBacktestCompleted(
         quint64 requestId, const PortfolioResult &result);
     void handleCrossSectionalBacktestFailed(
         quint64 requestId, const QString &message);
+    void finishCustomStrategyPreview(quint64 requestId, const QVariantMap &result);
+    void finishCustomStrategySave(quint64 requestId, const QVariantMap &result);
     void handleHistoryKline(quint64 requestId, const QVector<Candle> &candles, bool fromCache);
     void handleHistoryError(quint64 requestId, const QString &message);
     void handleOrderChanged(const Order &order);
@@ -1071,10 +1669,14 @@ private:
                                const MarketSnapshotQueryResult &result);
     void finishLocalCandleSeriesRequest(
         quint64 requestId, const LocalCandleSeriesResult &result);
+    void finishLocalTickSeriesRequest(
+        quint64 requestId, const LocalTickSeriesResult &result);
     void finishLiveDayCandleSeriesRequest(
         quint64 requestId, const LocalCandleSeriesResult &result);
     void finishRealtimeMinuteRequest(
         quint64 requestId, const RealtimeMinuteSeriesResult &result);
+    void scheduleRealtimeMinuteRefresh();
+    void rebuildRealtimeMinuteModel();
     void handleProviderState(int health, const QString &message, const QString &error,
                              int expectedCount, int receivedCount,
                              const QString &batchId, const QDateTime &updatedAt);
@@ -1098,6 +1700,13 @@ private:
     void launchNasDownload(int index);
     void startNextNasImport();
     void finishNasSyncRun(bool cancelled = false);
+    void handleNasBacktestPreparationProgress(
+        quint64 requestId, int completedSymbols, int totalSymbols,
+        const QString &currentSymbol);
+    void handleNasBacktestPreparationFinished(
+        quint64 requestId, int periodSeconds,
+        const QStringList &preparedSymbols, const QVariantMap &failedSymbols,
+        qint64 elapsedMilliseconds, bool cancelled);
     void persistNasSyncState();
     void clearNasSyncState();
     qulonglong launchBatchBacktest(const BatchBacktestRequest &request,
@@ -1119,32 +1728,49 @@ private:
     BacktestTradeListModel m_backtestTradeModel;
     EquityCurveListModel m_equityCurveModel;
     BacktestArchiveListModel m_backtestArchiveModel;
+    LocalTickSeriesListModel m_backtestArchiveRawTickModel;
     BatchBacktestResultListModel m_batchBacktestModel;
     EquityCurveListModel m_portfolioEquityCurveModel;
     PortfolioTradeListModel m_portfolioTradeModel;
     PortfolioArchiveListModel m_portfolioArchiveModel;
     EquityCurveListModel m_crossSectionalEquityCurveModel;
     PortfolioTradeListModel m_crossSectionalTradeModel;
+    PortfolioArchiveListModel m_crossSectionalArchiveModel;
+    FactorResearchComparisonListModel m_crossSectionalFactorComparisonModel;
     OrderListModel m_orderModel;
     ExecutionListModel m_executionModel;
     PositionListModel m_positionModel;
     MarketSnapshotListModel m_marketSnapshotModel;
     LocalCandleSeriesListModel m_localCandleSeriesModel;
+    LocalTickSeriesListModel m_localTickSeriesModel;
     LocalCandleSeriesListModel m_liveDayCandleSeriesModel;
     LocalCandleSeriesListModel m_realtimeMinuteCandleModel;
+    RealtimeChartWindowListModel m_realtimeChartWindowModel;
     MarketDataProvider *m_marketData = nullptr;
     SqliteLocalDataStore m_dataStore;
     AsyncMarketSnapshotQueryService m_asyncSnapshotQueryService;
     AsyncLocalCandleSeriesQueryService m_asyncLocalCandleQueryService;
     LocalCandleSeriesRequestGate m_localCandleSeriesRequestGate;
+    AsyncLocalTickSeriesQueryService m_asyncLocalTickQueryService;
+    LocalTickSeriesRequestGate m_localTickSeriesRequestGate;
     AsyncLocalCandleSeriesQueryService m_asyncLiveDayCandleQueryService;
     LocalCandleSeriesRequestGate m_liveDayCandleSeriesRequestGate;
+    AsyncCustomStrategyWorkspaceService m_asyncCustomStrategyWorkspaceService;
+    AsyncBacktestArchiveService m_asyncBacktestArchiveService;
+    AsyncRawTickAvailabilityService m_asyncRawTickAvailabilityService;
+    AsyncOperationRequestGate m_backtestArchiveLoadRequestGate;
+    AsyncOperationRequestGate m_backtestArchiveRawTickPageRequestGate;
+    AsyncFactorResearchReportService m_asyncFactorResearchReportService;
+    AsyncOperationRequestGate m_customStrategyPreviewRequestGate;
+    AsyncOperationRequestGate m_customStrategySaveRequestGate;
     BacktestDatasetService m_backtestDatasetService;
+    BacktestDatasetService m_nasBacktestPreparationService;
     TencentMinuteBarService m_realtimeMinuteService;
     RealtimeMinuteRequestGate m_realtimeMinuteRequestGate;
+    RealtimeLiveSessionState m_realtimeLiveSessionState;
     QTimer m_realtimeMinuteRefreshTimer;
     SnapshotRequestGate m_snapshotRequestGate;
-    AsyncTickWriter m_tickWriter;
+    MarketSnapshot m_latestLiveMarketSnapshot;
     NasDataNodeClient m_nasDataNodeClient;
     CrossSectionalIndicatorEngine m_crossSectionalEngine;
     KlineDataFetcher m_klineFetcher;
@@ -1155,6 +1781,12 @@ private:
     HistoricalDataProviderRouter m_historyDownloadRouter;
     HistoricalDataService m_historyDownloadService;
     TickDataCsvImportService m_tickDataCsvImportService;
+    AShareInstrumentDayImportService m_aShareInstrumentDayImportService;
+    AShareIndustryImportService m_aShareIndustryImportService;
+    AuthorizedFactorImportService m_authorizedFactorImportService;
+    ExternalFactorResearchService m_externalFactorResearchService;
+    ExternalFactorResearchRequestGate m_externalFactorResearchRequestGate;
+    ExternalFactorResearchRequestGate m_externalFactorResearchPreflightRequestGate;
     BacktestEngine m_backtest;
     BatchBacktestService m_batchBacktestService;
     PortfolioBacktestService m_portfolioBacktestService;
@@ -1164,6 +1796,9 @@ private:
     CustomStrategyCompiler m_customStrategyCompiler;
     SimulatedBrokerGateway m_broker;
     TradingAccountService m_tradingAccount;
+    // 运行实例借用账户；逆序析构时必须先于账户和撮合器回收。
+    PaperStrategyBook m_paperStrategyBook;
+    PaperStrategyBook m_paperReplayBook{nullptr, PaperStrategyBook::InputMode::HistoricalReplay};
     FixedAmountPositionSizer m_positionSizer;
     DefaultSignalExecutionPolicy m_executionPolicy;
     StrategyExecutionCoordinator m_strategyExecutionCoordinator;
@@ -1187,6 +1822,12 @@ private:
     QVector<ParameterGridResult> m_parameterGridResults;
     QString m_parameterGridError;
     quint64 m_parameterGridRequestId = 0;
+    RawTickParameterSensitivityService m_rawTickSensitivityService;
+    QVector<RawTickParameterSensitivityResult> m_rawTickSensitivityHistory;
+    std::optional<RawTickParameterSensitivityResult> m_rawTickSensitivityResult;
+    QString m_rawTickSensitivityError;
+    quint64 m_rawTickSensitivityRequestId = 0;
+    bool m_shutdownRequested = false;
     BacktestConfig m_pendingBacktestConfig;
     std::optional<CompiledCustomStrategy> m_pendingCustomBacktestPlan;
     std::optional<BacktestResult> m_displayedBacktestResult;
@@ -1194,10 +1835,8 @@ private:
     PerformanceSummary m_backtestSummary;
     AccountSnapshot m_accountSnapshot;
     QHash<QString, Tick> m_latestTicks;
-    QHash<QString, BacktestResult> m_batchRetainedResults;
-    QStringList m_batchResultOrder;
+    BatchBacktestResultRetention m_batchRetainedResults;
     FactorFrame m_latestCrossSectionalFrame;
-    bool m_liveRunning = false;
     bool m_backtestPreparing = false;
     bool m_tradingStateDirty = false;
     bool m_storageReady = false;
@@ -1223,7 +1862,7 @@ private:
     quint64 m_nasImportRequestId = 0;
     int m_nasMaxConcurrentDownloads = 4;
     int m_nasImportingIndex = -1;
-    QHash<quint64, int> m_nasDownloadIndexByRequestId;
+    NasDownloadRequestGate m_nasDownloadRequestGate;
     QHash<int, qint64> m_nasDownloadStartedAtMilliseconds;
     QVector<int> m_nasImportQueue;
     QByteArray m_nasBearerToken;
@@ -1236,6 +1875,18 @@ private:
     int m_nasManifestAvailableSymbols = 0;
     int m_nasManifestMissingSymbols = 0;
     qint64 m_nasManifestTotalBytes = 0;
+    int m_nasBacktestPeriodSeconds = 60;
+    int m_nasBacktestMinimumBars = 200;
+    bool m_nasBacktestPreparationRunning = false;
+    quint64 m_nasBacktestPreparationRequestId = 0;
+    int m_nasBacktestPreparationCompletedSymbols = 0;
+    int m_nasBacktestPreparationTotalSymbols = 0;
+    QString m_nasBacktestPreparationCurrentSymbol;
+    QStringList m_nasBacktestPreparedSymbols;
+    QVariantMap m_nasBacktestPreparationFailures;
+    qint64 m_nasBacktestPreparationElapsedMilliseconds = 0;
+    QString m_nasBacktestPreparationStatusText =
+        QStringLiteral("尚未准备 NAS 回测数据集");
     QElapsedTimer m_nasManifestTimer;
     QElapsedTimer m_nasSyncTimer;
     QElapsedTimer m_nasPhaseTimer;
@@ -1256,9 +1907,14 @@ private:
     QString m_selectedBacktestArchiveId;
     QString m_backtestArchiveError;
     QString m_backtestArchiveSaveError;
-    bool m_backtestArchiveLoading = false;
     bool m_backtestResultArchived = false;
     bool m_backtestResultHistoricalSnapshot = false;
+    QString m_backtestArchiveRawTickPageResultId;
+    int m_backtestArchiveRawTickPageOffset = 0;
+    int m_backtestArchiveRawTickPageSize = 256;
+    int m_backtestArchiveRawTickTotalCount = 0;
+    bool m_backtestArchiveRawTickHasNext = false;
+    QString m_backtestArchiveRawTickPageError;
     quint64 m_batchBacktestRequestId = 0;
     int m_batchBacktestRequestedCount = 0;
     int m_batchBacktestCompletedCount = 0;
@@ -1266,9 +1922,17 @@ private:
     int m_batchBacktestFailedCount = 0;
     QString m_batchBacktestStatusText = QStringLiteral("未运行");
     QString m_batchBacktestError;
+    bool m_batchBacktestSegmentedResearch = false;
+    AsyncOperationRequestGate m_batchBacktestArchiveRequestGate;
+    QString m_batchBacktestArchiveSymbol;
+    QString m_batchBacktestArchiveResultId;
+    QString m_batchBacktestArchiveError;
     QString m_activeBatchBacktestRunId;
     BatchBacktestRunSummary m_activeBatchBacktestRun;
     QVariantList m_batchBacktestRunHistory;
+    AsyncOperationRequestGate m_rawTickAvailabilityRequestGate;
+    QVariantMap m_rawTickAvailabilityResult;
+    QString m_rawTickAvailabilityError;
     quint64 m_portfolioBacktestRequestId = 0;
     QString m_portfolioBacktestStatusText = QStringLiteral("未运行");
     QString m_portfolioBacktestError;
@@ -1280,13 +1944,111 @@ private:
     quint64 m_crossSectionalBacktestRequestId = 0;
     QString m_crossSectionalBacktestStatusText = QStringLiteral("未运行");
     QString m_crossSectionalBacktestError;
+    QString m_crossSectionalRiskConfigurationError;
+    double m_crossSectionalMaximumLegWeight = 0.35;
+    int m_crossSectionalMaximumActiveLegs = 10;
+    int m_crossSectionalMaximumConsecutiveMissingBars = 5;
+    double m_crossSectionalMaximumPortfolioLossPercent = 0.0;
+    double m_crossSectionalMaximumPortfolioDrawdownPercent = 0.0;
+    double m_crossSectionalMaximumIndustryWeight = 0.0;
+    QString m_crossSectionalIndustryDatasetId;
+    double m_crossSectionalMaximumAbsoluteFactorExposure = 0.0;
+    QString m_crossSectionalFactorExposureAlias;
+    QString m_crossSectionalFactorResearchAlias;
+    FactorPreprocessingPolicy m_crossSectionalFactorPreprocessing;
+    FactorResearchCostPolicy m_crossSectionalFactorResearchCost;
+    FactorNeutralizationPolicy m_crossSectionalFactorNeutralization;
+    QVariantList m_crossSectionalFactorDefinitionCatalog;
     std::optional<PortfolioResult> m_displayedCrossSectionalResult;
+    QDateTime m_displayedCrossSectionalCompletedAt;
+    bool m_crossSectionalArchiveLoading = false;
+    QString m_crossSectionalArchiveError;
+    QString m_crossSectionalFactorComparisonError;
+    QVariantList m_factorCandidateCatalog;
+    QVariantList m_factorCandidateEvaluationCatalog;
+    QString m_selectedFactorCandidateId;
+    int m_selectedFactorCandidateVersion = 0;
+    QString m_factorCandidateGovernanceStatusText =
+        QStringLiteral("尚未登记候选因子");
+    QString m_factorCandidateGovernanceError;
+    QVariantMap m_authorizedFactorImportState{
+        {QStringLiteral("filePath"), QStringLiteral("")},
+        {QStringLiteral("running"), false},
+        {QStringLiteral("requestId"), qulonglong(0)},
+        {QStringLiteral("previewReady"), false},
+        {QStringLiteral("reused"), false},
+        {QStringLiteral("factorKey"), QStringLiteral("")},
+        {QStringLiteral("sourceVersion"), QStringLiteral("")},
+        {QStringLiteral("sourceReference"), QStringLiteral("")},
+        {QStringLiteral("contentSha256"), QStringLiteral("")},
+        {QStringLiteral("datasetId"), QStringLiteral("")},
+        {QStringLiteral("linesRead"), qint64(0)},
+        {QStringLiteral("validRecords"), qint64(0)},
+        {QStringLiteral("duplicateRecords"), qint64(0)},
+        {QStringLiteral("writtenRecords"), qint64(0)},
+        {QStringLiteral("statusText"),
+         QStringLiteral("未选择授权因子 CSV；不会自动读取或联网")},
+        {QStringLiteral("error"), QStringLiteral("")},
+        {QStringLiteral("diagnostics"), QVariantList{}}};
+    QVariantList m_externalFactorDatasetCatalog;
+    QVariantList m_selectedFactorCandidateDatasetBindings;
+    QVariantMap m_externalFactorResearchState{
+        {QStringLiteral("running"), false},
+        {QStringLiteral("requestId"), qulonglong(0)},
+        {QStringLiteral("resolvedRequestId"), qulonglong(0)},
+        {QStringLiteral("datasetId"), QStringLiteral("")},
+        {QStringLiteral("periodSeconds"), 0},
+        {QStringLiteral("statusText"),
+         QStringLiteral("尚未运行授权外部因子研究；只读取本地 Tick 派生数据")},
+        {QStringLiteral("error"), QStringLiteral("")},
+        {QStringLiteral("elapsedMilliseconds"), qint64(0)},
+        {QStringLiteral("resultId"), QStringLiteral("")}};
+    QVariantMap m_externalFactorResearchPreflightState{
+        {QStringLiteral("running"), false},
+        {QStringLiteral("ready"), false},
+        {QStringLiteral("requestId"), qulonglong(0)},
+        {QStringLiteral("resolvedRequestId"), qulonglong(0)},
+        {QStringLiteral("candidateId"), QStringLiteral("")},
+        {QStringLiteral("candidateVersion"), 0},
+        {QStringLiteral("datasetId"), QStringLiteral("")},
+        {QStringLiteral("periodSeconds"), 0},
+        {QStringLiteral("minimumPairs"), 0},
+        {QStringLiteral("oneWayCostBps"), 0.0},
+        {QStringLiteral("observationCount"), 0},
+        {QStringLiteral("timestampCount"), 0},
+        {QStringLiteral("symbolCount"), 0},
+        {QStringLiteral("readySymbolCount"), 0},
+        {QStringLiteral("evaluatedFrameCount"), 0},
+        {QStringLiteral("missingSymbols"), QStringList{}},
+        {QStringLiteral("statusText"),
+         QStringLiteral("尚未预检真实授权数据与本地 Tick 覆盖")},
+        {QStringLiteral("error"), QStringLiteral("")},
+        {QStringLiteral("elapsedMilliseconds"), qint64(0)}};
+    QVariantList m_externalFactorResearchArchiveCatalog;
+    QVariantMap m_selectedExternalFactorResearchArchive;
+    QString m_authorizedFactorPreviewFilePath;
+    QString m_authorizedFactorPreviewFactorKey;
+    QString m_authorizedFactorPreviewSourceVersion;
+    QString m_authorizedFactorPreviewSourceReference;
+    QString m_authorizedFactorPreviewDefinitionSha256;
+    QString m_authorizedFactorPreviewContentSha256;
+    QString m_selectedCrossSectionalArchiveId;
+    bool m_crossSectionalResultHistoricalSnapshot = false;
+    bool m_crossSectionalReportExporting = false;
+    quint64 m_crossSectionalReportExportRequestId = 0;
+    QString m_crossSectionalReportExportStatusText = QStringLiteral("尚未导出报告");
+    QString m_crossSectionalReportExportError;
+    QString m_crossSectionalReportExportPath;
     QString m_backtestInstrumentSelectionError;
     QString m_localCandleSeriesSymbol;
     QString m_localCandleSeriesFrequency;
+    int m_localCandleSeriesPeriodSeconds = 60;
     int m_localCandleSeriesPage = 0;
     int m_localCandleSeriesPageCount = 0;
     int m_localCandleSeriesPageSize = 1000;
+    int m_localCandleSeriesMaximumPoints = 800;
+    quint64 m_localCandleSeriesPrependRequestId = 0;
+    quint64 m_prepareLocalBacktestPeriodRequestId = 0;
     int m_localCandleSeriesTotalBars = 0;
     int m_localCandleSeriesRawBars = 0;
     int m_localCandleSeriesBucketSize = 1;
@@ -1295,6 +2057,12 @@ private:
     QDateTime m_localCandleSeriesLastTime;
     QString m_localCandleSeriesStatusText = QStringLiteral("尚未查询本地分钟序列");
     QString m_localCandleSeriesError;
+    QString m_localTickSeriesSymbol;
+    QDate m_localTickSeriesTradingDate;
+    qint64 m_localTickSeriesRawCount = 0;
+    bool m_localTickSeriesDownsampled = false;
+    QString m_localTickSeriesStatusText = QStringLiteral("尚未查询逐笔事件序列");
+    QString m_localTickSeriesError;
     QString m_liveDayCandleSeriesStatusText = QStringLiteral("尚未读取真实交易日逐笔数据");
     QString m_liveDayCandleSeriesError;
     int m_liveDayCandleSeriesPeriodSeconds = 60;
@@ -1303,8 +2071,12 @@ private:
     QString m_realtimeMinuteError;
     QString m_realtimeMinuteSymbol;
     QString m_realtimeMinuteSource;
+    int m_realtimeMinutePeriodSeconds = 60;
+    QVector<Candle> m_realtimeMinuteRawCandles;
     QDateTime m_realtimeMinuteLastBarTime;
     bool m_realtimeMinuteStale = true;
+    QString m_realtimeChartWindowError;
+    quint64 m_realtimeChartWindowSequence = 0;
     Instrument m_historyDownloadInstrument;
     QString m_historyDownloadFrequency = QStringLiteral("day");
     int m_historyDownloadTargetBars = 500;
@@ -1343,6 +2115,57 @@ private:
     QVariantList m_tickDataImportDiagnostics;
     QString m_tickDataImportStatusText;
     QString m_tickDataImportError;
+    QString m_aShareInstrumentDayImportFilePath;
+    QString m_aShareInstrumentDayImportSource = QStringLiteral("SSE");
+    QString m_aShareInstrumentDayImportSourceVersion;
+    bool m_aShareInstrumentDayImportRunning = false;
+    quint64 m_aShareInstrumentDayImportRequestId = 0;
+    qint64 m_aShareInstrumentDayImportLinesRead = 0;
+    qint64 m_aShareInstrumentDayImportValidRecords = 0;
+    qint64 m_aShareInstrumentDayImportWrittenRecords = 0;
+    qint64 m_aShareInstrumentDayImportNewRecords = 0;
+    qint64 m_aShareInstrumentDayImportUnchangedRecords = 0;
+    qint64 m_aShareInstrumentDayImportCorrectedRecords = 0;
+    bool m_aShareInstrumentDayImportPreviewReady = false;
+    QString m_aShareInstrumentDayImportPreviewFilePath;
+    QString m_aShareInstrumentDayImportPreviewSource;
+    QString m_aShareInstrumentDayImportPreviewSourceVersion;
+    QString m_aShareInstrumentDayImportPreviewContentSha256;
+    bool m_aShareInstrumentDayImportReused = false;
+    QString m_aShareInstrumentDayImportContentSha256;
+    QDate m_aShareInstrumentDayImportFirstDate;
+    QDate m_aShareInstrumentDayImportLastDate;
+    QVariantList m_aShareInstrumentDayImportDiagnostics;
+    QVariantList m_aShareInstrumentDayImportHistory;
+    QString m_aShareInstrumentDayImportStatusText =
+        QStringLiteral("未选择停复牌事实 CSV；不会自动读取或联网");
+    QString m_aShareInstrumentDayImportError;
+    QVariantMap m_aShareIndustryImportState{
+        {QStringLiteral("filePath"), QStringLiteral("")},
+        {QStringLiteral("classification"), QStringLiteral("CSRC")},
+        {QStringLiteral("source"), QStringLiteral("")},
+        {QStringLiteral("sourceVersion"), QStringLiteral("")},
+        {QStringLiteral("running"), false},
+        {QStringLiteral("requestId"), qulonglong(0)},
+        {QStringLiteral("previewReady"), false},
+        {QStringLiteral("reused"), false},
+        {QStringLiteral("requiresRevisionReason"), false},
+        {QStringLiteral("linesRead"), qint64(0)},
+        {QStringLiteral("validRecords"), qint64(0)},
+        {QStringLiteral("writtenRecords"), qint64(0)},
+        {QStringLiteral("fileContentSha256"), QStringLiteral("")},
+        {QStringLiteral("datasetContentSha256"), QStringLiteral("")},
+        {QStringLiteral("datasetId"), QStringLiteral("")},
+        {QStringLiteral("statusText"),
+         QStringLiteral("未选择行业分类 CSV；不会自动读取或联网")},
+        {QStringLiteral("error"), QStringLiteral("")},
+        {QStringLiteral("diagnostics"), QVariantList{}}};
+    QVariantList m_aShareIndustryImportHistory;
+    QString m_aShareIndustryPreviewFilePath;
+    QString m_aShareIndustryPreviewClassification;
+    QString m_aShareIndustryPreviewSource;
+    QString m_aShareIndustryPreviewSourceVersion;
+    QString m_aShareIndustryPreviewFileSha256;
     QVector<TickDataBatchPlanItem> m_tickDataBatchPlan;
     TickDataImportRunSummary m_tickDataBatchSummary;
     QVariantList m_tickDataImportRunHistory;
@@ -1359,6 +2182,10 @@ private:
     QString m_tickDataImportRunStatusFilter;
     QString m_customStrategyError;
     QVector<CustomStrategyDefinition> m_customStrategyDefinitions;
+    QVariantMap m_customStrategyPreviewResult;
+    QString m_customStrategyPreviewError;
+    QVariantMap m_customStrategySaveResult;
+    QString m_customStrategySaveError;
     QString m_stockSearchText;
     QString m_tradingError;
     QString m_statusText;

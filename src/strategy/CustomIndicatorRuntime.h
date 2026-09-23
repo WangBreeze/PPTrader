@@ -34,6 +34,10 @@ private:
         double vwapNumerator = 0.0;
         double vwapVolume = 0.0;
         double cumulativePvt = 0.0;
+        double cumulativeObv = 0.0;
+        std::optional<double> obvPreviousClose;
+        double kValue = 50.0;
+        double dValue = 50.0;
     };
 
     static std::optional<double> windowAverage(const QVector<double> &values, int period);
@@ -45,6 +49,9 @@ private:
     QVector<double> m_closes;
     QVector<double> m_volumes;
     QVector<double> m_trueRanges;
+    QVector<double> m_typicalPrices;
+    QVector<double> m_highs;
+    QVector<double> m_lows;
     std::optional<double> m_previousClose;
 };
 

@@ -1,6 +1,7 @@
 #include "services/TradingAccountService.h"
 
 #include <cmath>
+#include <QTimeZone>
 
 #include <algorithm>
 #include <utility>
@@ -64,6 +65,20 @@ void TradingAccountService::updateMarketPrice(const Tick &tick)
     if (positionUpdated) recalculateAccount();
 }
 
+bool TradingAccountService::initializeHistoricalClock(const QDateTime &sourceStart)
+{
+    if (!sourceStart.isValid() || !m_orders.isEmpty() || !m_executions.isEmpty()
+        || !m_positions.isEmpty() || !m_reservations.isEmpty()) return false;
+    if (m_historicalClockStart.isValid()) return m_historicalClockStart == sourceStart;
+    m_historicalClockStart = sourceStart.toUTC();
+    m_snapshot.tradingDay = sourceStart.toTimeZone(QTimeZone("Asia/Shanghai")).date();
+    m_snapshot.dayStartEquity = m_snapshot.totalEquity;
+    m_snapshot.dailyPnl = 0;
+    // 只初始化空账户的交易日，不重置资金，也不发出账户重置信号。
+    emit accountChanged(m_snapshot);
+    return true;
+}
+
 void TradingAccountService::reset(double initialCapital)
 {
     const QList<QString> orderIds = m_reservations.keys();
@@ -77,6 +92,7 @@ void TradingAccountService::reset(double initialCapital)
     m_symbolRealizedPnl.clear();
     m_reservations.clear();
     m_snapshot = {};
+    m_historicalClockStart = {};
     m_snapshot.tradingDay = QDate::currentDate();
     m_snapshot.initialEquity = std::max(0.0, initialCapital);
     m_snapshot.dayStartEquity = m_snapshot.initialEquity;

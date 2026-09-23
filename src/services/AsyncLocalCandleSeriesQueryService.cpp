@@ -56,11 +56,15 @@ bool AsyncLocalCandleSeriesQueryService::start(const QString &databasePath)
         if (!initialized) m_workerStore.reset();
     }, Qt::BlockingQueuedConnection);
     m_running = initialized;
+    if (initialized) m_cancelled = std::make_shared<std::atomic_bool>(false);
     return initialized;
 }
 
 void AsyncLocalCandleSeriesQueryService::stop()
 {
+    // 先取消扫描和排队请求，再在所属线程关闭 SQLite；不截断已开始的事务。
+    m_cancelled->store(true);
+    m_running = false;
     if (!m_thread.isRunning()) return;
     if (m_worker) {
         QMetaObject::invokeMethod(m_worker, [this]() { m_workerStore.reset(); },
@@ -74,17 +78,19 @@ bool AsyncLocalCandleSeriesQueryService::request(
 {
     if (!m_running || !m_worker || requestId == 0) return false;
     QPointer<AsyncLocalCandleSeriesQueryService> guard(this);
-    return QMetaObject::invokeMethod(m_worker, [this, guard, requestId, query]() {
+    const auto cancelled = m_cancelled;
+    return QMetaObject::invokeMethod(m_worker, [this, guard, requestId, query, cancelled]() {
+        if (cancelled->load()) return;
         LocalCandleSeriesResult result;
         if (m_workerStore) {
-            result = LocalCandleSeriesQueryService(m_workerStore.get()).query(query);
+            result = LocalCandleSeriesQueryService(m_workerStore.get()).query(query, cancelled.get());
         } else {
             result.query = query;
             result.error = QStringLiteral("本地分钟序列数据库不可用");
         }
-        if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, requestId, result]() {
-            if (guard) emit guard->resultReady(requestId, result);
+        if (!guard || cancelled->load()) return;
+        QMetaObject::invokeMethod(guard, [guard, requestId, result, cancelled]() {
+            if (guard && !cancelled->load()) emit guard->resultReady(requestId, result);
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);
 }

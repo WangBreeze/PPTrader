@@ -6,6 +6,7 @@ Rectangle {
     id: root
     required property var theme
     required property var controller
+    required property bool pageActive
     property int boardMask: 31
     property bool loading: false
     property bool logarithmic: true
@@ -66,7 +67,7 @@ Rectangle {
             anchors.fill: parent
             anchors.margins: 1
             theme: root.theme
-            model: root.controller.marketSnapshotModel
+            model: root.pageActive ? root.controller.marketSnapshotModel : null
             boardMask: root.boardMask
             logarithmic: root.logarithmic
             onInstrumentActivated: function(symbol) {

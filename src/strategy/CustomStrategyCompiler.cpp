@@ -259,14 +259,34 @@ private:
         if (name == QStringLiteral("SMA") || name == QStringLiteral("EMA")
             || name == QStringLiteral("RSI") || name == QStringLiteral("ATR")
             || name == QStringLiteral("VOLUME_SMA")
-            || (m_v2 && name == QStringLiteral("ROC"))) {
+             || (m_v2 && (name == QStringLiteral("ROC") || name == QStringLiteral("WMA")
+                          || name == QStringLiteral("BIAS") || name == QStringLiteral("CCI")
+                          || name == QStringLiteral("WR") || name == QStringLiteral("MFI")))) {
             if (name == QStringLiteral("SMA")) indicator.kind = CustomIndicatorKind::Sma;
             else if (name == QStringLiteral("EMA")) indicator.kind = CustomIndicatorKind::Ema;
             else if (name == QStringLiteral("RSI")) indicator.kind = CustomIndicatorKind::Rsi;
             else if (name == QStringLiteral("ATR")) indicator.kind = CustomIndicatorKind::Atr;
             else if (name == QStringLiteral("ROC")) indicator.kind = CustomIndicatorKind::Roc;
+            else if (name == QStringLiteral("WMA")) indicator.kind = CustomIndicatorKind::Wma;
+            else if (name == QStringLiteral("BIAS")) indicator.kind = CustomIndicatorKind::Bias;
+            else if (name == QStringLiteral("CCI")) indicator.kind = CustomIndicatorKind::Cci;
+            else if (name == QStringLiteral("WR")) indicator.kind = CustomIndicatorKind::Wr;
+            else if (name == QStringLiteral("MFI")) indicator.kind = CustomIndicatorKind::Mfi;
             else indicator.kind = CustomIndicatorKind::VolumeSma;
             indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
+        } else if (m_v2 && name == QStringLiteral("KDJ")) {
+            indicator.kind = CustomIndicatorKind::Kdj;
+            indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
+            bool optionOk = true;
+            indicator.kPeriod = static_cast<int>(resolveNumber(object.value(QStringLiteral("kPeriod")), true, &optionOk));
+            ok = ok && optionOk;
+            indicator.dPeriod = static_cast<int>(resolveNumber(object.value(QStringLiteral("dPeriod")), true, &optionOk));
+            ok = ok && optionOk;
+            indicator.output = object.value(QStringLiteral("output")).toString();
+        } else if (m_v2 && name == QStringLiteral("DONCHIAN")) {
+            indicator.kind = CustomIndicatorKind::Donchian;
+            indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
+            indicator.output = object.value(QStringLiteral("output")).toString();
         } else if (name == QStringLiteral("MACD")) {
             indicator.kind = CustomIndicatorKind::Macd;
             indicator.fastPeriod = static_cast<int>(resolveNumber(object.value(QStringLiteral("fastPeriod")), true, &ok));
@@ -285,6 +305,8 @@ private:
                 object.value(QStringLiteral("standardDeviations")), false, &optionOk);
             ok = ok && optionOk;
             indicator.output = object.value(QStringLiteral("output")).toString();
+        } else if (m_v2 && name == QStringLiteral("OBV")) {
+            indicator.kind = CustomIndicatorKind::Obv;
         } else if (m_v2 && (name == QStringLiteral("VWAP")
                             || name == QStringLiteral("PP_FLOW"))) {
             indicator.kind = name == QStringLiteral("VWAP")
@@ -328,14 +350,22 @@ int CompiledCustomIndicator::minimumBars() const
     case CustomIndicatorKind::Macd:
         return output == QStringLiteral("macd") ? slowPeriod : slowPeriod + signalPeriod - 1;
     case CustomIndicatorKind::Roc:
+    case CustomIndicatorKind::Mfi:
         return period + 1;
     case CustomIndicatorKind::Sma:
     case CustomIndicatorKind::Ema:
     case CustomIndicatorKind::Bollinger:
     case CustomIndicatorKind::Atr:
     case CustomIndicatorKind::VolumeSma:
+    case CustomIndicatorKind::Wma:
+    case CustomIndicatorKind::Bias:
+    case CustomIndicatorKind::Cci:
+    case CustomIndicatorKind::Wr:
+    case CustomIndicatorKind::Donchian:
+    case CustomIndicatorKind::Kdj:
         return period;
     case CustomIndicatorKind::Vwap:
+    case CustomIndicatorKind::Obv:
         return 1;
     case CustomIndicatorKind::PpFlow:
         return 2;
@@ -345,9 +375,9 @@ int CompiledCustomIndicator::minimumBars() const
 
 QString CompiledCustomIndicator::cacheKey() const
 {
-    return QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
+    return QStringLiteral("%1:%2:%3:%4:%5:%6:%7:%8:%9")
         .arg(static_cast<int>(kind)).arg(period).arg(fastPeriod).arg(slowPeriod)
-        .arg(signalPeriod).arg(standardDeviations, 0, 'g', 16).arg(output);
+        .arg(signalPeriod).arg(standardDeviations, 0, 'g', 16).arg(output).arg(kPeriod).arg(dPeriod);
 }
 
 QVariantMap CompiledCustomRules::toVariantMap() const

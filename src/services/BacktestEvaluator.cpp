@@ -1,4 +1,5 @@
 #include "services/BacktestEvaluator.h"
+#include "services/BacktestExecutionPolicy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,7 +103,9 @@ PerformanceSummary BacktestEvaluator::run(const BacktestConfig &config,
     auto openPosition = [&](const TradeSignal &signal) {
         if (!currentCandle) return;
         const Candle &candle = *currentCandle;
-        const double fillPrice = candle.close * (1.0 + std::max(0.0, config.slippageRate));
+        const auto reference = candleExecutionPrice(candle, signal, strategy.candleExecutionContext());
+        if (!reference) return;
+        const double fillPrice = *reference * (1.0 + std::max(0.0, config.slippageRate));
         const double fixedAmount = strategy.positionAmount();
         double budget = 0.0;
         if (fixedAmount > 0.0) {
@@ -128,10 +131,17 @@ PerformanceSummary BacktestEvaluator::run(const BacktestConfig &config,
         position.entryReason = signal.reason;
     };
 
-    auto closePosition = [&](const TradeSignal &signal) {
+    auto closePosition = [&](const TradeSignal &signal, bool finalClose = false) {
         if (!currentCandle) return;
         const Candle &candle = *currentCandle;
-        const double fillPrice = candle.close * (1.0 - std::max(0.0, config.slippageRate));
+        if (!backtestPositionSellable(config.instrument.market, position.entryTime,
+                                     candle.startTime)) return;
+        // 强平与普通退出均取当前事实报价；只有明确的 nextOpen 意图才能使用 open。
+        const auto reference = candleExecutionPrice(candle, signal,
+            finalClose
+                ? CandleExecutionContext{} : strategy.candleExecutionContext());
+        if (!reference) return;
+        const double fillPrice = *reference * (1.0 - std::max(0.0, config.slippageRate));
         const double quantity = position.quantity;
         const double exitCommission = fillPrice * quantity * std::max(0.0, config.commissionRate);
         const double grossPnl = (fillPrice - position.averagePrice) * quantity;
@@ -170,7 +180,7 @@ PerformanceSummary BacktestEvaluator::run(const BacktestConfig &config,
     };
 
     // 捕获策略信号（onCandle 内同步 emit）。
-    QObject::connect(&strategy, &Strategy::signalGenerated, [&](const TradeSignal &signal) {
+    const auto connection = QObject::connect(&strategy, &Strategy::signalGenerated, [&](const TradeSignal &signal) {
         if (signal.side == SignalSide::Buy && position.quantity <= 0.0) {
             openPosition(signal);
         } else if (signal.side == SignalSide::Sell && position.quantity > 0.0) {
@@ -195,15 +205,18 @@ PerformanceSummary BacktestEvaluator::run(const BacktestConfig &config,
         signal.side = SignalSide::Sell;
         signal.price = lastCandle.close;
         signal.reason = QStringLiteral("回测结束平仓");
-        closePosition(signal);
+        closePosition(signal, true);
         currentCandle = nullptr;
-        if (!equityCurve.isEmpty()) {
+        if (position.quantity <= 0.0 && !equityCurve.isEmpty()) {
             equityCurve.last().cash = cash;
             equityCurve.last().positionValue = 0.0;
             equityCurve.last().equity = cash;
+            equityCurve.last().drawdownPercent = peakEquity > 0.0
+                ? (peakEquity - cash) / peakEquity * 100.0 : 0.0;
         }
     }
 
+    QObject::disconnect(connection);
     return calculateSummary(config, trades, equityCurve, cash, totalCommission);
 }
 

@@ -1,15 +1,19 @@
 #include "services/SqliteLocalDataStore.h"
+#include "services/FactorCandidateGovernance.h"
 
 #include "services/BacktestDataVersion.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QDebug>
 #include <QCryptographicHash>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QRegularExpression>
+#include <QSet>
 #include <QTimeZone>
 #include <QStringList>
 #include <QUuid>
@@ -17,12 +21,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 
 namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 7;
+constexpr int kCurrentDatabaseSchemaVersion = 25;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -94,6 +99,115 @@ bool isSha256(const QString &value)
     return true;
 }
 
+bool isShanghaiShenzhenSymbol(const QString &symbol)
+{
+    static const QRegularExpression expression(QStringLiteral(
+        "^(?:60[0135689]\\d{3}|68[089]\\d{3}|00[0123]\\d{3}|30[01]\\d{3})$"));
+    return expression.match(symbol).hasMatch();
+}
+
+QString industryDatasetContentSha256(
+    const AShareIndustryDataset &dataset,
+    const QVector<AShareIndustryMembership> &memberships)
+{
+    QVector<AShareIndustryMembership> sorted = memberships;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const AShareIndustryMembership &left,
+                 const AShareIndustryMembership &right) {
+        return std::tie(left.instrument.symbol, left.effectiveFrom,
+                        left.effectiveTo, left.industryCode,
+                        left.industryName)
+            < std::tie(right.instrument.symbol, right.effectiveFrom,
+                       right.effectiveTo, right.industryCode,
+                       right.industryName);
+    });
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData("pptrader-ashare-industry-dataset-v1\n");
+    const QStringList identity{dataset.classification.trimmed(),
+                               dataset.source.trimmed(),
+                               dataset.sourceVersion.trimmed()};
+    for (const QString &value : identity) {
+        const QByteArray bytes = value.toUtf8();
+        hash.addData(QByteArray::number(bytes.size()));
+        hash.addData(":");
+        hash.addData(bytes);
+        hash.addData("\n");
+    }
+    for (const AShareIndustryMembership &membership : sorted) {
+        const QStringList fields{
+            membership.instrument.symbol.trimmed(),
+            membership.instrument.name,
+            membership.instrument.venue,
+            membership.industryCode.trimmed(),
+            membership.industryName.trimmed(),
+            membership.effectiveFrom.toString(Qt::ISODate),
+            membership.effectiveTo.isValid()
+                ? membership.effectiveTo.toString(Qt::ISODate)
+                : QStringLiteral("")};
+        for (const QString &field : fields) {
+            const QByteArray bytes = field.toUtf8();
+            hash.addData(QByteArray::number(bytes.size()));
+            hash.addData(":");
+            hash.addData(bytes);
+            hash.addData("|");
+        }
+        hash.addData("\n");
+    }
+    return QStringLiteral("sha256:%1")
+        .arg(QString::fromLatin1(hash.result().toHex()));
+}
+
+bool normalizeIndustryDataset(AShareIndustryDataset *dataset, QString *error)
+{
+    if (error) error->clear();
+    dataset->classification = dataset->classification.trimmed();
+    dataset->source = dataset->source.trimmed();
+    dataset->sourceVersion = dataset->sourceVersion.trimmed();
+    dataset->revisionReason = dataset->revisionReason.trimmed();
+    if (dataset->classification.isEmpty() || dataset->source.isEmpty()
+        || dataset->sourceVersion.isEmpty() || dataset->memberships.isEmpty()) {
+        if (error) *error = QStringLiteral("行业数据集身份或成员为空");
+        return false;
+    }
+    QVector<AShareIndustryMembership> normalized = dataset->memberships;
+    for (AShareIndustryMembership &membership : normalized) {
+        membership.instrument.symbol = membership.instrument.symbol.trimmed();
+        membership.instrument.name = membership.instrument.name.trimmed();
+        membership.instrument.venue = membership.instrument.venue.trimmed();
+        membership.industryCode = membership.industryCode.trimmed();
+        membership.industryName = membership.industryName.trimmed();
+        if (!membership.isValid()) {
+            if (error) *error = QStringLiteral("行业数据集包含无效成员");
+            return false;
+        }
+    }
+    std::sort(normalized.begin(), normalized.end(),
+              [](const AShareIndustryMembership &left,
+                 const AShareIndustryMembership &right) {
+        return std::tie(left.instrument.symbol, left.effectiveFrom,
+                        left.effectiveTo, left.industryCode)
+            < std::tie(right.instrument.symbol, right.effectiveFrom,
+                       right.effectiveTo, right.industryCode);
+    });
+    for (int index = 1; index < normalized.size(); ++index) {
+        const auto &previous = normalized.at(index - 1);
+        const auto &current = normalized.at(index);
+        if (previous.instrument.symbol == current.instrument.symbol
+            && (!previous.effectiveTo.isValid()
+                || previous.effectiveTo >= current.effectiveFrom)) {
+            if (error) {
+                *error = QStringLiteral("行业数据集同一标的存在重叠有效期：%1")
+                             .arg(current.instrument.symbol);
+            }
+            return false;
+        }
+    }
+    dataset->memberships = normalized;
+    dataset->recordCount = normalized.size();
+    dataset->contentSha256 = industryDatasetContentSha256(*dataset, normalized);
+    return true;
+}
+
 } // 匿名命名空间
 
 SqliteLocalDataStore::SqliteLocalDataStore(QObject *parent)
@@ -112,11 +226,13 @@ SqliteLocalDataStore::~SqliteLocalDataStore()
 bool SqliteLocalDataStore::initialize(const QString &databasePath)
 {
     close();
+    m_readOnly = false;
     m_databasePath = databasePath;
     QDir().mkpath(QFileInfo(databasePath).absolutePath());
 
     if (!m_database.isValid())
         m_database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
+    m_database.setConnectOptions(QString{});
     m_database.setDatabaseName(databasePath);
 
     if (!m_database.open()) {
@@ -137,20 +253,109 @@ bool SqliteLocalDataStore::initialize(const QString &databasePath)
             return false;
         }
     }
+    const bool migrated = migrateSchema();
+    return migrated;
+}
 
-    return migrateSchema();
+bool SqliteLocalDataStore::initializeReadOnly(const QString &databasePath)
+{
+    close();
+    m_readOnly = true;
+    m_databasePath = databasePath;
+    if (databasePath.trimmed().isEmpty() || !QFileInfo::exists(databasePath)) {
+        return false;
+    }
+    if (!m_database.isValid()) {
+        m_database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), m_connectionName);
+    }
+    m_database.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+    m_database.setDatabaseName(databasePath);
+    if (!m_database.open()) {
+        emitSqlError(QStringLiteral("只读打开本地数据库"));
+        return false;
+    }
+    for (const QString &statement : {
+             QStringLiteral("pragma busy_timeout=5000"),
+             QStringLiteral("pragma query_only=ON"),
+             QStringLiteral("pragma foreign_keys=ON")}) {
+        QSqlQuery query(m_database);
+        if (!query.exec(statement)) {
+            emitSqlError(QStringLiteral("配置 SQLite 只读查询"));
+            close();
+            return false;
+        }
+    }
+    QSqlQuery version(m_database);
+    if (!version.exec(QStringLiteral("pragma user_version")) || !version.next()
+        || version.value(0).toInt() != kCurrentDatabaseSchemaVersion) {
+        emit writeFailed(QStringLiteral(
+            "只读查询拒绝：数据库 schema 不是当前 v%1")
+                             .arg(kCurrentDatabaseSchemaVersion));
+        close();
+        return false;
+    }
+    QString validationError;
+    if (!verifyRequiredTables(&validationError)) {
+        emit writeFailed(QStringLiteral("只读数据库校验失败：%1")
+                             .arg(validationError));
+        close();
+        return false;
+    }
+    QSqlQuery identity(m_database);
+    if (!identity.exec(QStringLiteral(
+            "select database_uuid, schema_version from app_database_metadata "
+            "where singleton_id = 1"))
+        || !identity.next()
+        || identity.value(1).toInt() != kCurrentDatabaseSchemaVersion) {
+        emitSqlError(QStringLiteral("读取只读数据库身份"));
+        close();
+        return false;
+    }
+    m_databaseUuid = identity.value(0).toString();
+    m_schemaVersion = identity.value(1).toInt();
+    return true;
+}
+
+bool SqliteLocalDataStore::beginReadSnapshot()
+{
+    if (!m_readOnly || !m_database.isOpen() || m_readSnapshotActive) {
+        return false;
+    }
+    if (!m_database.transaction()) {
+        emitSqlError(QStringLiteral("开始 SQLite 一致读快照"));
+        return false;
+    }
+    m_readSnapshotActive = true;
+    return true;
+}
+
+bool SqliteLocalDataStore::endReadSnapshot()
+{
+    if (!m_readSnapshotActive) return false;
+    const bool committed = m_database.commit();
+    m_readSnapshotActive = false;
+    if (!committed) emitSqlError(QStringLiteral("结束 SQLite 一致读快照"));
+    return committed;
 }
 
 void SqliteLocalDataStore::close()
 {
     if (!m_database.isValid() || !m_database.isOpen()) return;
+    if (m_readSnapshotActive) {
+        m_database.rollback();
+        m_readSnapshotActive = false;
+    }
     if (m_rawTradeImportActive) rollbackRawTradeTickImport();
-    QSqlQuery checkpoint(m_database);
-    checkpoint.exec(QStringLiteral("pragma wal_checkpoint(TRUNCATE)"));
-    checkpoint.finish();
+    if (!m_readOnly) {
+        QSqlQuery checkpoint(m_database);
+        checkpoint.exec(QStringLiteral("pragma wal_checkpoint(TRUNCATE)"));
+        checkpoint.finish();
+    }
     m_database.close();
     m_schemaVersion = 0;
     m_databaseUuid.clear();
+    m_readOnly = false;
 }
 
 QString SqliteLocalDataStore::databasePath() const
@@ -200,9 +405,25 @@ bool SqliteLocalDataStore::verifyRequiredTables(QString *error) const
     const QStringList required {
         QStringLiteral("ticks"), QStringLiteral("raw_trade_ticks"),
         QStringLiteral("raw_tick_content_fingerprints"),
+        QStringLiteral("raw_tick_day_quality_audits"),
         QStringLiteral("candles"), QStringLiteral("market_snapshots"),
         QStringLiteral("historical_dataset_versions"),
-        QStringLiteral("backtest_results"), QStringLiteral("schema_migration_history"),
+        QStringLiteral("ashare_instrument_day_status"),
+        QStringLiteral("ashare_instrument_day_import_runs"),
+        QStringLiteral("ashare_instrument_day_import_items"),
+        QStringLiteral("ashare_industry_datasets"),
+        QStringLiteral("ashare_industry_memberships"),
+        QStringLiteral("factor_definition_versions"),
+        QStringLiteral("factor_candidate_versions"),
+        QStringLiteral("factor_candidate_evaluations"),
+        QStringLiteral("external_factor_datasets"),
+        QStringLiteral("external_factor_observations"),
+        QStringLiteral("factor_candidate_dataset_bindings"),
+        QStringLiteral("external_factor_research_archives"),
+        QStringLiteral("raw_tick_parameter_sensitivity_results"),
+        QStringLiteral("backtest_results"), QStringLiteral("backtest_candles"),
+        QStringLiteral("backtest_raw_ticks"),
+        QStringLiteral("schema_migration_history"),
         QStringLiteral("app_database_metadata")
     };
     QSqlQuery query(m_database);
@@ -389,6 +610,258 @@ bool SqliteLocalDataStore::migrateSchema()
                 return false;
             }
         }
+        if (fromVersion < 8) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(8, 'cross_sectional_backtest_archive', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-cross-sectional-archive-v8"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v8 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 9) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(9, 'ashare_calendar_status', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-ashare-calendar-status-v9"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v9 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 10) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(10, 'ashare_instrument_day_import_audit', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-ashare-instrument-day-import-v10"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v10 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 11) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(11, 'ashare_instrument_day_revision_audit', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-ashare-instrument-day-revision-v11"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v11 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 12) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(12, 'ashare_industry_dataset', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-ashare-industry-dataset-v12"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v12 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 13) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(13, 'ashare_industry_import_audit', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-ashare-industry-import-v13"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v13 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 14) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(14, 'factor_definition_registry', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-factor-definition-registry-v14"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v14 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 15) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(15, 'factor_candidate_governance', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-factor-candidate-governance-v15"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v15 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 16) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(16, 'authorized_factor_dataset', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-authorized-factor-dataset-v16"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v16 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 17) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(17, 'external_factor_research_archive', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-external-factor-research-v17"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v17 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 18) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(18, 'backtest_candle_snapshot', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-backtest-candle-snapshot-v18"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v18 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 19) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(19, 'raw_tick_backtest_identity', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-raw-tick-backtest-v19"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v19 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 20) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(20, 'backtest_open_position', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-backtest-open-position-v20"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v20 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 21) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(21, 'raw_tick_holdout_validation', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-raw-tick-holdout-v21"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v21 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 22) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(22, 'raw_tick_walk_forward', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-raw-tick-walk-forward-v22"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v22 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 23) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(23, 'raw_tick_parameter_sensitivity', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-raw-tick-sensitivity-v23"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v23 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 24) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(24, 'raw_tick_day_quality_audit', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-raw-tick-day-quality-v24"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v24 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 25) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(25, 'backtest_requested_sample_window', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-backtest-sample-window-v25"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v25 迁移历史"));
+                return false;
+            }
+        }
         QSqlQuery setVersion(m_database);
         if (!setVersion.exec(QStringLiteral("pragma user_version=%1")
                                  .arg(kCurrentDatabaseSchemaVersion))) {
@@ -399,7 +872,15 @@ bool SqliteLocalDataStore::migrateSchema()
     }
 
     QString validationError;
-    if (!verifyIntegrity(&validationError)) {
+    // Full integrity_check walks every page and made a large, already-current
+    // development database block the GUI before QML could create its window.
+    // Keep the deep check on migration (the risky path), while current-schema
+    // startup performs the required-table contract check; callers can still
+    // invoke verifyIntegrity() explicitly for an on-demand audit.
+    const bool valid = needsMigration
+        ? verifyIntegrity(&validationError)
+        : verifyRequiredTables(&validationError);
+    if (!valid) {
         m_database.rollback();
         emit writeFailed(QStringLiteral("数据库迁移校验失败：%1").arg(validationError));
         return false;
@@ -766,6 +1247,10 @@ bool SqliteLocalDataStore::beginRawTradeTickImport(
         return false;
     }
     m_rawTradeImportActive = true;
+    m_rawTradeImportInstrument = instrument;
+    m_rawTradeImportDate = tradingDate;
+    m_rawTradeImportSource = source;
+    m_rawTradeImportAppendedCount = 0;
     return true;
 }
 
@@ -797,6 +1282,7 @@ bool SqliteLocalDataStore::appendRawTradeTicks(const QVector<RawTradeTick> &tick
             return false;
         }
         query.finish();
+        ++m_rawTradeImportAppendedCount;
     }
     return true;
 }
@@ -889,9 +1375,95 @@ RawTradeIncrementalAppendResult SqliteLocalDataStore::appendRawTradeTicksIncreme
 bool SqliteLocalDataStore::commitRawTradeTickImport()
 {
     if (!m_rawTradeImportActive) return false;
+    const RawTradeFingerprint fingerprint = rawTradeFingerprint(
+        m_rawTradeImportInstrument, m_rawTradeImportDate);
+    bool identityReady = fingerprint.count >= m_rawTradeImportAppendedCount;
+    if (fingerprint.count > 0) {
+        identityReady = identityReady
+            && fingerprint.contentSha256.startsWith(QStringLiteral("sha256:"))
+            && fingerprint.contentSha256.size() == 71;
+    } else {
+        QSqlQuery removeEmptyFingerprint(m_database);
+        removeEmptyFingerprint.prepare(QStringLiteral(
+            "delete from raw_tick_content_fingerprints where symbol = ? and trading_date = ?"));
+        removeEmptyFingerprint.addBindValue(m_rawTradeImportInstrument.symbol);
+        removeEmptyFingerprint.addBindValue(m_rawTradeImportDate.toString(Qt::ISODate));
+        identityReady = identityReady && removeEmptyFingerprint.exec();
+    }
+    if (!identityReady) {
+        m_database.rollback();
+        m_rawTradeImportActive = false;
+        m_rawTradeImportInstrument = {};
+        m_rawTradeImportDate = {};
+        m_rawTradeImportSource.clear();
+        m_rawTradeImportAppendedCount = 0;
+        emit writeFailed(QStringLiteral("原始逐笔内容身份预热失败，导入事务已回滚"));
+        return false;
+    }
     const bool succeeded = m_database.commit();
     m_rawTradeImportActive = false;
+    m_rawTradeImportInstrument = {};
+    m_rawTradeImportDate = {};
+    m_rawTradeImportSource.clear();
+    m_rawTradeImportAppendedCount = 0;
     if (!succeeded) emitSqlError(QStringLiteral("提交原始逐笔导入事务"));
+    return succeeded;
+}
+
+bool SqliteLocalDataStore::commitRawTradeTickImport(
+    const TickDataImportResult &auditResult)
+{
+    if (!m_rawTradeImportActive || !auditResult.succeeded
+        || auditResult.cancelled || auditResult.validRecords <= 0
+        || auditResult.validRecords != m_rawTradeImportAppendedCount
+        || auditResult.linesRead < auditResult.validRecords
+        || auditResult.skippedRecords < 0
+        || auditResult.outOfOrderRecords < 0
+        || auditResult.qualityStatus.trimmed().isEmpty()) {
+        rollbackRawTradeTickImport();
+        emit writeFailed(QStringLiteral("原始逐笔逐日质量审计无效，导入事务已回滚"));
+        return false;
+    }
+
+    const RawTradeFingerprint fingerprint = rawTradeFingerprint(
+        m_rawTradeImportInstrument, m_rawTradeImportDate);
+    if (fingerprint.count != m_rawTradeImportAppendedCount
+        || !isSha256(fingerprint.contentSha256)) {
+        rollbackRawTradeTickImport();
+        emit writeFailed(QStringLiteral("原始逐笔内容身份与逐日质量审计不一致，导入事务已回滚"));
+        return false;
+    }
+
+    QSqlQuery audit(m_database);
+    audit.prepare(QStringLiteral(
+        "insert into raw_tick_day_quality_audits("
+        "symbol, trading_date, raw_content_sha256, audit_version, lines_read, "
+        "valid_records, skipped_records, out_of_order_records, quality_status, "
+        "source, audited_at_utc) values(?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(symbol, trading_date, raw_content_sha256, audit_version) do nothing"));
+    audit.addBindValue(m_rawTradeImportInstrument.symbol);
+    audit.addBindValue(m_rawTradeImportDate.toString(Qt::ISODate));
+    audit.addBindValue(fingerprint.contentSha256);
+    audit.addBindValue(auditResult.linesRead);
+    audit.addBindValue(auditResult.validRecords);
+    audit.addBindValue(auditResult.skippedRecords);
+    audit.addBindValue(auditResult.outOfOrderRecords);
+    audit.addBindValue(auditResult.qualityStatus.trimmed());
+    audit.addBindValue(m_rawTradeImportSource);
+    audit.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    if (!audit.exec()) {
+        rollbackRawTradeTickImport();
+        emitSqlError(QStringLiteral("写入原始 Tick 逐日质量审计"));
+        return false;
+    }
+
+    const bool succeeded = m_database.commit();
+    m_rawTradeImportActive = false;
+    m_rawTradeImportInstrument = {};
+    m_rawTradeImportDate = {};
+    m_rawTradeImportSource.clear();
+    m_rawTradeImportAppendedCount = 0;
+    if (!succeeded) emitSqlError(QStringLiteral("提交原始逐笔导入与质量审计事务"));
     return succeeded;
 }
 
@@ -900,6 +1472,10 @@ void SqliteLocalDataStore::rollbackRawTradeTickImport()
     if (!m_rawTradeImportActive) return;
     m_database.rollback();
     m_rawTradeImportActive = false;
+    m_rawTradeImportInstrument = {};
+    m_rawTradeImportDate = {};
+    m_rawTradeImportSource.clear();
+    m_rawTradeImportAppendedCount = 0;
 }
 
 QVector<QDate> SqliteLocalDataStore::rawTradeTradingDates(const Instrument &instrument)
@@ -1306,6 +1882,40 @@ QVector<Candle> SqliteLocalDataStore::loadRecentCandlesFromSource(
     return candles;
 }
 
+QVector<Candle> SqliteLocalDataStore::loadCandlesFromSource(
+    const Instrument &instrument, int periodSeconds,
+    const QDateTime &from, const QDateTime &to, const QString &source)
+{
+    QVector<Candle> candles;
+    const QString normalizedSource = source.trimmed();
+    if (instrument.symbol.trimmed().isEmpty() || periodSeconds <= 0
+        || !from.isValid() || !to.isValid() || from > to
+        || normalizedSource.isEmpty()) {
+        return candles;
+    }
+
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select start_time_utc, open, high, low, close, volume, buy_volume, sell_volume, neutral_volume, "
+        "directional_volume_known, source, adjustment, downloaded_at_utc "
+        "from candles where symbol = ? and period_seconds = ? and source = ? "
+        "and close > 0 and start_time_utc >= ? and start_time_utc <= ? "
+        "order by start_time_utc asc"));
+    query.addBindValue(instrument.symbol);
+    query.addBindValue(periodSeconds);
+    query.addBindValue(normalizedSource);
+    query.addBindValue(from.toUTC().toString(Qt::ISODateWithMs));
+    query.addBindValue(to.toUTC().toString(Qt::ISODateWithMs));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("按来源和日期范围读取 K 线"));
+        return candles;
+    }
+    while (query.next()) {
+        candles.append(candleFromQuery(query, instrument, periodSeconds));
+    }
+    return candles;
+}
+
 int SqliteLocalDataStore::candleCount(
     const Instrument &instrument, int periodSeconds, bool *ok)
 {
@@ -1404,57 +2014,105 @@ QVector<LocalHistoryDataset> SqliteLocalDataStore::localHistoryCatalog()
     return result;
 }
 
+QVector<Instrument> SqliteLocalDataStore::rawBacktestInstruments(
+    int maximumSymbols, const std::function<bool()> &cancelled)
+{
+    QVector<Instrument> result;
+    QStringList symbols;
+    QSqlQuery symbolsQuery(m_database);
+    QString symbolStatement = QStringLiteral(
+        "select distinct symbol from raw_tick_content_fingerprints "
+        "where raw_count > 0 order by symbol asc");
+    if (maximumSymbols > 0) symbolStatement += QStringLiteral(" limit ?");
+    symbolsQuery.prepare(symbolStatement);
+    if (maximumSymbols > 0) symbolsQuery.addBindValue(maximumSymbols);
+    if (!symbolsQuery.exec()) {
+        emitSqlError(QStringLiteral("读取原始 Tick 回测标的清单"));
+        return result;
+    }
+    while (symbolsQuery.next()) {
+        if (cancelled && cancelled()) return {};
+        const QString symbol = symbolsQuery.value(0).toString().trimmed();
+        if (!symbol.isEmpty()) symbols.append(symbol);
+    }
+    symbolsQuery.finish();
+
+    QSqlQuery metadata(m_database);
+    metadata.prepare(QStringLiteral(
+        "select name, market, venue from raw_trade_ticks where symbol = ? "
+        "order by trading_date desc, timestamp_utc desc, source_line desc limit 1"));
+    result.reserve(symbols.size());
+    for (const QString &symbol : symbols) {
+        if (cancelled && cancelled()) return {};
+        metadata.bindValue(0, symbol);
+        if (!metadata.exec()) {
+            emitSqlError(QStringLiteral("读取原始 Tick 回测标的元数据"));
+            return {};
+        }
+        if (metadata.next()) {
+            Instrument instrument;
+            instrument.symbol = symbol;
+            instrument.name = metadata.value(0).toString();
+            instrument.market = marketFromCode(metadata.value(1).toString(), Market::AShare);
+            instrument.venue = metadata.value(2).toString();
+            result.append(instrument);
+        }
+        metadata.finish();
+    }
+    return result;
+}
+
 QVector<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdentities()
 {
     QVector<BacktestDatasetIdentity> result;
     QHash<QString, QVector<RawTickDayFingerprint>> daysBySymbol;
     QHash<QString, Instrument> instrumentsBySymbol;
-    QHash<QString, QString> cachedContentBySymbolDay;
+    QSet<QString> unresolvedDayKeys;
+    QSet<QString> knownDayKeys;
+    QVector<QPair<QString, QDate>> unresolvedDays;
+    const auto dayKey = [](const QString &symbol, const QDate &date) {
+        return QStringLiteral("%1|%2").arg(symbol, date.toString(Qt::ISODate));
+    };
+    const auto rememberUnresolved = [&](const QString &symbol, const QDate &date) {
+        const QString key = dayKey(symbol, date);
+        knownDayKeys.insert(key);
+        if (unresolvedDayKeys.contains(key)) return;
+        unresolvedDayKeys.insert(key);
+        unresolvedDays.append(qMakePair(symbol, date));
+    };
 
-    // 目录刷新在 Controller 主线程执行，只复用已计算摘要，不能为旧大库全量扫描 Tick。
-    QSqlQuery contentDigests(m_database);
-    if (!contentDigests.exec(QStringLiteral(
-            "select symbol, trading_date, content_sha256 from raw_tick_content_fingerprints "
-            "where dirty = 0 and content_sha256 <> ''"))) {
+    // 目录刷新在 Controller 主线程执行。完整导入已预热强指纹，正常路径
+    // 只读逐日元数据；仅 dirty/缺失指纹的日期回退计数，绝不在此计算 SHA。
+    QSqlQuery fingerprints(m_database);
+    if (!fingerprints.exec(QStringLiteral(
+            "select symbol, trading_date, raw_count, raw_max_id, content_sha256, dirty "
+            "from raw_tick_content_fingerprints order by symbol asc, trading_date asc"))) {
         emitSqlError(QStringLiteral("读取原始逐笔内容摘要缓存"));
         return result;
     }
-    while (contentDigests.next()) {
-        cachedContentBySymbolDay.insert(
-            QStringLiteral("%1|%2").arg(contentDigests.value(0).toString(),
-                                         contentDigests.value(1).toString()),
-            contentDigests.value(2).toString());
-    }
-    contentDigests.finish();
-
-    QSqlQuery facts(m_database);
-    if (!facts.exec(QStringLiteral(
-            "select symbol, max(name), max(market), max(venue), trading_date, count(*), max(id) "
-            "from raw_trade_ticks group by symbol, trading_date "
-            "order by symbol asc, trading_date asc"))) {
-        emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
-        return result;
-    }
-    while (facts.next()) {
-        const QString symbol = facts.value(0).toString();
-        const QDate tradingDate = QDate::fromString(facts.value(4).toString(), Qt::ISODate);
+    while (fingerprints.next()) {
+        const QString symbol = fingerprints.value(0).toString();
+        const QDate tradingDate = QDate::fromString(
+            fingerprints.value(1).toString(), Qt::ISODate);
         if (symbol.isEmpty() || !tradingDate.isValid()) continue;
+        const QString key = dayKey(symbol, tradingDate);
+        knownDayKeys.insert(key);
         RawTickDayFingerprint day;
         day.tradingDate = tradingDate;
-        day.rawCount = facts.value(5).toLongLong();
-        day.rawMaximumId = facts.value(6).toLongLong();
+        day.rawCount = fingerprints.value(2).toLongLong();
+        day.rawMaximumId = fingerprints.value(3).toLongLong();
+        day.rawContentSha256 = fingerprints.value(4).toString();
+        if (fingerprints.value(5).toInt() != 0 || day.rawCount <= 0
+            || day.rawMaximumId <= 0 || !isSha256(day.rawContentSha256)) {
+            rememberUnresolved(symbol, tradingDate);
+            continue;
+        }
         daysBySymbol[symbol].append(day);
-
-        Instrument instrument;
-        instrument.symbol = symbol;
-        instrument.name = facts.value(1).toString();
-        instrument.market = marketFromCode(facts.value(2).toString(), Market::AShare);
-        instrument.venue = facts.value(3).toString();
-        instrumentsBySymbol.insert(symbol, instrument);
     }
-    facts.finish();
+    fingerprints.finish();
 
     QHash<QString, QHash<QDate, RawTickDayFingerprint>> cacheByKey;
+    QSet<QString> catalogSymbols;
     QSqlQuery caches(m_database);
     if (!caches.exec(QStringLiteral(
             "select symbol, period_seconds, trading_date, raw_count, raw_max_id, "
@@ -1465,10 +2123,15 @@ QVector<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdenti
         return result;
     }
     while (caches.next()) {
+        const QString symbol = caches.value(0).toString();
         const QString key = QStringLiteral("%1|%2")
-            .arg(caches.value(0).toString(), caches.value(1).toString());
+            .arg(symbol, caches.value(1).toString());
         const QDate tradingDate = QDate::fromString(caches.value(2).toString(), Qt::ISODate);
-        if (!tradingDate.isValid()) continue;
+        if (symbol.isEmpty() || !tradingDate.isValid()) continue;
+        catalogSymbols.insert(symbol);
+        if (!knownDayKeys.contains(dayKey(symbol, tradingDate))) {
+            rememberUnresolved(symbol, tradingDate);
+        }
         RawTickDayFingerprint cached;
         cached.tradingDate = tradingDate;
         cached.rawCount = caches.value(3).toLongLong();
@@ -1479,6 +2142,58 @@ QVector<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdenti
         cacheByKey[key].insert(tradingDate, cached);
     }
     caches.finish();
+
+    // dirty 日的 count/max 必须以事实为准，但只扫该日；内容 SHA 由后台准备服务重算。
+    QSqlQuery dayFacts(m_database);
+    dayFacts.prepare(QStringLiteral(
+        "select count(*), coalesce(max(id), 0) from raw_trade_ticks "
+        "where symbol = ? and trading_date = ?"));
+    for (const auto &[symbol, tradingDate] : unresolvedDays) {
+        dayFacts.bindValue(0, symbol);
+        dayFacts.bindValue(1, tradingDate.toString(Qt::ISODate));
+        if (!dayFacts.exec() || !dayFacts.next()) {
+            emitSqlError(QStringLiteral("读取待更新逐笔数据集指纹"));
+            return result;
+        }
+        RawTickDayFingerprint day;
+        day.tradingDate = tradingDate;
+        day.rawCount = dayFacts.value(0).toLongLong();
+        day.rawMaximumId = dayFacts.value(1).toLongLong();
+        dayFacts.finish();
+        if (day.rawCount > 0) daysBySymbol[symbol].append(day);
+    }
+
+    // 仪器元数据只需每个目录标的索引定位一条，不再 max/group by 全量事实。
+    QStringList symbols = catalogSymbols.values();
+    std::sort(symbols.begin(), symbols.end());
+    QSqlQuery metadata(m_database);
+    metadata.prepare(QStringLiteral(
+        "select name, market, venue from raw_trade_ticks where symbol = ? "
+        "order by trading_date desc, timestamp_utc desc, source_line desc limit 1"));
+    for (const QString &symbol : symbols) {
+        metadata.bindValue(0, symbol);
+        if (!metadata.exec()) {
+            emitSqlError(QStringLiteral("读取逐笔标的元数据"));
+            return result;
+        }
+        if (metadata.next()) {
+            Instrument instrument;
+            instrument.symbol = symbol;
+            instrument.name = metadata.value(0).toString();
+            instrument.market = marketFromCode(metadata.value(1).toString(), Market::AShare);
+            instrument.venue = metadata.value(2).toString();
+            instrumentsBySymbol.insert(symbol, instrument);
+        }
+        metadata.finish();
+    }
+
+    for (auto it = daysBySymbol.begin(); it != daysBySymbol.end(); ++it) {
+        std::sort(it.value().begin(), it.value().end(),
+                  [](const RawTickDayFingerprint &left,
+                     const RawTickDayFingerprint &right) {
+                      return left.tradingDate < right.tradingDate;
+                  });
+    }
 
     QStringList keys = cacheByKey.keys();
     std::sort(keys.begin(), keys.end());
@@ -1494,21 +2209,23 @@ QVector<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDatasetIdenti
         identity.periodSeconds = periodSeconds;
         identity.aggregatorVersion = 1;
         identity.days = daysBySymbol.value(symbol);
+        if (identity.days.isEmpty()) continue;
         bool allContentDigestsAvailable = !identity.days.isEmpty();
         const QHash<QDate, RawTickDayFingerprint> &cacheByDate = cacheByKey.value(key);
         for (RawTickDayFingerprint &day : identity.days) {
-            day.rawContentSha256 = cachedContentBySymbolDay.value(
-                QStringLiteral("%1|%2").arg(symbol, day.tradingDate.toString(Qt::ISODate)));
+            const bool strongIdentityClean = !unresolvedDayKeys.contains(
+                dayKey(symbol, day.tradingDate)) && isSha256(day.rawContentSha256);
             allContentDigestsAvailable = allContentDigestsAvailable
-                && !day.rawContentSha256.isEmpty();
+                && strongIdentityClean;
             const auto match = cacheByDate.constFind(day.tradingDate);
             if (match != cacheByDate.constEnd()) {
                 day.barCount = match->barCount;
                 day.cacheVersion = match->cacheVersion;
-                const bool factsMatch = !day.rawContentSha256.isEmpty()
-                    ? match->rawContentSha256 == day.rawContentSha256
-                    : match->rawMaximumId == day.rawMaximumId;
-                if (match->rawCount != day.rawCount || !factsMatch) {
+                const bool factsMatch = strongIdentityClean
+                    && match->rawContentSha256 == day.rawContentSha256;
+                day.cacheFresh = factsMatch && match->rawCount == day.rawCount
+                    && match->cacheVersion == 1;
+                if (!day.cacheFresh) {
                     ++identity.staleDayCount;
                 }
             } else {
@@ -1535,31 +2252,84 @@ std::optional<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDataset
     identity.aggregatorVersion = 1;
     identity.fingerprintVersion = 2;
 
-    QSqlQuery facts(m_database);
-    facts.prepare(QStringLiteral(
-        "select trading_date, count(*), max(id) from raw_trade_ticks "
-        "where symbol = ? group by trading_date order by trading_date asc"));
-    facts.addBindValue(instrument.symbol);
-    if (!facts.exec()) {
-        emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
+    // v6 起的触发器保证原始 Tick 变更时指纹必然置 dirty；完整导入提交前
+    // 已把 count/max/SHA-256 一次性预热为干净行。因此正常回测路径可以直接使用
+    // 该强身份，避免每次请求都重新扫描整个逐笔索引。dirty 行仍回退到事实表。
+    QSqlQuery fingerprints(m_database);
+    fingerprints.prepare(QStringLiteral(
+        "select trading_date, raw_count, raw_max_id, content_sha256, dirty "
+        "from raw_tick_content_fingerprints where symbol = ? order by trading_date asc"));
+    fingerprints.addBindValue(instrument.symbol);
+    if (!fingerprints.exec()) {
+        emitSqlError(QStringLiteral("读取原始逐笔内容指纹"));
         return std::nullopt;
     }
-    while (facts.next()) {
-        const QDate tradingDate = QDate::fromString(facts.value(0).toString(), Qt::ISODate);
+
+    QSqlQuery dayFacts(m_database);
+    dayFacts.prepare(QStringLiteral(
+        "select count(*), coalesce(max(id), 0) from raw_trade_ticks "
+        "where symbol = ? and trading_date = ?"));
+    while (fingerprints.next()) {
+        const QDate tradingDate = QDate::fromString(
+            fingerprints.value(0).toString(), Qt::ISODate);
         if (!tradingDate.isValid()) continue;
+
         RawTickDayFingerprint day;
         day.tradingDate = tradingDate;
-        day.rawCount = facts.value(1).toLongLong();
-        day.rawMaximumId = facts.value(2).toLongLong();
+        day.rawCount = fingerprints.value(1).toLongLong();
+        day.rawMaximumId = fingerprints.value(2).toLongLong();
+        day.rawContentSha256 = fingerprints.value(3).toString();
+        const bool clean = fingerprints.value(4).toInt() == 0
+            && day.rawCount > 0 && day.rawMaximumId > 0
+            && isSha256(day.rawContentSha256);
+        if (!clean) {
+            dayFacts.bindValue(0, instrument.symbol);
+            dayFacts.bindValue(1, tradingDate.toString(Qt::ISODate));
+            if (!dayFacts.exec() || !dayFacts.next()) {
+                emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
+                return std::nullopt;
+            }
+            day.rawCount = dayFacts.value(0).toLongLong();
+            day.rawMaximumId = dayFacts.value(1).toLongLong();
+            dayFacts.finish();
+            if (day.rawCount <= 0) continue;
+            day.rawContentSha256 = loadOrComputeRawTradeContentSha256(
+                instrument.symbol, day.tradingDate,
+                day.rawCount, day.rawMaximumId);
+            if (day.rawContentSha256.isEmpty()) return std::nullopt;
+        }
         identity.days.append(day);
     }
-    facts.finish();
-    if (identity.days.isEmpty()) return std::nullopt;
-    for (RawTickDayFingerprint &day : identity.days) {
-        day.rawContentSha256 = loadOrComputeRawTradeContentSha256(
-            instrument.symbol, day.tradingDate, day.rawCount, day.rawMaximumId);
-        if (day.rawContentSha256.isEmpty()) return std::nullopt;
+    fingerprints.finish();
+
+    // v6 之前已有事实的旧库可能整库没有指纹行；首次读取保留完整回填路径。
+    if (identity.days.isEmpty()) {
+        QSqlQuery facts(m_database);
+        facts.prepare(QStringLiteral(
+            "select trading_date, count(*), max(id) from raw_trade_ticks "
+            "where symbol = ? group by trading_date order by trading_date asc"));
+        facts.addBindValue(instrument.symbol);
+        if (!facts.exec()) {
+            emitSqlError(QStringLiteral("读取原始逐笔数据集指纹"));
+            return std::nullopt;
+        }
+        while (facts.next()) {
+            const QDate tradingDate = QDate::fromString(
+                facts.value(0).toString(), Qt::ISODate);
+            if (!tradingDate.isValid()) continue;
+            RawTickDayFingerprint day;
+            day.tradingDate = tradingDate;
+            day.rawCount = facts.value(1).toLongLong();
+            day.rawMaximumId = facts.value(2).toLongLong();
+            day.rawContentSha256 = loadOrComputeRawTradeContentSha256(
+                instrument.symbol, day.tradingDate,
+                day.rawCount, day.rawMaximumId);
+            if (day.rawContentSha256.isEmpty()) return std::nullopt;
+            identity.days.append(day);
+        }
+        facts.finish();
     }
+    if (identity.days.isEmpty()) return std::nullopt;
 
     identity.firstTradingDate = identity.days.first().tradingDate;
     identity.lastTradingDate = identity.days.last().tradingDate;
@@ -1598,7 +2368,9 @@ std::optional<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDataset
             day.cacheVersion = match->cacheVersion;
             const bool contentMatches = !day.rawContentSha256.isEmpty()
                 && match->rawContentSha256 == day.rawContentSha256;
-            if (match->rawCount != day.rawCount || !contentMatches) {
+            day.cacheFresh = match->rawCount == day.rawCount
+                && contentMatches && match->cacheVersion == 1;
+            if (!day.cacheFresh) {
                 ++identity.staleDayCount;
             }
         } else {
@@ -1607,6 +2379,1745 @@ std::optional<BacktestDatasetIdentity> SqliteLocalDataStore::loadBacktestDataset
     }
     identity.datasetVersion = computeBacktestDatasetVersion(identity);
     return identity;
+}
+
+std::optional<BacktestDatasetIdentity>
+SqliteLocalDataStore::loadRawBacktestDatasetIdentity(const Instrument &instrument)
+{
+    auto identity = loadBacktestDatasetIdentity(instrument, 1);
+    if (!identity) return std::nullopt;
+    identity->periodSeconds = 0;
+    identity->source = QStringLiteral("raw_trade_ticks_v1");
+    identity->aggregatorVersion = 0;
+    identity->staleDayCount = 0;
+    for (RawTickDayFingerprint &day : identity->days) {
+        day.barCount = 0;
+        day.cacheVersion = 0;
+        day.cacheFresh = true;
+    }
+    identity->datasetVersion = computeBacktestDatasetVersion(*identity);
+    return identity;
+}
+
+bool SqliteLocalDataStore::upsertAShareInstrumentDayRecords(
+    const QVector<AShareInstrumentDayRecord> &records)
+{
+    if (records.isEmpty()) return true;
+    for (const AShareInstrumentDayRecord &record : records) {
+        if (!record.isValid()) {
+            emit writeFailed(QStringLiteral(
+                "A 股停复牌事实无效：必须包含代码、交易日、明确状态、来源和来源版本"));
+            return false;
+        }
+    }
+    if (!m_database.transaction()) {
+        emitSqlError(QStringLiteral("开始写入 A 股停复牌事实事务"));
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into ashare_instrument_day_status("
+        "symbol, name, venue, trading_date, state, reason, source, source_version, "
+        "updated_at_utc) values(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(symbol, trading_date) do update set "
+        "name=excluded.name, venue=excluded.venue, state=excluded.state, "
+        "reason=excluded.reason, source=excluded.source, "
+        "source_version=excluded.source_version, updated_at_utc=excluded.updated_at_utc"));
+    const QString updatedAt = QDateTime::currentDateTimeUtc()
+        .toString(Qt::ISODateWithMs);
+    for (const AShareInstrumentDayRecord &record : records) {
+        query.bindValue(0, record.instrument.symbol.trimmed());
+        query.bindValue(1, record.instrument.name.isNull()
+                               ? QStringLiteral("") : record.instrument.name);
+        query.bindValue(2, record.instrument.venue.isNull()
+                               ? QStringLiteral("") : record.instrument.venue);
+        query.bindValue(3, record.tradingDate.toString(Qt::ISODate));
+        query.bindValue(4, static_cast<int>(record.state));
+        query.bindValue(5, record.reason.isNull()
+                               ? QStringLiteral("") : record.reason);
+        query.bindValue(6, record.source.trimmed());
+        query.bindValue(7, record.sourceVersion.trimmed());
+        query.bindValue(8, updatedAt);
+        if (!query.exec()) {
+            const QString sqlError = query.lastError().text();
+            m_database.rollback();
+            const QString message = QStringLiteral("写入 A 股停复牌事实失败：%1")
+                                        .arg(sqlError);
+            qWarning().noquote() << message;
+            emit writeFailed(message);
+            return false;
+        }
+        query.finish();
+    }
+    if (!m_database.commit()) {
+        m_database.rollback();
+        emitSqlError(QStringLiteral("提交 A 股停复牌事实事务"));
+        return false;
+    }
+    return true;
+}
+
+AShareInstrumentDayImportChangeSummary
+SqliteLocalDataStore::analyzeAShareInstrumentDayImport(
+    const QVector<AShareInstrumentDayRecord> &records)
+{
+    AShareInstrumentDayImportChangeSummary summary;
+    if (records.isEmpty()) {
+        summary.error = QStringLiteral("停复牌事实为空");
+        return summary;
+    }
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select name, venue, state, reason, source from ashare_instrument_day_status "
+        "where symbol=? and trading_date=?"));
+    for (const AShareInstrumentDayRecord &record : records) {
+        if (!record.isValid()) {
+            summary.error = QStringLiteral("停复牌事实包含无效记录");
+            return summary;
+        }
+        existing.bindValue(0, record.instrument.symbol.trimmed());
+        existing.bindValue(1, record.tradingDate.toString(Qt::ISODate));
+        if (!existing.exec()) {
+            summary.error = QStringLiteral("读取既有停复牌事实失败：%1")
+                                .arg(existing.lastError().text());
+            return summary;
+        }
+        if (!existing.next()) {
+            ++summary.newRecords;
+        } else {
+            const bool sameFact = existing.value(0).toString() == record.instrument.name
+                && existing.value(1).toString() == record.instrument.venue
+                && existing.value(2).toInt() == static_cast<int>(record.state)
+                && existing.value(3).toString() == record.reason
+                && existing.value(4).toString() == record.source;
+            if (sameFact) ++summary.unchangedRecords;
+            else ++summary.correctedRecords;
+        }
+        existing.finish();
+    }
+    summary.valid = true;
+    return summary;
+}
+
+bool SqliteLocalDataStore::importAShareInstrumentDayRecords(
+    AShareInstrumentDayImportRun &run,
+    const QVector<AShareInstrumentDayRecord> &records,
+    bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    const auto failImport = [this, error](const QString &message) {
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    };
+    if (!run.isValid() || records.isEmpty()
+        || run.recordCount != records.size()) {
+        return failImport(QStringLiteral("A 股停复牌导入批次身份无效"));
+    }
+    for (const AShareInstrumentDayRecord &record : records) {
+        if (!record.isValid() || record.source != run.source
+            || record.sourceVersion != run.sourceVersion) {
+            return failImport(QStringLiteral("A 股停复牌事实与导入批次身份不一致"));
+        }
+    }
+    if (!m_database.transaction()) {
+        emitSqlError(QStringLiteral("开始 A 股停复牌可审计导入事务"));
+        return false;
+    }
+
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select run_id from ashare_instrument_day_import_runs "
+        "where source=? and source_version=? and content_sha256=?"));
+    existing.addBindValue(run.source);
+    existing.addBindValue(run.sourceVersion);
+    existing.addBindValue(run.contentSha256);
+    if (!existing.exec()) {
+        m_database.rollback();
+        emitSqlError(QStringLiteral("检查 A 股停复牌重复导入"));
+        return false;
+    }
+    if (existing.next()) {
+        run.runId = existing.value(0).toString();
+        if (!m_database.commit()) {
+            m_database.rollback();
+            emitSqlError(QStringLiteral("结束 A 股停复牌重复导入检查"));
+            return false;
+        }
+        if (reused) *reused = true;
+        return true;
+    }
+
+    const AShareInstrumentDayImportChangeSummary changes =
+        analyzeAShareInstrumentDayImport(records);
+    if (!changes.valid) {
+        m_database.rollback();
+        return failImport(changes.error);
+    }
+    if (changes.correctedRecords > 0 && run.revisionReason.trimmed().isEmpty()) {
+        m_database.rollback();
+        return failImport(QStringLiteral(
+            "检测到 %1 条既有事实发生变化；必须填写修订原因后再确认导入")
+                              .arg(changes.correctedRecords));
+    }
+    run.newRecords = changes.newRecords;
+    run.unchangedRecords = changes.unchangedRecords;
+    run.correctedRecords = changes.correctedRecords;
+
+    QSqlQuery batch(m_database);
+    batch.prepare(QStringLiteral(
+        "insert into ashare_instrument_day_import_runs("
+        "run_id, imported_at_utc, file_name, source, source_version, "
+        "content_sha256, lines_read, record_count, first_date, last_date, "
+        "new_record_count, unchanged_record_count, corrected_record_count, "
+        "revision_reason, status, error) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    batch.addBindValue(run.runId);
+    batch.addBindValue(run.importedAt.toUTC().toString(Qt::ISODateWithMs));
+    batch.addBindValue(run.fileName);
+    batch.addBindValue(run.source);
+    batch.addBindValue(run.sourceVersion);
+    batch.addBindValue(run.contentSha256);
+    batch.addBindValue(run.linesRead);
+    batch.addBindValue(run.recordCount);
+    batch.addBindValue(run.firstDate.toString(Qt::ISODate));
+    batch.addBindValue(run.lastDate.toString(Qt::ISODate));
+    batch.addBindValue(run.newRecords);
+    batch.addBindValue(run.unchangedRecords);
+    batch.addBindValue(run.correctedRecords);
+    batch.addBindValue(run.revisionReason.isNull()
+                           ? QStringLiteral("") : run.revisionReason.trimmed());
+    batch.addBindValue(run.status);
+    batch.addBindValue(run.error.isNull() ? QStringLiteral("") : run.error);
+    if (!batch.exec()) {
+        const QString message = QStringLiteral("写入 A 股停复牌导入审计批次失败：%1")
+                                    .arg(batch.lastError().text());
+        m_database.rollback();
+        return failImport(message);
+    }
+
+    QSqlQuery prior(m_database);
+    prior.prepare(QStringLiteral(
+        "select name, venue, state, reason, source, import_run_id "
+        "from ashare_instrument_day_status where symbol=? and trading_date=?"));
+    QSqlQuery item(m_database);
+    item.prepare(QStringLiteral(
+        "insert into ashare_instrument_day_import_items("
+        "run_id, sequence, symbol, name, venue, trading_date, state, reason, "
+        "source, source_version, change_kind, previous_import_run_id) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    QSqlQuery fact(m_database);
+    fact.prepare(QStringLiteral(
+        "insert into ashare_instrument_day_status("
+        "symbol, name, venue, trading_date, state, reason, source, source_version, "
+        "updated_at_utc, import_run_id) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(symbol, trading_date) do update set "
+        "name=excluded.name, venue=excluded.venue, state=excluded.state, "
+        "reason=excluded.reason, source=excluded.source, "
+        "source_version=excluded.source_version, updated_at_utc=excluded.updated_at_utc, "
+        "import_run_id=excluded.import_run_id"));
+    const QString updatedAt = run.importedAt.toUTC().toString(Qt::ISODateWithMs);
+    int sequence = 0;
+    for (const AShareInstrumentDayRecord &record : records) {
+        prior.bindValue(0, record.instrument.symbol.trimmed());
+        prior.bindValue(1, record.tradingDate.toString(Qt::ISODate));
+        if (!prior.exec()) {
+            m_database.rollback();
+            emitSqlError(QStringLiteral("读取停复牌事实修订前状态"));
+            return false;
+        }
+        QString changeKind = QStringLiteral("new");
+        QString previousRunId = QStringLiteral("");
+        if (prior.next()) {
+            previousRunId = prior.value(5).toString();
+            const bool sameFact = prior.value(0).toString() == record.instrument.name
+                && prior.value(1).toString() == record.instrument.venue
+                && prior.value(2).toInt() == static_cast<int>(record.state)
+                && prior.value(3).toString() == record.reason
+                && prior.value(4).toString() == record.source;
+            changeKind = sameFact ? QStringLiteral("unchanged")
+                                  : QStringLiteral("corrected");
+        }
+        prior.finish();
+
+        item.bindValue(0, run.runId);
+        item.bindValue(1, sequence++);
+        item.bindValue(2, record.instrument.symbol.trimmed());
+        item.bindValue(3, record.instrument.name);
+        item.bindValue(4, record.instrument.venue);
+        item.bindValue(5, record.tradingDate.toString(Qt::ISODate));
+        item.bindValue(6, static_cast<int>(record.state));
+        item.bindValue(7, record.reason);
+        item.bindValue(8, record.source);
+        item.bindValue(9, record.sourceVersion);
+        item.bindValue(10, changeKind);
+        item.bindValue(11, previousRunId);
+        if (!item.exec()) {
+            m_database.rollback();
+            emitSqlError(QStringLiteral("写入 A 股停复牌不可变批次明细"));
+            return false;
+        }
+        item.finish();
+
+        fact.bindValue(0, record.instrument.symbol.trimmed());
+        fact.bindValue(1, record.instrument.name);
+        fact.bindValue(2, record.instrument.venue);
+        fact.bindValue(3, record.tradingDate.toString(Qt::ISODate));
+        fact.bindValue(4, static_cast<int>(record.state));
+        fact.bindValue(5, record.reason);
+        fact.bindValue(6, record.source);
+        fact.bindValue(7, record.sourceVersion);
+        fact.bindValue(8, updatedAt);
+        fact.bindValue(9, run.runId);
+        if (!fact.exec()) {
+            m_database.rollback();
+            emitSqlError(QStringLiteral("写入 A 股停复牌事实"));
+            return false;
+        }
+        fact.finish();
+    }
+    if (!m_database.commit()) {
+        m_database.rollback();
+        emitSqlError(QStringLiteral("提交 A 股停复牌可审计导入事务"));
+        return false;
+    }
+    return true;
+}
+
+QVector<AShareInstrumentDayImportRun>
+SqliteLocalDataStore::loadAShareInstrumentDayImportRuns(int limit)
+{
+    QVector<AShareInstrumentDayImportRun> result;
+    if (limit <= 0) return result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select run_id, imported_at_utc, file_name, source, source_version, "
+        "content_sha256, lines_read, record_count, first_date, last_date, "
+        "new_record_count, unchanged_record_count, corrected_record_count, "
+        "revision_reason, status, error from ashare_instrument_day_import_runs "
+        "order by imported_at_utc desc, run_id desc limit ?"));
+    query.addBindValue(limit);
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取 A 股停复牌导入审计历史"));
+        return result;
+    }
+    while (query.next()) {
+        AShareInstrumentDayImportRun run;
+        run.runId = query.value(0).toString();
+        run.importedAt = QDateTime::fromString(query.value(1).toString(),
+                                               Qt::ISODateWithMs);
+        run.fileName = query.value(2).toString();
+        run.source = query.value(3).toString();
+        run.sourceVersion = query.value(4).toString();
+        run.contentSha256 = query.value(5).toString();
+        run.linesRead = query.value(6).toLongLong();
+        run.recordCount = query.value(7).toLongLong();
+        run.firstDate = QDate::fromString(query.value(8).toString(), Qt::ISODate);
+        run.lastDate = QDate::fromString(query.value(9).toString(), Qt::ISODate);
+        run.newRecords = query.value(10).toLongLong();
+        run.unchangedRecords = query.value(11).toLongLong();
+        run.correctedRecords = query.value(12).toLongLong();
+        run.revisionReason = query.value(13).toString();
+        run.status = query.value(14).toString();
+        run.error = query.value(15).toString();
+        if (run.isValid()) result.append(run);
+    }
+    return result;
+}
+
+QVector<AShareInstrumentDayRecord>
+SqliteLocalDataStore::loadAShareInstrumentDayImportRunRecords(
+    const QString &runId)
+{
+    QVector<AShareInstrumentDayRecord> result;
+    if (runId.trimmed().isEmpty()) return result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select symbol, name, venue, trading_date, state, reason, source, "
+        "source_version from ashare_instrument_day_import_items "
+        "where run_id=? order by sequence asc"));
+    query.addBindValue(runId.trimmed());
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取 A 股停复牌不可变批次明细"));
+        return result;
+    }
+    while (query.next()) {
+        AShareInstrumentDayRecord record;
+        record.instrument.symbol = query.value(0).toString();
+        record.instrument.name = query.value(1).toString();
+        record.instrument.market = Market::AShare;
+        record.instrument.venue = query.value(2).toString();
+        record.tradingDate = QDate::fromString(query.value(3).toString(),
+                                               Qt::ISODate);
+        record.state = static_cast<AShareInstrumentDayState>(query.value(4).toInt());
+        record.reason = query.value(5).toString();
+        record.source = query.value(6).toString();
+        record.sourceVersion = query.value(7).toString();
+        if (record.isValid()) result.append(record);
+    }
+    return result;
+}
+
+QVector<AShareInstrumentDayRecord>
+SqliteLocalDataStore::loadAShareInstrumentDayRecords(
+    const QStringList &symbols, const QDate &firstDate,
+    const QDate &lastDate)
+{
+    QVector<AShareInstrumentDayRecord> result;
+    QStringList normalizedSymbols;
+    for (const QString &symbol : symbols) {
+        const QString normalized = symbol.trimmed();
+        if (!normalized.isEmpty() && !normalizedSymbols.contains(normalized))
+            normalizedSymbols.append(normalized);
+    }
+    if (normalizedSymbols.isEmpty() || !firstDate.isValid()
+        || !lastDate.isValid() || firstDate > lastDate) return result;
+    QStringList placeholders;
+    placeholders.reserve(normalizedSymbols.size());
+    for (int index = 0; index < normalizedSymbols.size(); ++index)
+        placeholders.append(QStringLiteral("?"));
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select symbol, name, venue, trading_date, state, reason, source, "
+        "source_version from ashare_instrument_day_status where symbol in (%1) "
+        "and trading_date >= ? and trading_date <= ? "
+        "order by symbol asc, trading_date asc")
+                      .arg(placeholders.join(QStringLiteral(","))));
+    int binding = 0;
+    for (const QString &symbol : normalizedSymbols)
+        query.bindValue(binding++, symbol);
+    query.bindValue(binding++, firstDate.toString(Qt::ISODate));
+    query.bindValue(binding, lastDate.toString(Qt::ISODate));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取 A 股停复牌事实"));
+        return result;
+    }
+    while (query.next()) {
+        AShareInstrumentDayRecord record;
+        record.instrument.symbol = query.value(0).toString();
+        record.instrument.name = query.value(1).toString();
+        record.instrument.market = Market::AShare;
+        record.instrument.venue = query.value(2).toString();
+        record.tradingDate = QDate::fromString(query.value(3).toString(),
+                                               Qt::ISODate);
+        record.state = static_cast<AShareInstrumentDayState>(
+            query.value(4).toInt());
+        record.reason = query.value(5).toString();
+        record.source = query.value(6).toString();
+        record.sourceVersion = query.value(7).toString();
+        if (record.isValid()) result.append(record);
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::saveAShareIndustryDataset(
+    AShareIndustryDataset &dataset, bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    auto reject = [this, error](const QString &message) {
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    };
+    const AShareIndustryDatasetAnalysis analysis =
+        analyzeAShareIndustryDataset(dataset);
+    if (!analysis.valid) return reject(analysis.error);
+    if (analysis.reused) {
+        if (reused) *reused = true;
+        return true;
+    }
+    if (analysis.requiresRevisionReason && dataset.revisionReason.isEmpty()) {
+        return reject(QStringLiteral(
+            "相同分类、来源和版本已有不同内容；必须填写修订原因"));
+    }
+    dataset.previousDatasetId = analysis.previousDatasetId;
+    const QVector<AShareIndustryMembership> &normalized = dataset.memberships;
+
+    if (dataset.datasetId.trimmed().isEmpty()) {
+        dataset.datasetId = QStringLiteral("industry-%1")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    } else {
+        dataset.datasetId = dataset.datasetId.trimmed();
+    }
+    if (!dataset.importedAt.isValid())
+        dataset.importedAt = QDateTime::currentDateTimeUtc();
+    if (!m_database.transaction())
+        return reject(QStringLiteral("无法开始行业数据集事务"));
+    auto rollback = [this, error](const QString &message) {
+        m_database.rollback();
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    };
+    QSqlQuery header(m_database);
+    header.prepare(QStringLiteral(
+        "insert into ashare_industry_datasets(dataset_id, classification, "
+        "source, source_version, content_sha256, imported_at_utc, record_count, "
+        "file_name, lines_read, revision_reason, previous_dataset_id) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    header.addBindValue(dataset.datasetId);
+    header.addBindValue(dataset.classification);
+    header.addBindValue(dataset.source);
+    header.addBindValue(dataset.sourceVersion);
+    header.addBindValue(dataset.contentSha256);
+    header.addBindValue(dataset.importedAt.toUTC().toString(Qt::ISODateWithMs));
+    header.addBindValue(normalized.size());
+    header.addBindValue(dataset.fileName.isNull()
+                            ? QStringLiteral("") : dataset.fileName);
+    header.addBindValue(dataset.linesRead);
+    header.addBindValue(dataset.revisionReason.isNull()
+                            ? QStringLiteral("") : dataset.revisionReason);
+    header.addBindValue(dataset.previousDatasetId.isNull()
+                            ? QStringLiteral("") : dataset.previousDatasetId);
+    if (!header.exec())
+        return rollback(QStringLiteral("写入行业数据集身份失败：%1")
+                            .arg(header.lastError().text()));
+
+    QSqlQuery item(m_database);
+    item.prepare(QStringLiteral(
+        "insert into ashare_industry_memberships(dataset_id, sequence, symbol, "
+        "name, venue, industry_code, industry_name, effective_from, effective_to) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    for (int index = 0; index < normalized.size(); ++index) {
+        const AShareIndustryMembership &membership = normalized.at(index);
+        item.bindValue(0, dataset.datasetId);
+        item.bindValue(1, index);
+        item.bindValue(2, membership.instrument.symbol);
+        item.bindValue(3, membership.instrument.name.isNull()
+                              ? QStringLiteral("") : membership.instrument.name);
+        item.bindValue(4, membership.instrument.venue.isNull()
+                              ? QStringLiteral("") : membership.instrument.venue);
+        item.bindValue(5, membership.industryCode);
+        item.bindValue(6, membership.industryName);
+        item.bindValue(7, membership.effectiveFrom.toString(Qt::ISODate));
+        item.bindValue(8, membership.effectiveTo.isValid()
+                              ? membership.effectiveTo.toString(Qt::ISODate)
+                              : QStringLiteral(""));
+        if (!item.exec())
+            return rollback(QStringLiteral("写入行业数据集成员失败：%1")
+                                .arg(item.lastError().text()));
+        item.finish();
+    }
+    if (!m_database.commit())
+        return rollback(QStringLiteral("提交行业数据集事务失败"));
+    return true;
+}
+
+AShareIndustryDatasetAnalysis
+SqliteLocalDataStore::analyzeAShareIndustryDataset(
+    AShareIndustryDataset &dataset)
+{
+    AShareIndustryDatasetAnalysis analysis;
+    if (!normalizeIndustryDataset(&dataset, &analysis.error)) return analysis;
+    QSqlQuery exact(m_database);
+    exact.prepare(QStringLiteral(
+        "select dataset_id, imported_at_utc from ashare_industry_datasets "
+        "where classification=? and source=? and source_version=? "
+        "and content_sha256=?"));
+    exact.addBindValue(dataset.classification);
+    exact.addBindValue(dataset.source);
+    exact.addBindValue(dataset.sourceVersion);
+    exact.addBindValue(dataset.contentSha256);
+    if (!exact.exec()) {
+        analysis.error = QStringLiteral("检查行业数据集重复身份失败：%1")
+                             .arg(exact.lastError().text());
+        return analysis;
+    }
+    if (exact.next()) {
+        analysis.valid = true;
+        analysis.reused = true;
+        analysis.existingDatasetId = exact.value(0).toString();
+        dataset.datasetId = analysis.existingDatasetId;
+        dataset.importedAt = QDateTime::fromString(
+            exact.value(1).toString(), Qt::ISODateWithMs);
+        return analysis;
+    }
+    QSqlQuery previous(m_database);
+    previous.prepare(QStringLiteral(
+        "select dataset_id from ashare_industry_datasets where classification=? "
+        "and source=? and source_version=? "
+        "order by imported_at_utc desc, dataset_id desc limit 1"));
+    previous.addBindValue(dataset.classification);
+    previous.addBindValue(dataset.source);
+    previous.addBindValue(dataset.sourceVersion);
+    if (!previous.exec()) {
+        analysis.error = QStringLiteral("检查行业数据集修订身份失败：%1")
+                             .arg(previous.lastError().text());
+        return analysis;
+    }
+    if (previous.next()) {
+        analysis.previousDatasetId = previous.value(0).toString();
+        analysis.requiresRevisionReason = true;
+    }
+    analysis.valid = true;
+    return analysis;
+}
+
+QVector<AShareIndustryDataset>
+SqliteLocalDataStore::loadAShareIndustryDatasets(int limit)
+{
+    QVector<AShareIndustryDataset> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select dataset_id, classification, source, source_version, "
+        "content_sha256, imported_at_utc, record_count, file_name, lines_read, "
+        "revision_reason, previous_dataset_id from ashare_industry_datasets "
+        "order by imported_at_utc desc, dataset_id desc limit ?"));
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取行业数据集审计历史"));
+        return result;
+    }
+    while (query.next()) {
+        AShareIndustryDataset dataset;
+        dataset.datasetId = query.value(0).toString();
+        dataset.classification = query.value(1).toString();
+        dataset.source = query.value(2).toString();
+        dataset.sourceVersion = query.value(3).toString();
+        dataset.contentSha256 = query.value(4).toString();
+        dataset.importedAt = QDateTime::fromString(
+            query.value(5).toString(), Qt::ISODateWithMs);
+        dataset.recordCount = query.value(6).toLongLong();
+        dataset.fileName = query.value(7).toString();
+        dataset.linesRead = query.value(8).toLongLong();
+        dataset.revisionReason = query.value(9).toString();
+        dataset.previousDatasetId = query.value(10).toString();
+        result.append(dataset);
+    }
+    return result;
+}
+
+std::optional<AShareIndustrySnapshot>
+SqliteLocalDataStore::loadAShareIndustrySnapshot(
+    const QString &datasetId, const QDate &asOfDate,
+    const QStringList &symbols)
+{
+    QStringList normalizedSymbols;
+    for (const QString &symbol : symbols) {
+        const QString normalized = symbol.trimmed();
+        if (!normalized.isEmpty() && !normalizedSymbols.contains(normalized))
+            normalizedSymbols.append(normalized);
+    }
+    std::sort(normalizedSymbols.begin(), normalizedSymbols.end());
+    if (datasetId.trimmed().isEmpty() || !asOfDate.isValid()
+        || normalizedSymbols.isEmpty()) return std::nullopt;
+
+    QSqlQuery header(m_database);
+    header.prepare(QStringLiteral(
+        "select classification, source, source_version, content_sha256 "
+        "from ashare_industry_datasets where dataset_id=?"));
+    header.addBindValue(datasetId.trimmed());
+    if (!header.exec()) {
+        emitSqlError(QStringLiteral("读取行业数据集身份"));
+        return std::nullopt;
+    }
+    if (!header.next()) return std::nullopt;
+
+    AShareIndustrySnapshot snapshot;
+    snapshot.datasetId = datasetId.trimmed();
+    snapshot.classification = header.value(0).toString();
+    snapshot.source = header.value(1).toString();
+    snapshot.sourceVersion = header.value(2).toString();
+    snapshot.datasetContentSha256 = header.value(3).toString();
+    snapshot.asOfDate = asOfDate;
+    snapshot.expectedSymbols = normalizedSymbols.size();
+
+    QStringList placeholders;
+    placeholders.fill(QStringLiteral("?"), normalizedSymbols.size());
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select symbol, name, venue, industry_code, industry_name, "
+        "effective_from, effective_to from ashare_industry_memberships "
+        "where dataset_id=? and symbol in (%1) and effective_from<=? "
+        "and (effective_to='' or effective_to>=?) "
+        "order by symbol asc, effective_from asc")
+                      .arg(placeholders.join(QStringLiteral(","))));
+    int binding = 0;
+    query.bindValue(binding++, snapshot.datasetId);
+    for (const QString &symbol : normalizedSymbols)
+        query.bindValue(binding++, symbol);
+    query.bindValue(binding++, asOfDate.toString(Qt::ISODate));
+    query.bindValue(binding, asOfDate.toString(Qt::ISODate));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("解析行业数据集日期快照"));
+        return std::nullopt;
+    }
+    QSet<QString> resolved;
+    while (query.next()) {
+        const QString symbol = query.value(0).toString();
+        if (resolved.contains(symbol)) {
+            emit writeFailed(QStringLiteral("行业数据集存在重叠有效期：%1")
+                                 .arg(symbol));
+            return std::nullopt;
+        }
+        AShareIndustryMembership membership;
+        membership.instrument = {symbol, query.value(1).toString(),
+                                 Market::AShare, query.value(2).toString()};
+        membership.industryCode = query.value(3).toString();
+        membership.industryName = query.value(4).toString();
+        membership.effectiveFrom = QDate::fromString(
+            query.value(5).toString(), Qt::ISODate);
+        membership.effectiveTo = QDate::fromString(
+            query.value(6).toString(), Qt::ISODate);
+        if (!membership.isValid()) return std::nullopt;
+        resolved.insert(symbol);
+        snapshot.memberships.append(membership);
+    }
+    snapshot.resolvedSymbols = resolved.size();
+    snapshot.coverageComplete =
+        snapshot.resolvedSymbols == snapshot.expectedSymbols;
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData("pptrader-ashare-industry-snapshot-v1\n");
+    hash.addData(snapshot.datasetContentSha256.toUtf8());
+    hash.addData("\n");
+    hash.addData(asOfDate.toString(Qt::ISODate).toUtf8());
+    hash.addData("\n");
+    for (const AShareIndustryMembership &membership : snapshot.memberships) {
+        hash.addData(membership.instrument.symbol.toUtf8());
+        hash.addData("=");
+        hash.addData(membership.industryCode.toUtf8());
+        hash.addData("\n");
+    }
+    snapshot.snapshotVersion = QStringLiteral("sha256:%1")
+        .arg(QString::fromLatin1(hash.result().toHex()));
+    return snapshot;
+}
+
+bool SqliteLocalDataStore::registerFactorDefinitionVersion(
+    FactorDefinitionVersion &definition, bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    definition.factorId = definition.factorId.trimmed();
+    definition.name = definition.name.trimmed();
+    definition.alias = definition.alias.trimmed();
+    definition.sourceStrategyId = definition.sourceStrategyId.trimmed();
+    definition.version = 0;
+    definition.contentSha256 = definition.computedContentSha256();
+    QString validationError;
+    if (!definition.isValid(&validationError)) {
+        if (error) *error = validationError;
+        return false;
+    }
+    if (!m_database.transaction()) {
+        if (error) *error = QStringLiteral("无法开始因子版本注册事务");
+        return false;
+    }
+
+    QSqlQuery latest(m_database);
+    latest.prepare(QStringLiteral(
+        "select version, content_sha256, created_at_utc from "
+        "factor_definition_versions where factor_id=? "
+        "order by version desc limit 1"));
+    latest.addBindValue(definition.factorId);
+    if (!latest.exec()) {
+        m_database.rollback();
+        if (error) *error = latest.lastError().text();
+        return false;
+    }
+    int nextVersion = 1;
+    if (latest.next()) {
+        const int currentVersion = latest.value(0).toInt();
+        nextVersion = currentVersion + 1;
+        if (latest.value(1).toString() == definition.contentSha256) {
+            definition.version = currentVersion;
+            definition.createdAt = QDateTime::fromString(
+                latest.value(2).toString(), Qt::ISODateWithMs);
+            if (!m_database.commit()) {
+                if (error) *error = QStringLiteral("提交因子版本复用事务失败");
+                return false;
+            }
+            if (reused) *reused = true;
+            return true;
+        }
+    }
+    latest.finish();
+
+    definition.version = nextVersion;
+    definition.createdAt = QDateTime::currentDateTimeUtc();
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into factor_definition_versions(factor_id, version, name, alias, "
+        "source_strategy_id, source_strategy_version, definition_json, "
+        "preprocessing_json, content_sha256, created_at_utc) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(definition.factorId);
+    insert.addBindValue(definition.version);
+    insert.addBindValue(definition.name);
+    insert.addBindValue(definition.alias);
+    insert.addBindValue(definition.sourceStrategyId);
+    insert.addBindValue(definition.sourceStrategyVersion);
+    insert.addBindValue(compactJson(definition.definition));
+    insert.addBindValue(compactJson(definition.preprocessing.toVariantMap()));
+    insert.addBindValue(definition.contentSha256);
+    insert.addBindValue(definition.createdAt.toString(Qt::ISODateWithMs));
+    if (!insert.exec()) {
+        const QString message = insert.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    if (!m_database.commit()) {
+        if (error) *error = QStringLiteral("提交因子版本注册事务失败");
+        return false;
+    }
+    return true;
+}
+
+QVector<FactorDefinitionVersion>
+SqliteLocalDataStore::loadFactorDefinitionVersions(int limit)
+{
+    QVector<FactorDefinitionVersion> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select factor_id, version, name, alias, source_strategy_id, "
+        "source_strategy_version, definition_json, preprocessing_json, "
+        "content_sha256, created_at_utc from factor_definition_versions "
+        "order by created_at_utc desc, factor_id asc, version desc limit ?"));
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取因子定义版本目录"));
+        return result;
+    }
+    while (query.next()) {
+        FactorDefinitionVersion definition;
+        definition.factorId = query.value(0).toString();
+        definition.version = query.value(1).toInt();
+        definition.name = query.value(2).toString();
+        definition.alias = query.value(3).toString();
+        definition.sourceStrategyId = query.value(4).toString();
+        definition.sourceStrategyVersion = query.value(5).toInt();
+        definition.definition = QJsonDocument::fromJson(
+            query.value(6).toByteArray()).object().toVariantMap();
+        definition.preprocessing = FactorPreprocessingPolicy::fromVariantMap(
+            QJsonDocument::fromJson(query.value(7).toByteArray())
+                .object().toVariantMap());
+        definition.contentSha256 = query.value(8).toString();
+        definition.createdAt = QDateTime::fromString(
+            query.value(9).toString(), Qt::ISODateWithMs);
+        if (definition.isValid()) result.append(definition);
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::registerFactorCandidateVersion(
+    FactorCandidateVersion &candidate, bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    candidate.candidateId = candidate.candidateId.trimmed();
+    candidate.name = candidate.name.trimmed();
+    candidate.hypothesis = candidate.hypothesis.trimmed();
+    candidate.sourceKind = candidate.sourceKind.trimmed();
+    candidate.sourceReference = candidate.sourceReference.trimmed();
+    if (candidate.sourceReference.isNull())
+        candidate.sourceReference = QStringLiteral("");
+    candidate.version = 0;
+    candidate.frozenAt = {};
+    candidate.contentSha256 = candidate.computedContentSha256();
+    QString validationError;
+    if (!candidate.isValid(&validationError)) {
+        if (error) *error = validationError;
+        return false;
+    }
+    if (!m_database.transaction()) {
+        if (error) *error = QStringLiteral("无法开始候选因子登记事务");
+        return false;
+    }
+    QSqlQuery identical(m_database);
+    identical.prepare(QStringLiteral(
+        "select version, proposed_at_utc, frozen_at_utc from "
+        "factor_candidate_versions where candidate_id=? and content_sha256=?"));
+    identical.addBindValue(candidate.candidateId);
+    identical.addBindValue(candidate.contentSha256);
+    if (!identical.exec()) {
+        m_database.rollback();
+        if (error) *error = identical.lastError().text();
+        return false;
+    }
+    if (identical.next()) {
+        candidate.version = identical.value(0).toInt();
+        candidate.proposedAt = QDateTime::fromString(
+            identical.value(1).toString(), Qt::ISODateWithMs);
+        candidate.frozenAt = QDateTime::fromString(
+            identical.value(2).toString(), Qt::ISODateWithMs);
+        if (!m_database.commit()) {
+            if (error) *error = QStringLiteral("提交候选因子复用事务失败");
+            return false;
+        }
+        if (reused) *reused = true;
+        return true;
+    }
+    identical.finish();
+    QSqlQuery latest(m_database);
+    latest.prepare(QStringLiteral(
+        "select coalesce(max(version), 0) from factor_candidate_versions "
+        "where candidate_id=?"));
+    latest.addBindValue(candidate.candidateId);
+    if (!latest.exec() || !latest.next()) {
+        m_database.rollback();
+        if (error) *error = QStringLiteral("读取候选因子最新版本失败");
+        return false;
+    }
+    candidate.version = latest.value(0).toInt() + 1;
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into factor_candidate_versions(candidate_id, version, name, "
+        "hypothesis, source_kind, source_reference, factor_definition_json, "
+        "proposed_at_utc, frozen_at_utc, content_sha256) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, null, ?)"));
+    insert.addBindValue(candidate.candidateId);
+    insert.addBindValue(candidate.version);
+    insert.addBindValue(candidate.name);
+    insert.addBindValue(candidate.hypothesis);
+    insert.addBindValue(candidate.sourceKind);
+    insert.addBindValue(candidate.sourceReference);
+    insert.addBindValue(compactJson(candidate.factorDefinition));
+    insert.addBindValue(candidate.proposedAt.toUTC().toString(Qt::ISODateWithMs));
+    insert.addBindValue(candidate.contentSha256);
+    if (!insert.exec()) {
+        const QString message = insert.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    if (!m_database.commit()) {
+        if (error) *error = QStringLiteral("提交候选因子登记事务失败");
+        return false;
+    }
+    return true;
+}
+
+bool SqliteLocalDataStore::freezeFactorCandidateVersion(
+    const QString &candidateId, int version, const QDateTime &frozenAt,
+    QString *error)
+{
+    if (error) error->clear();
+    if (candidateId.trimmed().isEmpty() || version < 1 || !frozenAt.isValid()) {
+        if (error) *error = QStringLiteral("候选因子冻结参数不完整");
+        return false;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select proposed_at_utc, frozen_at_utc from factor_candidate_versions "
+        "where candidate_id=? and version=?"));
+    query.addBindValue(candidateId.trimmed());
+    query.addBindValue(version);
+    if (!query.exec() || !query.next()) {
+        if (error) *error = QStringLiteral("候选因子版本不存在");
+        return false;
+    }
+    const QDateTime proposedAt = QDateTime::fromString(
+        query.value(0).toString(), Qt::ISODateWithMs);
+    const QDateTime existingFrozenAt = QDateTime::fromString(
+        query.value(1).toString(), Qt::ISODateWithMs);
+    if (frozenAt < proposedAt) {
+        if (error) *error = QStringLiteral("候选因子冻结时间不能早于提出时间");
+        return false;
+    }
+    if (existingFrozenAt.isValid()) {
+        if (existingFrozenAt.toUTC() == frozenAt.toUTC()) return true;
+        if (error) *error = QStringLiteral("候选因子版本已经冻结，冻结时间不可修改");
+        return false;
+    }
+    QSqlQuery update(m_database);
+    update.prepare(QStringLiteral(
+        "update factor_candidate_versions set frozen_at_utc=? "
+        "where candidate_id=? and version=? and frozen_at_utc is null"));
+    update.addBindValue(frozenAt.toUTC().toString(Qt::ISODateWithMs));
+    update.addBindValue(candidateId.trimmed());
+    update.addBindValue(version);
+    if (!update.exec() || update.numRowsAffected() != 1) {
+        if (error) *error = QStringLiteral("冻结候选因子版本失败");
+        return false;
+    }
+    return true;
+}
+
+QVector<FactorCandidateVersion> SqliteLocalDataStore::loadFactorCandidateVersions(
+    int limit)
+{
+    QVector<FactorCandidateVersion> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select candidate_id, version, name, hypothesis, source_kind, source_reference, "
+        "factor_definition_json, proposed_at_utc, frozen_at_utc, content_sha256 "
+        "from factor_candidate_versions order by candidate_id asc, version desc limit ?"));
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        FactorCandidateVersion candidate;
+        candidate.candidateId = query.value(0).toString();
+        candidate.version = query.value(1).toInt();
+        candidate.name = query.value(2).toString();
+        candidate.hypothesis = query.value(3).toString();
+        candidate.sourceKind = query.value(4).toString();
+        candidate.sourceReference = query.value(5).toString();
+        candidate.factorDefinition = QJsonDocument::fromJson(
+            query.value(6).toByteArray()).object().toVariantMap();
+        candidate.proposedAt = QDateTime::fromString(
+            query.value(7).toString(), Qt::ISODateWithMs);
+        candidate.frozenAt = QDateTime::fromString(
+            query.value(8).toString(), Qt::ISODateWithMs);
+        candidate.contentSha256 = query.value(9).toString();
+        result.append(candidate);
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::linkFactorCandidateEvaluation(
+    const QString &candidateId, int version, const PortfolioArchiveRecord &archive,
+    FactorCandidateEvaluationRole role, FactorCandidateEvaluation &evaluation,
+    bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    FactorCandidateVersion candidate;
+    bool found = false;
+    for (const FactorCandidateVersion &item : loadFactorCandidateVersions(10000)) {
+        if (item.candidateId == candidateId.trimmed() && item.version == version) {
+            candidate = item;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        if (error) *error = QStringLiteral("候选因子版本不存在");
+        return false;
+    }
+    const FactorCandidateEvaluationDecision decision =
+        FactorCandidateGovernance::evaluate(candidate, archive, role);
+    if (!decision.accepted) {
+        if (error) *error = decision.reason;
+        return false;
+    }
+    const QString roleCode = factorCandidateEvaluationRoleCode(role);
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select evaluation_id, candidate_content_sha256, archive_completed_at_utc, "
+        "archive_factor_id, archive_factor_version, research_method_version, "
+        "preregistered, archive_identity_sha256, linked_at_utc from "
+        "factor_candidate_evaluations where candidate_id=? and candidate_version=? "
+        "and archive_result_id=? and evaluation_role=?"));
+    existing.addBindValue(candidate.candidateId);
+    existing.addBindValue(candidate.version);
+    existing.addBindValue(archive.resultId);
+    existing.addBindValue(roleCode);
+    if (!existing.exec()) {
+        if (error) *error = QStringLiteral("检查候选因子验证关联失败");
+        return false;
+    }
+    if (existing.next()) {
+        evaluation.evaluationId = existing.value(0).toString();
+        evaluation.candidateId = candidate.candidateId;
+        evaluation.candidateVersion = candidate.version;
+        evaluation.candidateContentSha256 = existing.value(1).toString();
+        evaluation.archiveResultId = archive.resultId;
+        evaluation.archiveCompletedAt = QDateTime::fromString(existing.value(2).toString(), Qt::ISODateWithMs);
+        evaluation.archiveFactorId = existing.value(3).toString();
+        evaluation.archiveFactorVersion = existing.value(4).toInt();
+        evaluation.researchMethodVersion = existing.value(5).toString();
+        evaluation.role = role;
+        evaluation.preregistered = existing.value(6).toBool();
+        evaluation.archiveIdentitySha256 = existing.value(7).toString();
+        evaluation.linkedAt = QDateTime::fromString(existing.value(8).toString(), Qt::ISODateWithMs);
+        if (reused) *reused = true;
+        return true;
+    }
+    const QVariantMap factorIdentity = archive.result.immutableIdentity
+        .value(QStringLiteral("factorResearch")).toMap();
+    evaluation.evaluationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    evaluation.candidateId = candidate.candidateId;
+    evaluation.candidateVersion = candidate.version;
+    evaluation.candidateContentSha256 = candidate.contentSha256;
+    evaluation.archiveResultId = archive.resultId;
+    evaluation.archiveCompletedAt = archive.completedAt.toUTC();
+    evaluation.archiveFactorId = factorIdentity.value(QStringLiteral("factorId")).toString();
+    evaluation.archiveFactorVersion = factorIdentity.value(QStringLiteral("factorVersion")).toInt();
+    evaluation.researchMethodVersion = decision.researchMethodVersion;
+    evaluation.role = role;
+    evaluation.preregistered = decision.preregistered;
+    evaluation.archiveIdentitySha256 = decision.archiveIdentitySha256;
+    evaluation.linkedAt = QDateTime::currentDateTimeUtc();
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into factor_candidate_evaluations(evaluation_id, candidate_id, "
+        "candidate_version, candidate_content_sha256, archive_result_id, "
+        "archive_completed_at_utc, archive_factor_id, archive_factor_version, "
+        "research_method_version, evaluation_role, preregistered, "
+        "archive_identity_sha256, linked_at_utc) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(evaluation.evaluationId);
+    insert.addBindValue(evaluation.candidateId);
+    insert.addBindValue(evaluation.candidateVersion);
+    insert.addBindValue(evaluation.candidateContentSha256);
+    insert.addBindValue(evaluation.archiveResultId);
+    insert.addBindValue(evaluation.archiveCompletedAt.toString(Qt::ISODateWithMs));
+    insert.addBindValue(evaluation.archiveFactorId);
+    insert.addBindValue(evaluation.archiveFactorVersion);
+    insert.addBindValue(evaluation.researchMethodVersion);
+    insert.addBindValue(roleCode);
+    insert.addBindValue(evaluation.preregistered ? 1 : 0);
+    insert.addBindValue(evaluation.archiveIdentitySha256);
+    insert.addBindValue(evaluation.linkedAt.toString(Qt::ISODateWithMs));
+    if (!insert.exec()) {
+        if (error) *error = insert.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QVector<FactorCandidateEvaluation> SqliteLocalDataStore::loadFactorCandidateEvaluations(
+    const QString &candidateId, int version, int limit)
+{
+    QVector<FactorCandidateEvaluation> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select evaluation_id, candidate_id, candidate_version, candidate_content_sha256, "
+        "archive_result_id, archive_completed_at_utc, archive_factor_id, "
+        "archive_factor_version, research_method_version, evaluation_role, preregistered, "
+        "archive_identity_sha256, linked_at_utc from factor_candidate_evaluations "
+        "where candidate_id=? and candidate_version=? "
+        "order by linked_at_utc desc, evaluation_id desc limit ?"));
+    query.addBindValue(candidateId.trimmed());
+    query.addBindValue(version);
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        FactorCandidateEvaluation evaluation;
+        evaluation.evaluationId = query.value(0).toString();
+        evaluation.candidateId = query.value(1).toString();
+        evaluation.candidateVersion = query.value(2).toInt();
+        evaluation.candidateContentSha256 = query.value(3).toString();
+        evaluation.archiveResultId = query.value(4).toString();
+        evaluation.archiveCompletedAt = QDateTime::fromString(query.value(5).toString(), Qt::ISODateWithMs);
+        evaluation.archiveFactorId = query.value(6).toString();
+        evaluation.archiveFactorVersion = query.value(7).toInt();
+        evaluation.researchMethodVersion = query.value(8).toString();
+        evaluation.role = query.value(9).toString() == QStringLiteral("prospective_holdout")
+            ? FactorCandidateEvaluationRole::ProspectiveHoldout
+            : FactorCandidateEvaluationRole::RetrospectiveReference;
+        evaluation.preregistered = query.value(10).toBool();
+        evaluation.archiveIdentitySha256 = query.value(11).toString();
+        evaluation.linkedAt = QDateTime::fromString(query.value(12).toString(), Qt::ISODateWithMs);
+        result.append(evaluation);
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::saveExternalFactorDataset(
+    ExternalFactorDataset &dataset,
+    const QVector<ExternalFactorObservation> &observations,
+    bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    dataset.factorKey = dataset.factorKey.trimmed();
+    dataset.source = dataset.source.trimmed();
+    dataset.sourceVersion = dataset.sourceVersion.trimmed();
+    dataset.sourceReference = dataset.sourceReference.trimmed();
+    if (dataset.factorKey.isEmpty() || !isSha256(dataset.factorDefinitionSha256)
+        || dataset.source != QStringLiteral("authorized_csv")
+        || dataset.sourceVersion.isEmpty() || dataset.sourceReference.isEmpty()
+        || !isSha256(dataset.contentSha256) || observations.isEmpty()) {
+        if (error) *error = QStringLiteral("授权因子数据集身份、来源或观测不完整");
+        return false;
+    }
+
+    QVector<ExternalFactorObservation> normalized = observations;
+    QSet<QString> symbols;
+    QSet<QString> timestamps;
+    for (ExternalFactorObservation &observation : normalized) {
+        observation.symbol = observation.symbol.trimmed();
+        if (!observation.timestamp.isValid()
+            || !isShanghaiShenzhenSymbol(observation.symbol)
+            || !std::isfinite(observation.value)) {
+            if (error) *error = QStringLiteral(
+                "授权因子数据集包含无效时间、数值或非沪深 A 股代码");
+            return false;
+        }
+        observation.timestamp = observation.timestamp.toUTC();
+        symbols.insert(observation.symbol);
+        timestamps.insert(observation.timestamp.toString(Qt::ISODateWithMs));
+    }
+    std::sort(normalized.begin(), normalized.end(),
+              [](const ExternalFactorObservation &left,
+                 const ExternalFactorObservation &right) {
+        return std::tie(left.timestamp, left.symbol)
+            < std::tie(right.timestamp, right.symbol);
+    });
+    for (int index = 1; index < normalized.size(); ++index) {
+        if (normalized.at(index - 1).timestamp == normalized.at(index).timestamp
+            && normalized.at(index - 1).symbol == normalized.at(index).symbol) {
+            if (error) *error = QStringLiteral("授权因子数据集包含重复观测身份");
+            return false;
+        }
+    }
+    dataset.recordCount = normalized.size();
+    dataset.symbolCount = symbols.size();
+    dataset.timestampCount = timestamps.size();
+    dataset.firstTimestamp = normalized.first().timestamp;
+    dataset.lastTimestamp = normalized.last().timestamp;
+    if (!dataset.importedAt.isValid())
+        dataset.importedAt = QDateTime::currentDateTimeUtc();
+    else
+        dataset.importedAt = dataset.importedAt.toUTC();
+
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select dataset_id, imported_at_utc, record_count, symbol_count, "
+        "timestamp_count, first_timestamp_utc, last_timestamp_utc "
+        "from external_factor_datasets where factor_key=? "
+        "and factor_definition_sha256=? and source=? and source_version=? "
+        "and content_sha256=?"));
+    existing.addBindValue(dataset.factorKey);
+    existing.addBindValue(dataset.factorDefinitionSha256);
+    existing.addBindValue(dataset.source);
+    existing.addBindValue(dataset.sourceVersion);
+    existing.addBindValue(dataset.contentSha256);
+    if (!existing.exec()) {
+        if (error) *error = existing.lastError().text();
+        return false;
+    }
+    if (existing.next()) {
+        dataset.datasetId = existing.value(0).toString();
+        dataset.importedAt = QDateTime::fromString(existing.value(1).toString(),
+                                                   Qt::ISODateWithMs);
+        dataset.recordCount = existing.value(2).toLongLong();
+        dataset.symbolCount = existing.value(3).toInt();
+        dataset.timestampCount = existing.value(4).toInt();
+        dataset.firstTimestamp = QDateTime::fromString(existing.value(5).toString(),
+                                                       Qt::ISODateWithMs);
+        dataset.lastTimestamp = QDateTime::fromString(existing.value(6).toString(),
+                                                      Qt::ISODateWithMs);
+        if (reused) *reused = true;
+        return true;
+    }
+
+    if (dataset.datasetId.trimmed().isEmpty())
+        dataset.datasetId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!m_database.transaction()) {
+        if (error) *error = QStringLiteral("无法开始授权因子数据集事务");
+        return false;
+    }
+    QSqlQuery insertDataset(m_database);
+    insertDataset.prepare(QStringLiteral(
+        "insert into external_factor_datasets(dataset_id, factor_key, "
+        "factor_definition_sha256, source, source_version, source_reference, "
+        "content_sha256, imported_at_utc, record_count, symbol_count, "
+        "timestamp_count, first_timestamp_utc, last_timestamp_utc) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    insertDataset.addBindValue(dataset.datasetId);
+    insertDataset.addBindValue(dataset.factorKey);
+    insertDataset.addBindValue(dataset.factorDefinitionSha256);
+    insertDataset.addBindValue(dataset.source);
+    insertDataset.addBindValue(dataset.sourceVersion);
+    insertDataset.addBindValue(dataset.sourceReference);
+    insertDataset.addBindValue(dataset.contentSha256);
+    insertDataset.addBindValue(dataset.importedAt.toString(Qt::ISODateWithMs));
+    insertDataset.addBindValue(dataset.recordCount);
+    insertDataset.addBindValue(dataset.symbolCount);
+    insertDataset.addBindValue(dataset.timestampCount);
+    insertDataset.addBindValue(dataset.firstTimestamp.toString(Qt::ISODateWithMs));
+    insertDataset.addBindValue(dataset.lastTimestamp.toString(Qt::ISODateWithMs));
+    if (!insertDataset.exec()) {
+        m_database.rollback();
+        if (error) *error = insertDataset.lastError().text();
+        return false;
+    }
+    QSqlQuery insertObservation(m_database);
+    insertObservation.prepare(QStringLiteral(
+        "insert into external_factor_observations(dataset_id, timestamp_utc, "
+        "symbol, value) values(?, ?, ?, ?)"));
+    for (const ExternalFactorObservation &observation : normalized) {
+        insertObservation.bindValue(0, dataset.datasetId);
+        insertObservation.bindValue(1, observation.timestamp.toString(Qt::ISODateWithMs));
+        insertObservation.bindValue(2, observation.symbol);
+        insertObservation.bindValue(3, observation.value);
+        if (!insertObservation.exec()) {
+            m_database.rollback();
+            if (error) *error = insertObservation.lastError().text();
+            return false;
+        }
+    }
+    if (!m_database.commit()) {
+        if (error) *error = QStringLiteral("提交授权因子数据集事务失败");
+        return false;
+    }
+    return true;
+}
+
+QVector<ExternalFactorDataset> SqliteLocalDataStore::loadExternalFactorDatasets(
+    int limit)
+{
+    QVector<ExternalFactorDataset> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select dataset_id, factor_key, factor_definition_sha256, source, "
+        "source_version, source_reference, content_sha256, imported_at_utc, "
+        "record_count, symbol_count, timestamp_count, first_timestamp_utc, "
+        "last_timestamp_utc from external_factor_datasets "
+        "order by imported_at_utc desc, dataset_id asc limit ?"));
+    query.addBindValue(std::clamp(limit, 1, 10000));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        ExternalFactorDataset dataset;
+        dataset.datasetId = query.value(0).toString();
+        dataset.factorKey = query.value(1).toString();
+        dataset.factorDefinitionSha256 = query.value(2).toString();
+        dataset.source = query.value(3).toString();
+        dataset.sourceVersion = query.value(4).toString();
+        dataset.sourceReference = query.value(5).toString();
+        dataset.contentSha256 = query.value(6).toString();
+        dataset.importedAt = QDateTime::fromString(query.value(7).toString(),
+                                                  Qt::ISODateWithMs);
+        dataset.recordCount = query.value(8).toLongLong();
+        dataset.symbolCount = query.value(9).toInt();
+        dataset.timestampCount = query.value(10).toInt();
+        dataset.firstTimestamp = QDateTime::fromString(query.value(11).toString(),
+                                                       Qt::ISODateWithMs);
+        dataset.lastTimestamp = QDateTime::fromString(query.value(12).toString(),
+                                                      Qt::ISODateWithMs);
+        result.append(dataset);
+    }
+    return result;
+}
+
+QVector<ExternalFactorObservation>
+SqliteLocalDataStore::loadExternalFactorObservations(const QString &datasetId)
+{
+    QVector<ExternalFactorObservation> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select timestamp_utc, symbol, value from external_factor_observations "
+        "where dataset_id=? order by timestamp_utc asc, symbol asc"));
+    query.addBindValue(datasetId);
+    if (!query.exec()) return result;
+    while (query.next()) {
+        result.append({QDateTime::fromString(query.value(0).toString(),
+                                             Qt::ISODateWithMs),
+                       query.value(1).toString(), query.value(2).toDouble()});
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::bindExternalFactorDataset(
+    const QString &candidateId, int candidateVersion,
+    const QString &datasetId, ExternalFactorDatasetBinding &binding,
+    bool *reused, QString *error)
+{
+    if (reused) *reused = false;
+    if (error) error->clear();
+    QSqlQuery candidateQuery(m_database);
+    candidateQuery.prepare(QStringLiteral(
+        "select factor_definition_json, frozen_at_utc, content_sha256 "
+        "from factor_candidate_versions where candidate_id=? and version=?"));
+    candidateQuery.addBindValue(candidateId);
+    candidateQuery.addBindValue(candidateVersion);
+    if (!candidateQuery.exec() || !candidateQuery.next()) {
+        if (error) *error = QStringLiteral("候选因子版本不存在");
+        return false;
+    }
+    FactorCandidateVersion candidate;
+    candidate.candidateId = candidateId;
+    candidate.version = candidateVersion;
+    candidate.factorDefinition = variantMapFromJson(
+        candidateQuery.value(0).toString());
+    candidate.frozenAt = QDateTime::fromString(candidateQuery.value(1).toString(),
+                                               Qt::ISODateWithMs);
+    candidate.contentSha256 = candidateQuery.value(2).toString();
+    if (!candidate.frozenAt.isValid()) {
+        if (error) *error = QStringLiteral("候选因子必须先冻结才能绑定外部数据集");
+        return false;
+    }
+
+    QSqlQuery datasetQuery(m_database);
+    datasetQuery.prepare(QStringLiteral(
+        "select factor_definition_sha256, content_sha256 "
+        "from external_factor_datasets where dataset_id=?"));
+    datasetQuery.addBindValue(datasetId);
+    if (!datasetQuery.exec() || !datasetQuery.next()) {
+        if (error) *error = QStringLiteral("授权外部因子数据集不存在");
+        return false;
+    }
+    const QString definitionSha = datasetQuery.value(0).toString();
+    const QString datasetContentSha = datasetQuery.value(1).toString();
+    if (candidate.computedFactorDefinitionSha256() != definitionSha) {
+        if (error) *error = QStringLiteral("候选因子定义与外部数据集定义摘要不匹配");
+        return false;
+    }
+
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select binding_id, candidate_content_sha256, bound_at_utc "
+        "from factor_candidate_dataset_bindings where candidate_id=? "
+        "and candidate_version=? and dataset_id=?"));
+    existing.addBindValue(candidateId);
+    existing.addBindValue(candidateVersion);
+    existing.addBindValue(datasetId);
+    if (!existing.exec()) {
+        if (error) *error = existing.lastError().text();
+        return false;
+    }
+    binding.candidateId = candidateId;
+    binding.candidateVersion = candidateVersion;
+    binding.factorDefinitionSha256 = definitionSha;
+    binding.datasetId = datasetId;
+    binding.datasetContentSha256 = datasetContentSha;
+    if (existing.next()) {
+        binding.bindingId = existing.value(0).toString();
+        binding.candidateContentSha256 = existing.value(1).toString();
+        binding.boundAt = QDateTime::fromString(existing.value(2).toString(),
+                                               Qt::ISODateWithMs);
+        if (reused) *reused = true;
+        return true;
+    }
+
+    binding.bindingId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    binding.candidateContentSha256 = candidate.contentSha256;
+    binding.boundAt = QDateTime::currentDateTimeUtc();
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into factor_candidate_dataset_bindings(binding_id, candidate_id, "
+        "candidate_version, candidate_content_sha256, factor_definition_sha256, "
+        "dataset_id, dataset_content_sha256, bound_at_utc) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(binding.bindingId);
+    insert.addBindValue(binding.candidateId);
+    insert.addBindValue(binding.candidateVersion);
+    insert.addBindValue(binding.candidateContentSha256);
+    insert.addBindValue(binding.factorDefinitionSha256);
+    insert.addBindValue(binding.datasetId);
+    insert.addBindValue(binding.datasetContentSha256);
+    insert.addBindValue(binding.boundAt.toString(Qt::ISODateWithMs));
+    if (!insert.exec()) {
+        if (error) *error = insert.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QVector<ExternalFactorDatasetBinding>
+SqliteLocalDataStore::loadExternalFactorDatasetBindings(
+    const QString &candidateId, int candidateVersion, int limit)
+{
+    QVector<ExternalFactorDatasetBinding> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select binding_id, candidate_content_sha256, factor_definition_sha256, "
+        "dataset_id, dataset_content_sha256, bound_at_utc "
+        "from factor_candidate_dataset_bindings where candidate_id=? "
+        "and candidate_version=? order by bound_at_utc desc, binding_id asc limit ?"));
+    query.addBindValue(candidateId);
+    query.addBindValue(candidateVersion);
+    query.addBindValue(std::clamp(limit, 1, 10000));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        ExternalFactorDatasetBinding binding;
+        binding.bindingId = query.value(0).toString();
+        binding.candidateId = candidateId;
+        binding.candidateVersion = candidateVersion;
+        binding.candidateContentSha256 = query.value(1).toString();
+        binding.factorDefinitionSha256 = query.value(2).toString();
+        binding.datasetId = query.value(3).toString();
+        binding.datasetContentSha256 = query.value(4).toString();
+        binding.boundAt = QDateTime::fromString(query.value(5).toString(),
+                                               Qt::ISODateWithMs);
+        result.append(binding);
+    }
+    return result;
+}
+
+bool SqliteLocalDataStore::saveExternalFactorResearchArchive(
+    ExternalFactorResearchArchiveRecord record, QString *error)
+{
+    if (error) error->clear();
+    if (record.identitySha256.isEmpty())
+        record.identitySha256 = record.computedIdentitySha256();
+    QString validationError;
+    if (!record.isValid(&validationError)) {
+        if (error) *error = validationError;
+        return false;
+    }
+
+    QSqlQuery binding(m_database);
+    binding.prepare(QStringLiteral(
+        "select c.content_sha256, c.frozen_at_utc, d.content_sha256, "
+        "d.factor_definition_sha256, d.factor_key "
+        "from factor_candidate_dataset_bindings b "
+        "join factor_candidate_versions c on c.candidate_id=b.candidate_id "
+        "and c.version=b.candidate_version "
+        "join external_factor_datasets d on d.dataset_id=b.dataset_id "
+        "where b.candidate_id=? and b.candidate_version=? and b.dataset_id=?"));
+    binding.addBindValue(record.candidateId);
+    binding.addBindValue(record.candidateVersion);
+    binding.addBindValue(record.datasetId);
+    if (!binding.exec() || !binding.next()) {
+        if (error) *error = QStringLiteral("研究归档缺少冻结候选与授权数据集绑定");
+        return false;
+    }
+    if (binding.value(1).toString().isEmpty()
+        || binding.value(0).toString() != record.candidateContentSha256
+        || binding.value(2).toString() != record.datasetContentSha256
+        || binding.value(3).toString() != record.factorDefinitionSha256
+        || binding.value(4).toString() != record.factorKey) {
+        if (error) *error = QStringLiteral("研究归档候选或授权数据身份不匹配");
+        return false;
+    }
+
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select identity_sha256 from external_factor_research_archives "
+        "where result_id=? or identity_sha256=?"));
+    existing.addBindValue(record.resultId);
+    existing.addBindValue(record.identitySha256);
+    if (!existing.exec()) {
+        if (error) *error = existing.lastError().text();
+        return false;
+    }
+    if (existing.next()) {
+        if (existing.value(0).toString() == record.identitySha256) return true;
+        if (error) *error = QStringLiteral("研究归档 ID 已存在但身份不同");
+        return false;
+    }
+
+    if (!m_database.transaction()) {
+        if (error) *error = m_database.lastError().text();
+        return false;
+    }
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into external_factor_research_archives("
+        "result_id, completed_at_utc, candidate_id, candidate_version, "
+        "dataset_id, factor_key, period_seconds, evaluated_frame_count, "
+        "mean_ic, mean_rank_ic, identity_sha256, record_json) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(record.resultId);
+    insert.addBindValue(record.completedAt.toUTC().toString(Qt::ISODateWithMs));
+    insert.addBindValue(record.candidateId);
+    insert.addBindValue(record.candidateVersion);
+    insert.addBindValue(record.datasetId);
+    insert.addBindValue(record.factorKey);
+    insert.addBindValue(record.periodSeconds);
+    insert.addBindValue(record.summary.evaluatedFrameCount);
+    insert.addBindValue(record.summary.meanIc);
+    insert.addBindValue(record.summary.meanRankIc);
+    insert.addBindValue(record.identitySha256);
+    insert.addBindValue(compactJson(record.toVariantMap()));
+    if (!insert.exec() || !m_database.commit()) {
+        const QString message = insert.lastError().text().isEmpty()
+            ? m_database.lastError().text() : insert.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    return true;
+}
+
+QVector<ExternalFactorResearchArchiveSummary>
+SqliteLocalDataStore::loadExternalFactorResearchArchiveSummaries(int limit)
+{
+    QVector<ExternalFactorResearchArchiveSummary> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select result_id, completed_at_utc, candidate_id, candidate_version, "
+        "dataset_id, factor_key, period_seconds, evaluated_frame_count, "
+        "mean_ic, mean_rank_ic, identity_sha256 "
+        "from external_factor_research_archives "
+        "order by completed_at_utc desc, result_id asc limit ?"));
+    query.addBindValue(std::clamp(limit, 1, 10000));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        ExternalFactorResearchArchiveSummary summary;
+        summary.resultId = query.value(0).toString();
+        summary.completedAt = QDateTime::fromString(
+            query.value(1).toString(), Qt::ISODateWithMs);
+        summary.candidateId = query.value(2).toString();
+        summary.candidateVersion = query.value(3).toInt();
+        summary.datasetId = query.value(4).toString();
+        summary.factorKey = query.value(5).toString();
+        summary.periodSeconds = query.value(6).toInt();
+        summary.evaluatedFrameCount = query.value(7).toInt();
+        summary.meanIc = query.value(8).toDouble();
+        summary.meanRankIc = query.value(9).toDouble();
+        summary.identitySha256 = query.value(10).toString();
+        result.append(summary);
+    }
+    return result;
+}
+
+std::optional<ExternalFactorResearchArchiveRecord>
+SqliteLocalDataStore::loadExternalFactorResearchArchive(
+    const QString &resultId)
+{
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select record_json, identity_sha256 "
+        "from external_factor_research_archives where result_id=?"));
+    query.addBindValue(resultId);
+    if (!query.exec() || !query.next()) return std::nullopt;
+    const auto record = ExternalFactorResearchArchiveRecord::fromVariantMap(
+        variantMapFromJson(query.value(0).toString()));
+    if (!record || record->identitySha256 != query.value(1).toString())
+        return std::nullopt;
+    return record;
+}
+
+bool SqliteLocalDataStore::saveRawTickParameterSensitivityResult(
+    const RawTickParameterSensitivityResult &record, QString *error)
+{
+    if (error) error->clear();
+    bool foldIdentityValid = record.analysisMode == QStringLiteral("single_holdout")
+        && record.walkForwardFoldCount == 1;
+    if (record.analysisMode == QStringLiteral("nested_walk_forward")
+        && record.walkForwardFoldCount >= 2
+        && record.folds.size() == record.walkForwardFoldCount) {
+        foldIdentityValid = true;
+        for (int index = 0; index < record.folds.size(); ++index) {
+            const RawTickParameterSensitivityFold &fold = record.folds.at(index);
+            const bool foldValid = fold.foldNumber == index + 1
+                && fold.trainingStartDate.isValid()
+                && fold.trainingEndDate >= fold.trainingStartDate
+                && fold.validationStartDate > fold.trainingEndDate
+                && fold.validationEndDate >= fold.validationStartDate
+                && fold.trainingActualTicks > 0
+                && fold.validationActualTicks > 0
+                && isSha256(fold.trainingDataVersion)
+                && isSha256(fold.validationDataVersion)
+                && !fold.selectedParameters.isEmpty()
+                && !fold.candidates.isEmpty();
+            if (!foldValid || (index > 0
+                && (fold.trainingStartDate != record.folds.first().trainingStartDate
+                    || fold.trainingEndDate != record.folds.at(index - 1)
+                                                   .validationEndDate
+                    || fold.validationStartDate
+                        <= record.folds.at(index - 1).validationEndDate))) {
+                foldIdentityValid = false;
+                break;
+            }
+        }
+        if (foldIdentityValid) {
+            const RawTickParameterSensitivityFold &finalFold = record.folds.last();
+            foldIdentityValid = record.trainingStartDate
+                    == finalFold.trainingStartDate
+                && record.trainingEndDate == finalFold.trainingEndDate
+                && record.validationStartDate == finalFold.validationStartDate
+                && record.validationEndDate == finalFold.validationEndDate
+                && record.trainingActualTicks == finalFold.trainingActualTicks
+                && record.validationActualTicks == finalFold.validationActualTicks
+                && record.trainingDataVersion == finalFold.trainingDataVersion
+                && record.validationDataVersion == finalFold.validationDataVersion
+                && record.selectedParameters == finalFold.selectedParameters;
+        }
+    }
+    const bool valid = !record.resultId.trimmed().isEmpty()
+        && record.completedAt.isValid()
+        && !record.strategyId.trimmed().isEmpty()
+        && !record.instrument.symbol.trimmed().isEmpty()
+        && record.instrument.market == Market::AShare
+        && record.initialCapital > 0.0 && record.commissionRate >= 0.0
+        && record.slippageRate >= 0.0 && record.lotSize > 0
+        && record.trainingStartDate.isValid()
+        && record.trainingEndDate >= record.trainingStartDate
+        && record.validationStartDate > record.trainingEndDate
+        && record.validationEndDate >= record.validationStartDate
+        && record.trainingActualTicks > 0 && record.validationActualTicks > 0
+        && isSha256(record.trainingDataVersion)
+        && isSha256(record.validationDataVersion)
+        && isSha256(record.datasetVersion)
+        && isSha256(record.candidateSetSha256)
+        && isSha256(record.identitySha256)
+        && !record.selectionCriterion.isEmpty()
+        && !record.selectedParameters.isEmpty()
+        && !record.candidates.isEmpty() && foldIdentityValid
+        && record.researchOnly;
+    if (!valid) {
+        if (error) {
+            *error = foldIdentityValid
+                ? QStringLiteral("原始 Tick 参数敏感性归档身份无效")
+                : QStringLiteral("原始 Tick 参数敏感性外层折身份无效");
+        }
+        return false;
+    }
+
+    QSqlQuery existing(m_database);
+    existing.prepare(QStringLiteral(
+        "select result_id, identity_sha256 from raw_tick_parameter_sensitivity_results "
+        "where result_id=? or identity_sha256=?"));
+    existing.addBindValue(record.resultId);
+    existing.addBindValue(record.identitySha256);
+    if (!existing.exec()) {
+        if (error) *error = existing.lastError().text();
+        return false;
+    }
+    if (existing.next()) {
+        const QString storedResultId = existing.value(0).toString();
+        const QString storedIdentity = existing.value(1).toString();
+        if (storedResultId == record.resultId
+            && storedIdentity == record.identitySha256) return true;
+        if (error) {
+            *error = storedIdentity == record.identitySha256
+                ? QStringLiteral("相同参数敏感性身份已归档为：%1")
+                      .arg(storedResultId)
+                : QStringLiteral("参数敏感性结果 ID 已存在但身份不同");
+        }
+        return false;
+    }
+
+    if (!m_database.transaction()) {
+        if (error) *error = m_database.lastError().text();
+        return false;
+    }
+    QSqlQuery insert(m_database);
+    insert.prepare(QStringLiteral(
+        "insert into raw_tick_parameter_sensitivity_results("
+        "result_id, completed_at_utc, strategy_id, symbol, training_start_date, "
+        "training_end_date, validation_start_date, validation_end_date, "
+        "candidate_count, validation_return_percent, dataset_version, "
+        "identity_sha256, record_json) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    insert.addBindValue(record.resultId);
+    insert.addBindValue(record.completedAt.toUTC().toString(Qt::ISODateWithMs));
+    insert.addBindValue(record.strategyId);
+    insert.addBindValue(record.instrument.symbol);
+    insert.addBindValue(record.trainingStartDate.toString(Qt::ISODate));
+    insert.addBindValue(record.trainingEndDate.toString(Qt::ISODate));
+    insert.addBindValue(record.validationStartDate.toString(Qt::ISODate));
+    insert.addBindValue(record.validationEndDate.toString(Qt::ISODate));
+    insert.addBindValue(record.candidates.size());
+    insert.addBindValue(record.validationSummary.totalReturnPercent);
+    insert.addBindValue(record.datasetVersion);
+    insert.addBindValue(record.identitySha256);
+    insert.addBindValue(compactJson(record.toVariantMap()));
+    if (!insert.exec() || !m_database.commit()) {
+        const QString message = insert.lastError().text().isEmpty()
+            ? m_database.lastError().text() : insert.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    return true;
+}
+
+QVector<RawTickParameterSensitivityResult>
+SqliteLocalDataStore::loadRawTickParameterSensitivityResults(int limit)
+{
+    QVector<RawTickParameterSensitivityResult> result;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select record_json, identity_sha256 "
+        "from raw_tick_parameter_sensitivity_results "
+        "order by completed_at_utc desc, result_id asc limit ?"));
+    query.addBindValue(std::clamp(limit, 1, 10000));
+    if (!query.exec()) return result;
+    while (query.next()) {
+        const auto record = RawTickParameterSensitivityResult::fromVariantMap(
+            variantMapFromJson(query.value(0).toString()));
+        if (record && record->identitySha256 == query.value(1).toString()) {
+            result.append(*record);
+        }
+    }
+    return result;
 }
 
 QHash<QDate, int> SqliteLocalDataStore::candleCountsByTradingDate(
@@ -1873,29 +4384,103 @@ QVector<TickDataBatchPlanItem> SqliteLocalDataStore::loadTickDataImportRunItems(
     return result;
 }
 
+QVector<RawTickImportDayAudit>
+SqliteLocalDataStore::loadRawTickImportDayAudits(
+    const Instrument &instrument, const QDate &startDate,
+    const QDate &endDate)
+{
+    QVector<RawTickImportDayAudit> result;
+    if (instrument.symbol.trimmed().isEmpty() || !startDate.isValid()
+        || !endDate.isValid() || startDate > endDate) return result;
+
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select a.trading_date, a.raw_content_sha256, a.audit_version, "
+        "a.lines_read, a.valid_records, a.skipped_records, "
+        "a.out_of_order_records, a.quality_status, a.source, a.audited_at_utc "
+        "from raw_tick_day_quality_audits a "
+        "join raw_tick_content_fingerprints f on f.symbol=a.symbol "
+        "and f.trading_date=a.trading_date "
+        "and f.content_sha256=a.raw_content_sha256 and f.dirty=0 "
+        "where a.symbol=? and a.trading_date>=? and a.trading_date<=? "
+        "and a.valid_records>0 "
+        "order by a.trading_date asc, a.audit_version desc, a.audited_at_utc desc"));
+    query.addBindValue(instrument.symbol.trimmed());
+    query.addBindValue(startDate.toString(Qt::ISODate));
+    query.addBindValue(endDate.toString(Qt::ISODate));
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取原始 Tick 逐日导入质量审计"));
+        return result;
+    }
+    QSet<QDate> selectedDates;
+    while (query.next()) {
+        const QDate date = QDate::fromString(query.value(0).toString(),
+                                             Qt::ISODate);
+        if (!date.isValid() || selectedDates.contains(date)) continue;
+        RawTickImportDayAudit audit;
+        audit.tradingDate = date;
+        audit.rawContentSha256 = query.value(1).toString();
+        audit.auditVersion = query.value(2).toInt();
+        audit.linesRead = query.value(3).toLongLong();
+        audit.validRecords = query.value(4).toLongLong();
+        audit.skippedRecords = query.value(5).toLongLong();
+        audit.outOfOrderRecords = query.value(6).toLongLong();
+        audit.qualityStatus = query.value(7).toString();
+        audit.source = query.value(8).toString();
+        audit.auditedAt = QDateTime::fromString(
+            query.value(9).toString(), Qt::ISODateWithMs);
+        if (!audit.isValid()) continue;
+        selectedDates.insert(date);
+        result.append(audit);
+    }
+    return result;
+}
+
 bool SqliteLocalDataStore::upsertBatchBacktestRun(
     const BatchBacktestRunSummary &summary)
 {
+    const bool rawMode = summary.dataMode == BacktestDataMode::RawTicks;
+    const bool legacyCountWindow = !rawMode && !summary.startDate.isValid()
+        && !summary.endDate.isValid() && summary.barCount >= 2;
+    const int walkForwardFoldCount = summary.holdoutTradingDays > 0
+        ? std::max(1, summary.walkForwardFoldCount) : 0;
     if (summary.runId.trimmed().isEmpty() || summary.strategyId.trimmed().isEmpty()
-        || summary.frequency.trimmed().isEmpty() || summary.periodSeconds <= 0
-        || summary.barCount < 2 || summary.totalSymbols <= 0) {
+        || summary.frequency.trimmed().isEmpty()
+        || (!legacyCountWindow
+            && (!summary.startDate.isValid() || !summary.endDate.isValid()
+                || summary.startDate > summary.endDate))
+        || (rawMode ? summary.periodSeconds != 0 : summary.periodSeconds <= 0)
+        || summary.barCount < 0 || summary.totalSymbols <= 0
+        || summary.holdoutTradingDays < 0
+        || summary.walkForwardFoldCount < 0
+        || walkForwardFoldCount > 20
+        || (summary.holdoutTradingDays == 0
+            && summary.walkForwardFoldCount > 0)
+        || (summary.holdoutTradingDays > 0
+            && (!rawMode || summary.holdoutTradingDays < 2))) {
         emit writeFailed(QStringLiteral("批量回测运行摘要不完整，未写入"));
         return false;
     }
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "insert into batch_backtest_runs(run_id, created_at_utc, completed_at_utc, strategy_id, "
-        "strategy_parameters_json, frequency, period_seconds, bar_count, initial_capital, "
-        "commission_rate, slippage_rate, lot_size, total_symbols, completed_symbols, "
+        "strategy_parameters_json, data_mode, start_date, end_date, frequency, "
+        "period_seconds, bar_count, initial_capital, "
+        "commission_rate, slippage_rate, lot_size, holdout_trading_days, "
+        "walk_forward_fold_count, "
+        "total_symbols, completed_symbols, "
         "succeeded_symbols, failed_symbols, status, error) "
-        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "on conflict(run_id) do update set completed_at_utc=excluded.completed_at_utc, "
         "strategy_id=excluded.strategy_id, "
         "strategy_parameters_json=excluded.strategy_parameters_json, "
+        "data_mode=excluded.data_mode, start_date=excluded.start_date, end_date=excluded.end_date, "
         "frequency=excluded.frequency, period_seconds=excluded.period_seconds, "
         "bar_count=excluded.bar_count, initial_capital=excluded.initial_capital, "
         "commission_rate=excluded.commission_rate, slippage_rate=excluded.slippage_rate, "
-        "lot_size=excluded.lot_size, total_symbols=excluded.total_symbols, "
+        "lot_size=excluded.lot_size, holdout_trading_days=excluded.holdout_trading_days, "
+        "walk_forward_fold_count=excluded.walk_forward_fold_count, "
+        "total_symbols=excluded.total_symbols, "
         "completed_symbols=excluded.completed_symbols, "
         "succeeded_symbols=excluded.succeeded_symbols, "
         "failed_symbols=excluded.failed_symbols, status=excluded.status, error=excluded.error"));
@@ -1905,6 +4490,9 @@ bool SqliteLocalDataStore::upsertBatchBacktestRun(
         ? summary.completedAt.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""));
     query.addBindValue(summary.strategyId);
     query.addBindValue(compactJson(summary.strategyParameters));
+    query.addBindValue(backtestDataModeCode(summary.dataMode));
+    query.addBindValue(summary.startDate.toString(Qt::ISODate));
+    query.addBindValue(summary.endDate.toString(Qt::ISODate));
     query.addBindValue(summary.frequency);
     query.addBindValue(summary.periodSeconds);
     query.addBindValue(summary.barCount);
@@ -1912,6 +4500,8 @@ bool SqliteLocalDataStore::upsertBatchBacktestRun(
     query.addBindValue(summary.commissionRate);
     query.addBindValue(summary.slippageRate);
     query.addBindValue(summary.lotSize);
+    query.addBindValue(summary.holdoutTradingDays);
+    query.addBindValue(walkForwardFoldCount);
     query.addBindValue(summary.totalSymbols);
     query.addBindValue(summary.completedSymbols);
     query.addBindValue(summary.succeededSymbols);
@@ -1964,8 +4554,11 @@ QVector<BatchBacktestRunSummary> SqliteLocalDataStore::loadBatchBacktestRuns(int
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "select run_id, created_at_utc, completed_at_utc, strategy_id, "
-        "strategy_parameters_json, frequency, period_seconds, bar_count, initial_capital, "
-        "commission_rate, slippage_rate, lot_size, total_symbols, completed_symbols, "
+        "strategy_parameters_json, data_mode, start_date, end_date, frequency, "
+        "period_seconds, bar_count, initial_capital, "
+        "commission_rate, slippage_rate, lot_size, holdout_trading_days, "
+        "walk_forward_fold_count, "
+        "total_symbols, completed_symbols, "
         "succeeded_symbols, failed_symbols, status, error "
         "from batch_backtest_runs order by created_at_utc desc, run_id desc limit ?"));
     query.addBindValue(std::max(1, limit));
@@ -1983,19 +4576,29 @@ QVector<BatchBacktestRunSummary> SqliteLocalDataStore::loadBatchBacktestRuns(int
         summary.strategyId = query.value(3).toString();
         summary.strategyParameters = QJsonDocument::fromJson(
             query.value(4).toString().toUtf8()).object().toVariantMap();
-        summary.frequency = query.value(5).toString();
-        summary.periodSeconds = query.value(6).toInt();
-        summary.barCount = query.value(7).toInt();
-        summary.initialCapital = query.value(8).toDouble();
-        summary.commissionRate = query.value(9).toDouble();
-        summary.slippageRate = query.value(10).toDouble();
-        summary.lotSize = query.value(11).toInt();
-        summary.totalSymbols = query.value(12).toInt();
-        summary.completedSymbols = query.value(13).toInt();
-        summary.succeededSymbols = query.value(14).toInt();
-        summary.failedSymbols = query.value(15).toInt();
-        summary.status = query.value(16).toString();
-        summary.error = query.value(17).toString();
+        summary.dataMode = query.value(5).toString() == QStringLiteral("raw_ticks")
+            ? BacktestDataMode::RawTicks : BacktestDataMode::Candles;
+        summary.startDate = QDate::fromString(query.value(6).toString(), Qt::ISODate);
+        summary.endDate = QDate::fromString(query.value(7).toString(), Qt::ISODate);
+        summary.frequency = query.value(8).toString();
+        summary.periodSeconds = query.value(9).toInt();
+        summary.barCount = query.value(10).toInt();
+        summary.initialCapital = query.value(11).toDouble();
+        summary.commissionRate = query.value(12).toDouble();
+        summary.slippageRate = query.value(13).toDouble();
+        summary.lotSize = query.value(14).toInt();
+        summary.holdoutTradingDays = query.value(15).toInt();
+        summary.walkForwardFoldCount = query.value(16).toInt();
+        if (summary.holdoutTradingDays > 0
+            && summary.walkForwardFoldCount == 0) {
+            summary.walkForwardFoldCount = 1;
+        }
+        summary.totalSymbols = query.value(17).toInt();
+        summary.completedSymbols = query.value(18).toInt();
+        summary.succeededSymbols = query.value(19).toInt();
+        summary.failedSymbols = query.value(20).toInt();
+        summary.status = query.value(21).toString();
+        summary.error = query.value(22).toString();
         result.append(summary);
     }
     return result;
@@ -2044,7 +4647,8 @@ QString positionsToJson(const QVector<PortfolioPosition> &positions)
             {QStringLiteral("lastPrice"), position.lastPrice},
             {QStringLiteral("marketValue"), position.marketValue},
             {QStringLiteral("weight"), position.weight},
-            {QStringLiteral("priceStale"), position.priceStale}});
+            {QStringLiteral("priceStale"), position.priceStale},
+            {QStringLiteral("marketStatus"), position.marketStatus}});
     }
     return QString::fromUtf8(
         QJsonDocument(array).toJson(QJsonDocument::Compact));
@@ -2071,6 +4675,8 @@ QVector<PortfolioPosition> positionsFromJson(const QString &json)
             object.value(QStringLiteral("weight")).toDouble();
         position.priceStale =
             object.value(QStringLiteral("priceStale")).toBool(false);
+        position.marketStatus = object.value(QStringLiteral("marketStatus"))
+            .toString(QStringLiteral("quoted"));
         result.append(position);
     }
     return result;
@@ -2092,25 +4698,517 @@ QStringList stringListFromJson(const QString &json)
     return result;
 }
 
+QString datasetIdentitiesToJson(
+    const QVector<BacktestDatasetIdentity> &identities)
+{
+    QJsonArray array;
+    for (const BacktestDatasetIdentity &identity : identities) {
+        const QJsonDocument document = QJsonDocument::fromJson(
+            identity.toJson().toUtf8());
+        if (document.isObject()) array.append(document.object());
+    }
+    return QString::fromUtf8(
+        QJsonDocument(array).toJson(QJsonDocument::Compact));
+}
+
+QVector<BacktestDatasetIdentity> datasetIdentitiesFromJson(
+    const QString &json)
+{
+    QVector<BacktestDatasetIdentity> result;
+    const QJsonArray array = QJsonDocument::fromJson(json.toUtf8()).array();
+    result.reserve(array.size());
+    for (const QJsonValue &value : array) {
+        if (!value.isObject()) return {};
+        BacktestDatasetIdentity identity;
+        const QString identityJson = QString::fromUtf8(
+            QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+        if (!identity.fromJson(identityJson)) return {};
+        result.append(identity);
+    }
+    return result;
+}
+
+bool validateCrossSectionalArchiveIdentity(const PortfolioResult &result,
+                                           QString *error)
+{
+    if (result.resultKind != QStringLiteral("cross_sectional")) return true;
+    const QString strategyId = result.immutableIdentity
+        .value(QStringLiteral("strategyId")).toString().trimmed();
+    const int strategyVersion = result.immutableIdentity
+        .value(QStringLiteral("strategyVersion")).toInt();
+    const QString definitionJson = result.immutableIdentity
+        .value(QStringLiteral("definitionJson")).toString().trimmed();
+    const int requestedBars = result.immutableIdentity
+        .value(QStringLiteral("requestedBars")).toInt();
+    const int actualBars = result.immutableIdentity
+        .value(QStringLiteral("actualBars")).toInt();
+    if (strategyId.isEmpty() || strategyVersion <= 0
+        || definitionJson.isEmpty() || requestedBars <= 0 || actualBars <= 0
+        || result.datasetIdentities.size() != result.definition.legs.size()
+        || result.datasetVersions.size() != result.datasetIdentities.size()) {
+        if (error) *error = QStringLiteral("不可变身份或腿级数据身份不完整");
+        return false;
+    }
+    for (int index = 0; index < result.datasetIdentities.size(); ++index) {
+        const BacktestDatasetIdentity &identity =
+            result.datasetIdentities.at(index);
+        if (identity.isEmpty() || !isSha256(identity.datasetVersion)
+            || result.datasetVersions.at(index) != identity.datasetVersion
+            || result.definition.legs.at(index).instrument.symbol
+                   != identity.instrument.symbol) {
+            if (error) *error = QStringLiteral("腿级数据身份无效或与组合定义不一致");
+            return false;
+        }
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool validateIndustryConstraintIdentity(const PortfolioResult &result,
+                                        QString *error)
+{
+    if (result.definition.maximumIndustryWeight <= 0.0) return true;
+    const QVariantMap industryIdentity = result.immutableIdentity
+        .value(QStringLiteral("industrySnapshot")).toMap();
+    const QString snapshotVersion = industryIdentity
+        .value(QStringLiteral("snapshotVersion")).toString();
+    if (industryIdentity.value(QStringLiteral("datasetId")).toString()
+            != result.definition.industryDatasetId
+        || !industryIdentity.value(QStringLiteral("coverageComplete")).toBool()
+        || !isSha256(snapshotVersion)
+        || result.riskSummary.industrySnapshotVersion != snapshotVersion) {
+        if (error) *error = QStringLiteral("行业约束身份不完整");
+        return false;
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool validateFactorExposureIdentity(const PortfolioResult &result,
+                                    QString *error)
+{
+    if (result.definition.maximumAbsoluteFactorExposure <= 0.0) return true;
+    if (result.resultKind != QStringLiteral("cross_sectional")) {
+        if (error) *error = QStringLiteral("因子暴露约束只适用于横截面结果");
+        return false;
+    }
+    const QVariantMap identity = result.immutableIdentity
+        .value(QStringLiteral("factorExposure")).toMap();
+    const QVariantMap definition = identity
+        .value(QStringLiteral("definition")).toMap();
+    const QByteArray definitionJson = QJsonDocument::fromVariant(definition)
+        .toJson(QJsonDocument::Compact);
+    const QString expectedSha256 = QStringLiteral("sha256:%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            definitionJson, QCryptographicHash::Sha256).toHex()));
+    const QString alias = identity.value(QStringLiteral("alias"))
+                              .toString().trimmed();
+    if (alias != result.definition.factorExposureAlias
+        || definition.value(QStringLiteral("alias")).toString() != alias
+        || identity.value(QStringLiteral("definitionSha256")).toString()
+               != expectedSha256
+        || !isSha256(expectedSha256)
+        || identity.value(QStringLiteral("standardization")).toString()
+               != QStringLiteral("population_zscore")
+        || identity.value(QStringLiteral("weighting")).toString()
+               != QStringLiteral("portfolio_equity_including_cash")
+        || identity.value(QStringLiteral("limitPolicy")).toString()
+               != QStringLiteral("proportional_de_risk_to_cash")
+        || result.riskSummary.factorExposureAlias != alias) {
+        if (error) *error = QStringLiteral("因子暴露约束身份不完整");
+        return false;
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool validateFactorResearchIdentity(const PortfolioResult &result,
+                                    QString *error)
+{
+    if (result.definition.factorResearchAlias.trimmed().isEmpty()) return true;
+    if (result.resultKind != QStringLiteral("cross_sectional")) {
+        if (error) *error = QStringLiteral("因子研究只适用于横截面结果");
+        return false;
+    }
+    const QVariantMap identity = result.immutableIdentity
+        .value(QStringLiteral("factorResearch")).toMap();
+    const FactorResearchSummary summary = FactorResearchSummary::fromVariantMap(
+        identity.value(QStringLiteral("summary")).toMap());
+    if (identity.value(QStringLiteral("factorId")).toString()
+            != result.definition.factorDefinitionId
+        || identity.value(QStringLiteral("factorVersion")).toInt()
+               != result.definition.factorDefinitionVersion
+        || identity.value(QStringLiteral("alias")).toString()
+               != result.definition.factorResearchAlias
+        || identity.value(QStringLiteral("definitionSha256")).toString()
+               != result.definition.factorDefinitionSha256
+        || !isSha256(result.definition.factorDefinitionSha256)
+        || identity.value(QStringLiteral("returnHorizon")).toString()
+               != QStringLiteral("next_aligned_frame")
+        || identity.value(QStringLiteral("returnCalculation")).toString()
+               != QStringLiteral("close_to_close")
+        || identity.value(QStringLiteral("frameAggregation")).toString()
+               != QStringLiteral("equal_weighted_mean")
+        || summary.factorId != result.definition.factorDefinitionId
+        || summary.factorVersion != result.definition.factorDefinitionVersion
+        || summary.factorAlias != result.definition.factorResearchAlias) {
+        if (error) *error = QStringLiteral("因子研究身份不完整");
+        return false;
+    }
+    const bool extendedResearch = !summary.timeSeries.isEmpty()
+        || !summary.quantileReturns.isEmpty()
+        || summary.icirAvailable || summary.rankIcirAvailable;
+    const QString methodVersion = identity.value(
+        QStringLiteral("researchMethodVersion")).toString();
+    if (extendedResearch
+        && ((methodVersion != QStringLiteral("factor_research_v2")
+             && methodVersion != QStringLiteral("factor_research_v3")
+             && methodVersion != QStringLiteral("factor_research_v4")
+             && methodVersion != QStringLiteral("factor_research_v5")
+             && methodVersion != QStringLiteral("factor_research_v6"))
+            || identity.value(QStringLiteral("icirConvention")).toString()
+                   != QStringLiteral("mean_over_sample_sd_unannualized")
+            || identity.value(QStringLiteral("quantileCount")).toInt()
+                   != summary.quantileCount
+            || summary.quantileCount != 5
+            || summary.quantileReturns.size() != summary.quantileCount
+            || identity.value(QStringLiteral("quantileMethod")).toString()
+                   != QStringLiteral("stable_factor_then_symbol_equal_count")
+            || identity.value(QStringLiteral("quantileAggregation")).toString()
+                   != QStringLiteral(
+                       "equal_weighted_within_frame_then_across_frames")
+            || identity.value(QStringLiteral("spreadDefinition")).toString()
+                   != QStringLiteral("q5_minus_q1"))) {
+        if (error) *error = QStringLiteral("因子研究方法身份不完整");
+        return false;
+    }
+    const bool turnoverCostResearch = methodVersion
+            == QStringLiteral("factor_research_v3")
+        || methodVersion == QStringLiteral("factor_research_v4")
+        || methodVersion == QStringLiteral("factor_research_v5")
+        || methodVersion == QStringLiteral("factor_research_v6")
+        || summary.turnoverObservationCount > 0
+        || summary.costPolicy.oneWayCostBps > 0.0;
+    const FactorResearchCostPolicy identityCost =
+        FactorResearchCostPolicy::fromVariantMap(
+            identity.value(QStringLiteral("costPolicy")).toMap());
+    const bool supportedCostMethod =
+        methodVersion == QStringLiteral("factor_research_v3")
+        || methodVersion == QStringLiteral("factor_research_v4")
+        || methodVersion == QStringLiteral("factor_research_v5")
+        || methodVersion == QStringLiteral("factor_research_v6");
+    if (turnoverCostResearch
+        && (!supportedCostMethod
+            || identity.value(QStringLiteral("turnoverConvention")).toString()
+                   != QStringLiteral("half_sum_absolute_weight_change")
+            || identity.value(QStringLiteral("initialFormation")).toString()
+                   != QStringLiteral("excluded")
+            || identity.value(QStringLiteral("costFormula")).toString()
+                   != QStringLiteral(
+                       "absolute_weight_change_times_one_way_cost_rate")
+            || std::abs(identityCost.oneWayCostBps
+                        - result.definition.factorResearchCost.oneWayCostBps)
+                   > 1e-12
+            || std::abs(summary.costPolicy.oneWayCostBps
+                        - result.definition.factorResearchCost.oneWayCostBps)
+                   > 1e-12)) {
+        if (error) *error = QStringLiteral("因子研究换手成本身份不完整");
+        return false;
+    }
+    if (methodVersion == QStringLiteral("factor_research_v5")
+        || methodVersion == QStringLiteral("factor_research_v6")) {
+        const int frameCount = summary.timeSeries.size();
+        const int expectedLag = frameCount >= 20
+            ? std::clamp(static_cast<int>(std::floor(
+                  4.0 * std::pow(static_cast<double>(frameCount) / 100.0,
+                                 2.0 / 9.0))),
+                         0, frameCount - 1)
+            : 0;
+        const auto validInference = [](bool available, double standardError,
+                                       double lower, double upper,
+                                       double pValue) {
+            return !available
+                || (std::isfinite(standardError) && standardError > 0.0
+                    && std::isfinite(lower) && std::isfinite(upper)
+                    && lower <= upper && std::isfinite(pValue)
+                    && pValue >= 0.0 && pValue <= 1.0);
+        };
+        int segmentFrames = 0;
+        for (const FactorTemporalSegment &segment : summary.temporalSegments)
+            segmentFrames += segment.frameCount;
+        if (identity.value(QStringLiteral("inferenceMethodVersion")).toString()
+                != QStringLiteral("newey_west_bartlett_v1")
+            || identity.value(QStringLiteral("inferenceMinimumFrames")).toInt()
+                   != 20
+            || std::abs(identity.value(QStringLiteral("confidenceLevel")).toDouble()
+                        - 0.95) > 1e-12
+            || identity.value(QStringLiteral("hacLagRule")).toString()
+                   != QStringLiteral(
+                       "floor_4_times_n_over_100_power_2_over_9")
+            || identity.value(QStringLiteral("temporalSegmentCount")).toInt()
+                   != 3
+            || identity.value(QStringLiteral("temporalSegmentMethod")).toString()
+                   != QStringLiteral("contiguous_equal_count")
+            || summary.inferenceFrameCount != frameCount
+            || summary.hacLag != expectedLag
+            || std::abs(summary.confidenceLevel - 0.95) > 1e-12
+            || !validInference(summary.icInferenceAvailable,
+                               summary.icMeanStandardError,
+                               summary.icConfidenceLower,
+                               summary.icConfidenceUpper,
+                               summary.icTwoSidedPValue)
+            || !validInference(summary.rankIcInferenceAvailable,
+                               summary.rankIcMeanStandardError,
+                               summary.rankIcConfidenceLower,
+                               summary.rankIcConfidenceUpper,
+                               summary.rankIcTwoSidedPValue)
+            || (frameCount < 20
+                && (summary.icInferenceAvailable
+                    || summary.rankIcInferenceAvailable))
+            || (frameCount >= 9
+                && (!summary.temporalStabilityAvailable
+                    || summary.temporalSegments.size() != 3
+                    || segmentFrames != frameCount))
+            || (frameCount < 9
+                && (summary.temporalStabilityAvailable
+                    || !summary.temporalSegments.isEmpty()))) {
+            if (error) *error = QStringLiteral("因子研究统计推断身份不完整");
+            return false;
+        }
+    }
+    if (methodVersion == QStringLiteral("factor_research_v6")) {
+        const FactorOutOfSampleSummary &outOfSample = summary.outOfSample;
+        const FactorOutOfSamplePolicy identityPolicy =
+            FactorOutOfSamplePolicy::fromVariantMap(
+                identity.value(QStringLiteral("outOfSamplePolicy")).toMap());
+        QString policyError;
+        const bool policyValid = identityPolicy.isValid(&policyError);
+        const int frameCount = summary.timeSeries.size();
+        const int expectedEvaluationFrames = policyValid && frameCount
+                >= identityPolicy.initialTrainingFrames
+                    + identityPolicy.evaluationFrames
+            ? ((frameCount - identityPolicy.initialTrainingFrames)
+               / identityPolicy.stepFrames) * identityPolicy.evaluationFrames
+            : 0;
+        const int expectedWindows = identityPolicy.evaluationFrames > 0
+            ? expectedEvaluationFrames / identityPolicy.evaluationFrames : 0;
+        const int expectedLag = expectedEvaluationFrames >= 20
+            ? std::clamp(static_cast<int>(std::floor(
+                  4.0 * std::pow(
+                      static_cast<double>(expectedEvaluationFrames) / 100.0,
+                      2.0 / 9.0))),
+                         0, expectedEvaluationFrames - 1)
+            : 0;
+        const auto validInference = [](bool available, double standardError,
+                                       double lower, double upper,
+                                       double pValue) {
+            return !available
+                || (std::isfinite(standardError) && standardError > 0.0
+                    && std::isfinite(lower) && std::isfinite(upper)
+                    && lower <= upper && std::isfinite(pValue)
+                    && pValue >= 0.0 && pValue <= 1.0);
+        };
+        bool seriesValid = true;
+        for (int index = 0; seriesValid && index < frameCount; ++index) {
+            const FactorResearchPoint &point = summary.timeSeries.at(index);
+            seriesValid = point.factorTimestamp.isValid()
+                && point.returnTimestamp.isValid()
+                && std::isfinite(point.ic) && std::isfinite(point.rankIc)
+                && (index == 0
+                    || summary.timeSeries.at(index - 1).factorTimestamp
+                           < point.factorTimestamp);
+        }
+        bool windowsValid = outOfSample.windows.size() == expectedWindows;
+        for (int index = 0; windowsValid && index < expectedWindows; ++index) {
+            const FactorOutOfSampleWindow &window =
+                outOfSample.windows.at(index);
+            const int trainingFrames = identityPolicy.initialTrainingFrames
+                + index * identityPolicy.stepFrames;
+            const int evaluationFrom = trainingFrames;
+            const int evaluationTo = evaluationFrom
+                + identityPolicy.evaluationFrames - 1;
+            windowsValid = window.window == index + 1
+                && window.trainingFrameCount == trainingFrames
+                && window.evaluationFrameCount
+                       == identityPolicy.evaluationFrames
+                && window.trainingFromFactorTimestamp
+                       == summary.timeSeries.first().factorTimestamp
+                && window.trainingToFactorTimestamp
+                       == summary.timeSeries.at(trainingFrames - 1)
+                              .factorTimestamp
+                && window.evaluationFromFactorTimestamp
+                       == summary.timeSeries.at(evaluationFrom).factorTimestamp
+                && window.evaluationToFactorTimestamp
+                       == summary.timeSeries.at(evaluationTo).factorTimestamp
+                && window.trainingToFactorTimestamp
+                       < window.evaluationFromFactorTimestamp
+                && std::isfinite(window.meanIc)
+                && std::isfinite(window.meanRankIc);
+        }
+        const bool shouldBeAvailable = expectedWindows > 0;
+        if (identity.value(QStringLiteral("outOfSampleMethodVersion")).toString()
+                != QStringLiteral("expanding_oos_v1")
+            || identity.value(
+                   QStringLiteral("outOfSampleInferenceMethodVersion")).toString()
+                   != QStringLiteral("newey_west_bartlett_v1")
+            || !policyValid
+            || identityPolicy.toVariantMap()
+                   != outOfSample.policy.toVariantMap()
+            || identity.value(QStringLiteral("outOfSamplePolicy")).toMap()
+                   != outOfSample.policy.toVariantMap()
+            || summary.toVariantMap()
+                   != result.factorResearchSummary.toVariantMap()
+            || !seriesValid
+            || outOfSample.totalFrameCount != frameCount
+            || outOfSample.available != shouldBeAvailable
+            || outOfSample.evaluationFrameCount != expectedEvaluationFrames
+            || outOfSample.inferenceFrameCount != expectedEvaluationFrames
+            || outOfSample.hacLag != expectedLag
+            || std::abs(outOfSample.confidenceLevel - 0.95) > 1e-12
+            || !windowsValid
+            || (shouldBeAvailable
+                && (outOfSample.evaluationFromFactorTimestamp
+                        != summary.timeSeries.at(
+                               identityPolicy.initialTrainingFrames)
+                               .factorTimestamp
+                    || outOfSample.evaluationToFactorTimestamp
+                        != summary.timeSeries.at(
+                               identityPolicy.initialTrainingFrames
+                               + expectedEvaluationFrames - 1)
+                               .factorTimestamp
+                    || !std::isfinite(outOfSample.meanIc)
+                    || !std::isfinite(outOfSample.meanRankIc)))
+            || (!shouldBeAvailable
+                && (outOfSample.availabilityReason.trimmed().isEmpty()
+                    || !outOfSample.windows.isEmpty()
+                    || outOfSample.icInferenceAvailable
+                    || outOfSample.rankIcInferenceAvailable))
+            || !validInference(outOfSample.icInferenceAvailable,
+                               outOfSample.icMeanStandardError,
+                               outOfSample.icConfidenceLower,
+                               outOfSample.icConfidenceUpper,
+                               outOfSample.icTwoSidedPValue)
+            || !validInference(outOfSample.rankIcInferenceAvailable,
+                               outOfSample.rankIcMeanStandardError,
+                               outOfSample.rankIcConfidenceLower,
+                               outOfSample.rankIcConfidenceUpper,
+                               outOfSample.rankIcTwoSidedPValue)
+            || (expectedEvaluationFrames < 20
+                && (outOfSample.icInferenceAvailable
+                    || outOfSample.rankIcInferenceAvailable))) {
+            if (error) *error = QStringLiteral("因子研究样本外身份不完整");
+            return false;
+        }
+    }
+    if (methodVersion == QStringLiteral("factor_research_v4")
+        || methodVersion == QStringLiteral("factor_research_v5")
+        || methodVersion == QStringLiteral("factor_research_v6")) {
+        const FactorNeutralizationPolicy identityPolicy =
+            FactorNeutralizationPolicy::fromVariantMap(
+                identity.value(QStringLiteral("neutralizationPolicy")).toMap());
+        QString policyError;
+        if (!identityPolicy.isValid(&policyError)
+            || identityPolicy.toVariantMap()
+                   != result.definition.factorNeutralization.toVariantMap()
+            || summary.neutralizationPolicy.toVariantMap()
+                   != result.definition.factorNeutralization.toVariantMap()
+            || identity.value(QStringLiteral("preprocessingOrder")).toString()
+                   != QStringLiteral(
+                       "pairwise_drop_then_global_winsorize_then_group_demean")) {
+            if (error) *error = QStringLiteral("因子研究中性化策略身份不完整");
+            return false;
+        }
+        if (identityPolicy.enabled()) {
+            const QVariantMap industryIdentity = result.immutableIdentity
+                .value(QStringLiteral("industrySnapshot")).toMap();
+            const QString snapshotVersion = industryIdentity
+                .value(QStringLiteral("snapshotVersion")).toString();
+            const QDate asOfDate = industryIdentity
+                .value(QStringLiteral("asOfDate")).toDate();
+            if (identity.value(QStringLiteral("neutralizationDatasetId")).toString()
+                    != result.definition.industryDatasetId
+                || identity.value(
+                       QStringLiteral("neutralizationSnapshotVersion")).toString()
+                       != snapshotVersion
+                || identity.value(QStringLiteral("neutralizationAsOfDate")).toDate()
+                       != asOfDate
+                || industryIdentity.value(QStringLiteral("datasetId")).toString()
+                       != result.definition.industryDatasetId
+                || !industryIdentity.value(
+                       QStringLiteral("coverageComplete")).toBool()
+                || !asOfDate.isValid() || !isSha256(snapshotVersion)
+                || result.riskSummary.industrySnapshotVersion
+                       != snapshotVersion) {
+                if (error) *error = QStringLiteral("因子研究行业快照身份不完整");
+                return false;
+            }
+        }
+    } else if (result.definition.factorNeutralization.enabled()) {
+        if (error) *error = QStringLiteral("因子研究中性化需要 v4/v5/v6 方法身份");
+        return false;
+    }
+    if (error) error->clear();
+    return true;
+}
+
 } // namespace
 
 bool SqliteLocalDataStore::savePortfolioBacktestArchive(
-    const PortfolioArchiveRecord &record)
+    const PortfolioArchiveRecord &record, QString *error)
 {
+    if (error) error->clear();
     const PortfolioResult &result = record.result;
     if (record.resultId.trimmed().isEmpty() || !record.completedAt.isValid()
         || !result.definition.isValid() || result.equityCurve.isEmpty()) {
-        emit writeFailed(QStringLiteral("组合回测结果身份不完整，未写入归档"));
+        const QString message = QStringLiteral("组合回测结果身份不完整，未写入归档");
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    }
+    QString crossSectionalIdentityError;
+    if (!validateCrossSectionalArchiveIdentity(
+            result, &crossSectionalIdentityError)) {
+        const QString message = QStringLiteral("横截面回测%1，未写入归档")
+                                    .arg(crossSectionalIdentityError);
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    }
+    QString industryIdentityError;
+    if (!validateIndustryConstraintIdentity(result, &industryIdentityError)) {
+        const QString message = QStringLiteral("组合%1，未写入归档")
+                                    .arg(industryIdentityError);
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    }
+    QString factorIdentityError;
+    if (!validateFactorExposureIdentity(result, &factorIdentityError)) {
+        const QString message = QStringLiteral("组合%1，未写入归档")
+                                    .arg(factorIdentityError);
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    }
+    QString factorResearchIdentityError;
+    if (!validateFactorResearchIdentity(result, &factorResearchIdentityError)) {
+        const QString message = QStringLiteral("组合%1，未写入归档")
+                                    .arg(factorResearchIdentityError);
+        if (error) *error = message;
+        emit writeFailed(message);
         return false;
     }
     if (!m_database.transaction()) {
+        if (error) *error = QStringLiteral("无法开始组合回测结果归档事务");
         emitSqlError(QStringLiteral("开始组合回测结果归档事务"));
         return false;
     }
-    auto fail = [this](const QString &operation, const QSqlQuery &query) {
+    auto fail = [this, error](const QString &operation, const QSqlQuery &query) {
         m_database.rollback();
-        emit writeFailed(QStringLiteral("%1失败：%2")
-                             .arg(operation, query.lastError().text()));
+        const QString message = QStringLiteral("%1失败：%2")
+                                    .arg(operation, query.lastError().text());
+        if (error) *error = message;
+        emit writeFailed(message);
         return false;
     };
 
@@ -2118,9 +5216,10 @@ bool SqliteLocalDataStore::savePortfolioBacktestArchive(
     resultQuery.prepare(QStringLiteral(
         "insert into portfolio_backtest_results(result_id, portfolio_id, name, "
         "completed_at_utc, definition_json, leg_count, period_seconds, bar_count, "
-        "dataset_versions_json, initial_capital, final_equity, total_return_percent, "
+        "dataset_versions_json, result_kind, immutable_identity_json, "
+        "dataset_identities_json, initial_capital, final_equity, total_return_percent, "
         "max_drawdown_percent, sharpe_ratio, total_commission, total_trades) "
-        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     resultQuery.addBindValue(record.resultId);
     resultQuery.addBindValue(result.definition.portfolioId);
     resultQuery.addBindValue(result.definition.name);
@@ -2130,6 +5229,9 @@ bool SqliteLocalDataStore::savePortfolioBacktestArchive(
     resultQuery.addBindValue(result.periodSeconds);
     resultQuery.addBindValue(result.equityCurve.size());
     resultQuery.addBindValue(stringListToJson(result.datasetVersions));
+    resultQuery.addBindValue(result.resultKind);
+    resultQuery.addBindValue(compactJson(result.immutableIdentity));
+    resultQuery.addBindValue(datasetIdentitiesToJson(result.datasetIdentities));
     resultQuery.addBindValue(result.summary.initialCapital);
     resultQuery.addBindValue(result.summary.finalEquity);
     resultQuery.addBindValue(result.summary.totalReturnPercent);
@@ -2179,6 +5281,7 @@ bool SqliteLocalDataStore::savePortfolioBacktestArchive(
 
     if (!m_database.commit()) {
         m_database.rollback();
+        if (error) *error = QStringLiteral("提交组合回测结果归档事务失败");
         emitSqlError(QStringLiteral("提交组合回测结果归档事务"));
         return false;
     }
@@ -2192,7 +5295,8 @@ SqliteLocalDataStore::loadPortfolioBacktestArchiveSummaries(int limit)
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "select result_id, portfolio_id, name, completed_at_utc, leg_count, "
-        "period_seconds, bar_count, dataset_versions_json, initial_capital, "
+        "period_seconds, bar_count, dataset_versions_json, result_kind, "
+        "immutable_identity_json, initial_capital, "
         "final_equity, total_return_percent, max_drawdown_percent, sharpe_ratio, "
         "total_commission, total_trades from portfolio_backtest_results "
         "order by completed_at_utc desc, result_id desc limit ?"));
@@ -2213,13 +5317,20 @@ SqliteLocalDataStore::loadPortfolioBacktestArchiveSummaries(int limit)
         summary.barCount = query.value(6).toInt();
         summary.datasetVersions =
             stringListFromJson(query.value(7).toString());
-        summary.summary.initialCapital = query.value(8).toDouble();
-        summary.summary.finalEquity = query.value(9).toDouble();
-        summary.summary.totalReturnPercent = query.value(10).toDouble();
-        summary.summary.maxDrawdownPercent = query.value(11).toDouble();
-        summary.summary.sharpeRatio = query.value(12).toDouble();
-        summary.summary.totalCommission = query.value(13).toDouble();
-        summary.summary.totalTrades = query.value(14).toInt();
+        summary.resultKind = query.value(8).toString();
+        const QVariantMap immutableIdentity =
+            variantMapFromJson(query.value(9).toString());
+        summary.strategyId = immutableIdentity
+            .value(QStringLiteral("strategyId")).toString();
+        summary.strategyVersion = immutableIdentity
+            .value(QStringLiteral("strategyVersion")).toInt();
+        summary.summary.initialCapital = query.value(10).toDouble();
+        summary.summary.finalEquity = query.value(11).toDouble();
+        summary.summary.totalReturnPercent = query.value(12).toDouble();
+        summary.summary.maxDrawdownPercent = query.value(13).toDouble();
+        summary.summary.sharpeRatio = query.value(14).toDouble();
+        summary.summary.totalCommission = query.value(15).toDouble();
+        summary.summary.totalTrades = query.value(16).toInt();
         result.append(summary);
     }
     return result;
@@ -2231,7 +5342,8 @@ SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
         "select portfolio_id, name, completed_at_utc, definition_json, "
-        "dataset_versions_json from portfolio_backtest_results where result_id = ?"));
+        "dataset_versions_json, result_kind, immutable_identity_json, "
+        "dataset_identities_json from portfolio_backtest_results where result_id = ?"));
     query.addBindValue(resultId);
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取组合回测归档身份"));
@@ -2279,8 +5391,75 @@ SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
         definitionMap.value(QStringLiteral("maximumLegWeight")).toDouble();
     definition.maximumActiveLegs =
         definitionMap.value(QStringLiteral("maximumActiveLegs")).toInt();
+    definition.maximumConsecutiveMissingBars = definitionMap
+        .value(QStringLiteral("maximumConsecutiveMissingBars")).toInt();
+    definition.maximumPortfolioLossPercent = definitionMap
+        .value(QStringLiteral("maximumPortfolioLossPercent")).toDouble();
+    definition.maximumPortfolioDrawdownPercent = definitionMap
+        .value(QStringLiteral("maximumPortfolioDrawdownPercent")).toDouble();
+    definition.maximumIndustryWeight = definitionMap
+        .value(QStringLiteral("maximumIndustryWeight")).toDouble();
+    definition.industryDatasetId = definitionMap
+        .value(QStringLiteral("industryDatasetId")).toString();
+    definition.factorExposureAlias = definitionMap
+        .value(QStringLiteral("factorExposureAlias")).toString();
+    definition.maximumAbsoluteFactorExposure = definitionMap
+        .value(QStringLiteral("maximumAbsoluteFactorExposure")).toDouble();
+    definition.factorResearchAlias = definitionMap
+        .value(QStringLiteral("factorResearchAlias")).toString();
+    definition.factorDefinitionId = definitionMap
+        .value(QStringLiteral("factorDefinitionId")).toString();
+    definition.factorDefinitionVersion = definitionMap
+        .value(QStringLiteral("factorDefinitionVersion")).toInt();
+    definition.factorDefinitionSha256 = definitionMap
+        .value(QStringLiteral("factorDefinitionSha256")).toString();
+    definition.factorPreprocessing = FactorPreprocessingPolicy::fromVariantMap(
+        definitionMap.value(QStringLiteral("factorPreprocessing")).toMap());
+    definition.factorResearchCost = FactorResearchCostPolicy::fromVariantMap(
+        definitionMap.value(QStringLiteral("factorResearchCost")).toMap());
+    definition.factorNeutralization =
+        FactorNeutralizationPolicy::fromVariantMap(
+            definitionMap.value(QStringLiteral("factorNeutralization")).toMap());
     record.result.datasetVersions =
         stringListFromJson(query.value(4).toString());
+    record.result.resultKind = query.value(5).toString();
+    record.result.immutableIdentity =
+        variantMapFromJson(query.value(6).toString());
+    record.result.riskSummary = PortfolioRiskSummary::fromVariantMap(
+        record.result.immutableIdentity
+            .value(QStringLiteral("riskSummary")).toMap());
+    record.result.factorResearchSummary = FactorResearchSummary::fromVariantMap(
+        record.result.immutableIdentity.value(QStringLiteral("factorResearch"))
+            .toMap().value(QStringLiteral("summary")).toMap());
+    record.result.datasetIdentities =
+        datasetIdentitiesFromJson(query.value(7).toString());
+    QString crossSectionalIdentityError;
+    if (!validateCrossSectionalArchiveIdentity(
+            record.result, &crossSectionalIdentityError)) {
+        emit writeFailed(QStringLiteral("横截面回测归档 %1 %2，拒绝恢复")
+                             .arg(resultId, crossSectionalIdentityError));
+        return std::nullopt;
+    }
+    QString industryIdentityError;
+    if (!validateIndustryConstraintIdentity(
+            record.result, &industryIdentityError)) {
+        emit writeFailed(QStringLiteral("组合回测归档 %1 %2，拒绝恢复")
+                             .arg(resultId, industryIdentityError));
+        return std::nullopt;
+    }
+    QString factorIdentityError;
+    if (!validateFactorExposureIdentity(record.result, &factorIdentityError)) {
+        emit writeFailed(QStringLiteral("组合回测归档 %1 %2，拒绝恢复")
+                             .arg(resultId, factorIdentityError));
+        return std::nullopt;
+    }
+    QString factorResearchIdentityError;
+    if (!validateFactorResearchIdentity(
+            record.result, &factorResearchIdentityError)) {
+        emit writeFailed(QStringLiteral("组合回测归档 %1 %2，拒绝恢复")
+                             .arg(resultId, factorResearchIdentityError));
+        return std::nullopt;
+    }
 
     QSqlQuery equityQuery(m_database);
     equityQuery.prepare(QStringLiteral(
@@ -2336,28 +5515,289 @@ SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
     return record;
 }
 
+bool SqliteLocalDataStore::materializeRawTickSnapshot(
+    const BacktestResult &deferredResult, BacktestResult *materializedResult,
+    QString *error)
+{
+    if (error) error->clear();
+    if (!materializedResult) return false;
+    const BacktestConfig &config = deferredResult.config;
+    if (config.dataMode != BacktestDataMode::RawTicks
+        || config.periodSeconds != 0 || config.frequency != QStringLiteral("tick")
+        || config.actualBars <= 0 || config.datasetIdentity.isEmpty()) {
+        if (error) *error = QStringLiteral("原始 Tick 归档身份不完整");
+        return false;
+    }
+    if (!deferredResult.rawTickSnapshotDeferred) {
+        if (deferredResult.rawTicks.size() != config.actualBars) {
+            if (error) *error = QStringLiteral("原始 Tick 归档快照不完整");
+            return false;
+        }
+        *materializedResult = deferredResult;
+        return true;
+    }
+    const BacktestDatasetIdentity &identity = config.datasetIdentity;
+    if (identity.rawTickTotal() != config.actualBars
+        || computeBacktestDatasetVersion(identity) != identity.datasetVersion
+        || !isSha256(config.dataVersion)) {
+        if (error) *error = QStringLiteral("原始 Tick 回测结果与数据集身份不一致");
+        return false;
+    }
+
+    const auto matches = [](const RawTickDayFingerprint &expected,
+                            const RawTradeFingerprint &current) {
+        if (current.count != expected.rawCount) return false;
+        return !expected.rawContentSha256.isEmpty()
+            ? current.contentSha256 == expected.rawContentSha256
+            : current.maximumId == expected.rawMaximumId;
+    };
+    QVector<RawTickDayFingerprint> days = identity.days;
+    std::sort(days.begin(), days.end(),
+              [](const RawTickDayFingerprint &left,
+                 const RawTickDayFingerprint &right) {
+        return left.tradingDate < right.tradingDate;
+    });
+
+    BacktestResult snapshot = deferredResult;
+    snapshot.rawTicks.clear();
+    snapshot.rawTicks.reserve(config.actualBars);
+    RawTickBacktestDataVersionBuilder dataVersionBuilder(
+        config.instrument.symbol);
+    bool dataVersionInputValid = true;
+    for (const RawTickDayFingerprint &day : days) {
+        const RawTradeFingerprint before = rawTradeFingerprint(
+            config.instrument, day.tradingDate);
+        if (!matches(day, before)) {
+            if (error) {
+                *error = QStringLiteral("归档拒绝：原始 Tick 身份已变化：%1")
+                             .arg(day.tradingDate.toString(Qt::ISODate));
+            }
+            return false;
+        }
+        const int startSize = snapshot.rawTicks.size();
+        const bool loaded = forEachRawTradeTick(
+            config.instrument, day.tradingDate,
+            [&snapshot, &dataVersionBuilder,
+             &dataVersionInputValid](const RawTradeTick &tick) {
+                if (!dataVersionBuilder.append(tick)) {
+                    dataVersionInputValid = false;
+                    return false;
+                }
+                snapshot.rawTicks.append(tick);
+                return true;
+            });
+        const RawTradeFingerprint after = rawTradeFingerprint(
+            config.instrument, day.tradingDate);
+        if (!loaded || !dataVersionInputValid
+            || snapshot.rawTicks.size() - startSize != day.rawCount
+            || !matches(day, after)) {
+            if (error) {
+                *error = QStringLiteral(
+                    "归档拒绝：原始 Tick 读取不完整或读取期间身份变化：%1")
+                             .arg(day.tradingDate.toString(Qt::ISODate));
+            }
+            return false;
+        }
+    }
+    const QString materializedDataVersion = dataVersionBuilder.finish();
+    if (materializedDataVersion != config.dataVersion) {
+        if (error) {
+            *error = QStringLiteral(
+                "归档拒绝：物化的原始 Tick 与执行数据版本不一致");
+        }
+        return false;
+    }
+    // 再校验一遍全部逐日身份，防止物化后续日期时较早日期被并发替换。
+    for (const RawTickDayFingerprint &day : days) {
+        if (!matches(day, rawTradeFingerprint(config.instrument, day.tradingDate))) {
+            if (error) {
+                *error = QStringLiteral("归档拒绝：物化期间数据集身份发生变化：%1")
+                             .arg(day.tradingDate.toString(Qt::ISODate));
+            }
+            return false;
+        }
+    }
+    if (snapshot.rawTicks.size() != config.actualBars
+        || snapshot.rawTicks.isEmpty()
+        || snapshot.rawTicks.first().timestamp != config.from
+        || snapshot.rawTicks.last().timestamp != config.to) {
+        if (error) *error = QStringLiteral("归档拒绝：原始 Tick 快照范围与已完成结果不一致");
+        return false;
+    }
+    snapshot.rawTickSnapshotDeferred = false;
+    *materializedResult = std::move(snapshot);
+    return true;
+}
+
 bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &record)
 {
+    return saveBacktestArchiveImpl(record, false, {}, nullptr);
+}
+
+bool SqliteLocalDataStore::saveDeferredRawTickBacktestArchive(
+    const BacktestArchiveRecord &record,
+    const std::function<void(qint64)> &residencyObserver,
+    QString *error)
+{
+    return saveBacktestArchiveImpl(record, true, residencyObserver, error);
+}
+
+bool SqliteLocalDataStore::saveBacktestArchiveImpl(
+    const BacktestArchiveRecord &record, bool allowDeferredRawSnapshot,
+    const std::function<void(qint64)> &residencyObserver,
+    QString *error)
+{
+    if (error) error->clear();
     const BacktestConfig &config = record.result.config;
+    const bool rawMode = config.dataMode == BacktestDataMode::RawTicks;
+    const bool deferredRawMode = rawMode && record.result.rawTickSnapshotDeferred;
+    const bool inputSnapshotComplete = rawMode
+        ? (deferredRawMode
+               ? allowDeferredRawSnapshot && record.result.rawTicks.isEmpty()
+                   && config.datasetIdentity.rawTickTotal() == config.actualBars
+                   && config.datasetIdentity.instrument.symbol
+                       == config.instrument.symbol
+                   && config.datasetIdentity.periodSeconds == 0
+                   && computeBacktestDatasetVersion(config.datasetIdentity)
+                       == config.datasetIdentity.datasetVersion
+               : record.result.rawTicks.size() == config.actualBars
+                   && !record.result.rawTickSnapshotDeferred)
+            && record.result.candles.isEmpty() && config.periodSeconds == 0
+            && config.frequency == QStringLiteral("tick")
+        : record.result.candles.size() == config.actualBars
+            && record.result.rawTicks.isEmpty() && config.periodSeconds > 0;
     if (record.resultId.trimmed().isEmpty() || config.taskId.trimmed().isEmpty()
         || !record.completedAt.isValid() || config.strategyId.trimmed().isEmpty()
         || config.instrument.symbol.trimmed().isEmpty() || config.frequency.trimmed().isEmpty()
         || config.actualBars <= 0 || record.result.equityCurve.isEmpty()
+        || !inputSnapshotComplete
         || !isSha256(config.dataVersion)
         || (!config.datasetIdentity.isEmpty()
             && !isSha256(config.datasetIdentity.datasetVersion))
         || (config.strategyId.startsWith(QStringLiteral("custom_"))
             && (config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()))) {
-        emit writeFailed(QStringLiteral("回测结果身份不完整，未写入归档"));
+        const QString message = QStringLiteral("回测结果身份不完整，未写入归档");
+        if (error) *error = message;
+        emit writeFailed(message);
         return false;
     }
+    const BacktestPosition &finalPosition = record.result.finalPosition;
+    const bool hasFinalPosition = finalPosition.quantity > 0.0;
+    // T+1 可使周期 K 与原始 Tick 回测都在样本末保留实际持仓；
+    // 持仓字段完整性不依赖输入数据模式，不能为归档而强平或清空。
+    if (!std::isfinite(finalPosition.quantity) || finalPosition.quantity < 0.0
+        || !std::isfinite(finalPosition.averagePrice)
+        || !std::isfinite(finalPosition.entryCommission)
+        || finalPosition.entryCommission < 0.0
+        || (hasFinalPosition
+            && (finalPosition.averagePrice <= 0.0
+                 || !finalPosition.entryTime.isValid()
+                 || finalPosition.entryTime > config.to))) {
+        const QString message = QStringLiteral("回测最终未平仓持仓无效，未写入归档");
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    }
+
+    QHash<QString, QVector<int>> rawIndexesByTimestamp;
+    if (rawMode && !deferredRawMode) {
+        QDateTime previousTime;
+        qint64 previousSourceLine = -1;
+        for (int index = 0; index < record.result.rawTicks.size(); ++index) {
+            const RawTradeTick &tick = record.result.rawTicks.at(index);
+            const bool ordered = previousTime.isNull() || tick.timestamp > previousTime
+                || (tick.timestamp == previousTime && tick.sourceLine >= previousSourceLine);
+            if (tick.instrument.symbol != config.instrument.symbol
+                || !tick.timestamp.isValid() || !tick.tradingDate.isValid()
+                || !std::isfinite(tick.price) || tick.price <= 0.0
+                || !std::isfinite(tick.volumeShares) || tick.volumeShares < 0.0
+                || !std::isfinite(tick.amount) || tick.amount < 0.0 || !ordered) {
+                emit writeFailed(QStringLiteral("回测原始 Tick 快照无效，未写入归档"));
+                return false;
+            }
+            previousTime = tick.timestamp;
+            previousSourceLine = tick.sourceLine;
+            rawIndexesByTimestamp[tick.timestamp.toUTC().toString(Qt::ISODateWithMs)]
+                .append(index);
+        }
+    }
+    QHash<QString, int> candleIndexByTimestamp;
+    QHash<QString, QVector<int>> deferredSignalIndexesByTimestamp;
+    QVector<int> signalIndexByCandle(record.result.candles.size(), -1);
+    QVector<int> signalIndexByRawTick(record.result.rawTicks.size(), -1);
+    QDateTime previousCandleTime;
+    for (int index = 0; index < record.result.candles.size(); ++index) {
+        const Candle &candle = record.result.candles.at(index);
+        const QString timestamp = candle.startTime.toUTC().toString(Qt::ISODateWithMs);
+        const bool pricesValid = std::isfinite(candle.open) && candle.open > 0.0
+            && std::isfinite(candle.high) && candle.high > 0.0
+            && std::isfinite(candle.low) && candle.low > 0.0
+            && std::isfinite(candle.close) && candle.close > 0.0
+            && candle.high >= std::max(candle.open, candle.close)
+            && candle.low <= std::min(candle.open, candle.close)
+            && candle.high >= candle.low;
+        const bool volumesValid = std::isfinite(candle.volume) && candle.volume >= 0.0
+            && std::isfinite(candle.buyVolume) && candle.buyVolume >= 0.0
+            && std::isfinite(candle.sellVolume) && candle.sellVolume >= 0.0
+            && std::isfinite(candle.neutralVolume) && candle.neutralVolume >= 0.0;
+        if (candle.instrument.symbol != config.instrument.symbol
+            || candle.periodSeconds != config.periodSeconds || !candle.startTime.isValid()
+            || (!previousCandleTime.isNull() && candle.startTime <= previousCandleTime)
+            || candleIndexByTimestamp.contains(timestamp) || !pricesValid || !volumesValid) {
+            emit writeFailed(QStringLiteral("回测 K 线快照无效，未写入归档"));
+            return false;
+        }
+        candleIndexByTimestamp.insert(timestamp, index);
+        previousCandleTime = candle.startTime;
+    }
+    for (int index = 0; index < record.result.chartSignals.size(); ++index) {
+        const TradeSignal &signal = record.result.chartSignals.at(index);
+        const QString timestamp = signal.timestamp.toUTC().toString(Qt::ISODateWithMs);
+        int rawIndex = -1;
+        if (rawMode && !deferredRawMode) {
+            const QVector<int> candidates = rawIndexesByTimestamp.value(timestamp);
+            for (const int candidate : candidates) {
+                if (signalIndexByRawTick.at(candidate) < 0) {
+                    rawIndex = candidate;
+                    break;
+                }
+            }
+        }
+        const auto candleIndex = candleIndexByTimestamp.constFind(timestamp);
+        if (signal.instrument.symbol != config.instrument.symbol || !signal.timestamp.isValid()
+            || !std::isfinite(signal.price) || signal.price <= 0.0
+            || !std::isfinite(signal.volume) || signal.volume < 0.0
+            || (rawMode ? (!deferredRawMode && rawIndex < 0)
+                        : candleIndex == candleIndexByTimestamp.constEnd()
+                            || signalIndexByCandle.at(*candleIndex) >= 0)) {
+            const QString message = QStringLiteral("回测图表信号快照无效，未写入归档");
+            if (error) *error = message;
+            emit writeFailed(message);
+            return false;
+        }
+        if (deferredRawMode) {
+            deferredSignalIndexesByTimestamp[timestamp].append(index);
+        } else if (rawMode) signalIndexByRawTick[rawIndex] = index;
+        else signalIndexByCandle[*candleIndex] = index;
+    }
     if (!m_database.transaction()) {
+        if (error) *error = QStringLiteral("开始回测结果归档事务失败：%1")
+                                .arg(m_database.lastError().text());
         emitSqlError(QStringLiteral("开始回测结果归档事务"));
         return false;
     }
-    auto fail = [this](const QString &operation, const QSqlQuery &query) {
+    auto fail = [this, error](const QString &operation, const QSqlQuery &query) {
         m_database.rollback();
-        emit writeFailed(QStringLiteral("%1失败：%2").arg(operation, query.lastError().text()));
+        const QString message = QStringLiteral("%1失败：%2")
+                                    .arg(operation, query.lastError().text());
+        if (error) *error = message;
+        emit writeFailed(message);
+        return false;
+    };
+    auto reject = [this, error](const QString &message) {
+        m_database.rollback();
+        if (error) *error = message;
+        emit writeFailed(message);
         return false;
     };
 
@@ -2373,9 +5813,12 @@ bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &reco
         "dataset_version, dataset_identity_json, dataset_raw_tick_count, "
         "dataset_derived_bar_count, dataset_day_count, dataset_first_date, dataset_last_date, "
         "dataset_gap_day_count, dataset_stale_day_count, dataset_calendar_source, "
-        "dataset_calendar_coverage_known) "
+        "dataset_calendar_coverage_known, candle_series_version, data_mode, "
+        "raw_tick_series_version, final_position_quantity, "
+        "final_position_average_price, final_position_entry_commission, "
+        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc) "
         "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     const PerformanceSummary &summary = record.result.summary;
     const BacktestDatasetIdentity &dataset = config.datasetIdentity;
     const QVariantList values {
@@ -2398,10 +5841,213 @@ bool SqliteLocalDataStore::saveBacktestArchive(const BacktestArchiveRecord &reco
             ? dataset.lastTradingDate.toString(Qt::ISODate) : QStringLiteral(""),
         dataset.gapDayCount, dataset.staleDayCount,
         dataset.calendarSource.isEmpty() ? QStringLiteral("") : dataset.calendarSource,
-        dataset.calendarCoverageKnown ? 1 : 0
+        dataset.calendarCoverageKnown ? 1 : 0, rawMode ? 0 : 1,
+        backtestDataModeCode(config.dataMode), rawMode ? 1 : 0,
+        hasFinalPosition ? finalPosition.quantity : 0.0,
+        hasFinalPosition ? finalPosition.averagePrice : 0.0,
+        hasFinalPosition ? finalPosition.entryCommission : 0.0,
+        hasFinalPosition
+            ? finalPosition.entryTime.toUTC().toString(Qt::ISODateWithMs)
+            : QStringLiteral(""),
+        hasFinalPosition ? finalPosition.entryReason : QStringLiteral(""),
+        config.sampleWindowKnown
+            ? QVariant(config.sampleFrom.isValid()
+                ? config.sampleFrom.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""))
+            : QVariant{},
+        config.sampleWindowKnown
+            ? QVariant(config.sampleTo.isValid()
+                ? config.sampleTo.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""))
+            : QVariant{}
     };
     for (const QVariant &value : values) resultQuery.addBindValue(value);
     if (!resultQuery.exec()) return fail(QStringLiteral("写入回测结果身份"), resultQuery);
+
+    QSqlQuery candleQuery(m_database);
+    candleQuery.prepare(QStringLiteral(
+        "insert into backtest_candles(result_id, sequence_no, start_time_utc, period_seconds, "
+        "open, high, low, close, volume, buy_volume, sell_volume, neutral_volume, "
+        "directional_volume_known, source, adjustment, downloaded_at_utc, has_signal, "
+        "signal_side, signal_price, signal_volume, signal_reason) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    for (int index = 0; index < record.result.candles.size(); ++index) {
+        const Candle &candle = record.result.candles.at(index);
+        const int signalIndex = signalIndexByCandle.at(index);
+        const bool hasSignal = signalIndex >= 0;
+        const TradeSignal signal = hasSignal
+            ? record.result.chartSignals.at(signalIndex) : TradeSignal{};
+        const QVariantList candleValues {
+            record.resultId, index,
+            candle.startTime.toUTC().toString(Qt::ISODateWithMs), candle.periodSeconds,
+            candle.open, candle.high, candle.low, candle.close, candle.volume,
+            candle.buyVolume, candle.sellVolume, candle.neutralVolume,
+            candle.directionalVolumeKnown ? 1 : 0, candle.source, candle.adjustment,
+            candle.downloadedAt.isValid()
+                ? candle.downloadedAt.toUTC().toString(Qt::ISODateWithMs)
+                : QStringLiteral(""),
+            hasSignal ? 1 : 0,
+            hasSignal ? QVariant::fromValue(static_cast<int>(signal.side)) : QVariant{},
+            hasSignal ? signal.price : 0.0, hasSignal ? signal.volume : 0.0,
+            hasSignal ? signal.reason : QStringLiteral("")
+        };
+        for (int column = 0; column < candleValues.size(); ++column)
+            candleQuery.bindValue(column, candleValues.at(column));
+        if (!candleQuery.exec())
+            return fail(QStringLiteral("写入回测 K 线与信号快照"), candleQuery);
+    }
+
+    QSqlQuery rawTickQuery(m_database);
+    rawTickQuery.prepare(QStringLiteral(
+        "insert into backtest_raw_ticks(result_id, sequence_no, timestamp_utc, trading_date, "
+        "source_line, price, volume_shares, amount, direction, source, has_signal, "
+        "signal_side, signal_price, signal_volume, signal_reason) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    const auto insertRawTick = [&](const RawTradeTick &tick, int index,
+                                   int signalIndex) {
+        const bool hasSignal = signalIndex >= 0;
+        const TradeSignal signal = hasSignal
+            ? record.result.chartSignals.at(signalIndex) : TradeSignal{};
+        const QVariantList tickValues {
+            record.resultId, index,
+            tick.timestamp.toUTC().toString(Qt::ISODateWithMs),
+            tick.tradingDate.toString(Qt::ISODate), tick.sourceLine,
+            tick.price, tick.volumeShares, tick.amount,
+            static_cast<int>(tick.direction), tick.source,
+            hasSignal ? 1 : 0,
+            hasSignal ? QVariant::fromValue(static_cast<int>(signal.side)) : QVariant{},
+            hasSignal ? signal.price : 0.0,
+            hasSignal ? signal.volume : 0.0,
+            hasSignal ? signal.reason : QStringLiteral("")
+        };
+        for (int column = 0; column < tickValues.size(); ++column) {
+            rawTickQuery.bindValue(column, tickValues.at(column));
+        }
+        return rawTickQuery.exec();
+    };
+    if (!deferredRawMode) {
+        for (int index = 0; index < record.result.rawTicks.size(); ++index) {
+            if (!insertRawTick(record.result.rawTicks.at(index), index,
+                               signalIndexByRawTick.at(index))) {
+                return fail(QStringLiteral("写入回测原始 Tick 与信号快照"),
+                            rawTickQuery);
+            }
+        }
+    } else {
+        const BacktestDatasetIdentity &identity = config.datasetIdentity;
+        QVector<RawTickDayFingerprint> days = identity.days;
+        std::sort(days.begin(), days.end(),
+                  [](const RawTickDayFingerprint &left,
+                     const RawTickDayFingerprint &right) {
+            return left.tradingDate < right.tradingDate;
+        });
+        const auto identityMatches = [](const RawTickDayFingerprint &expected,
+                                        const RawTradeFingerprint &current) {
+            if (current.count != expected.rawCount) return false;
+            return !expected.rawContentSha256.isEmpty()
+                ? current.contentSha256 == expected.rawContentSha256
+                : current.maximumId == expected.rawMaximumId;
+        };
+        QHash<QString, int> consumedSignalsByTimestamp;
+        RawTickBacktestDataVersionBuilder dataVersionBuilder(
+            config.instrument.symbol);
+        QDateTime firstTimestamp;
+        QDateTime lastTimestamp;
+        QDateTime previousTimestamp;
+        qint64 previousSourceLine = -1;
+        int writtenTicks = 0;
+        int matchedSignals = 0;
+        // 父记录、逐条原始事实、信号、权益与成交共用当前事务。事务中的首次
+        // 写入先锁定一致视图，逐日读取只保留当前 RawTradeTick；任何身份、
+        // 条数、范围、执行哈希或子表写入异常都会回滚父记录。
+        for (const RawTickDayFingerprint &day : days) {
+            const RawTradeFingerprint before = rawTradeFingerprint(
+                config.instrument, day.tradingDate);
+            if (!identityMatches(day, before)) {
+                return reject(QStringLiteral(
+                    "归档拒绝：原始 Tick 身份已变化：%1")
+                                  .arg(day.tradingDate.toString(Qt::ISODate)));
+            }
+            const int dayStartCount = writtenTicks;
+            bool residencyReported = false;
+            QString streamError;
+            const bool loaded = forEachRawTradeTick(
+                config.instrument, day.tradingDate,
+                [&](const RawTradeTick &tick) {
+                    if (!residencyReported && residencyObserver) {
+                        residencyReported = true;
+                        residencyObserver(1);
+                    }
+                    const bool ordered = !previousTimestamp.isValid()
+                        || tick.timestamp > previousTimestamp
+                        || (tick.timestamp == previousTimestamp
+                            && tick.sourceLine >= previousSourceLine);
+                    if (tick.instrument.symbol != config.instrument.symbol
+                        || tick.tradingDate != day.tradingDate
+                        || !tick.timestamp.isValid()
+                        || !std::isfinite(tick.price) || tick.price <= 0.0
+                        || !std::isfinite(tick.volumeShares)
+                        || tick.volumeShares < 0.0
+                        || !std::isfinite(tick.amount) || tick.amount < 0.0
+                        || !ordered || !dataVersionBuilder.append(tick)) {
+                        streamError = QStringLiteral(
+                            "归档拒绝：原始 Tick 流无效：%1")
+                                          .arg(day.tradingDate.toString(Qt::ISODate));
+                        return false;
+                    }
+                    const QString timestamp = tick.timestamp.toUTC().toString(
+                        Qt::ISODateWithMs);
+                    int signalIndex = -1;
+                    const QVector<int> signalIndexes =
+                        deferredSignalIndexesByTimestamp.value(timestamp);
+                    const int consumed = consumedSignalsByTimestamp.value(timestamp);
+                    if (consumed < signalIndexes.size()) {
+                        signalIndex = signalIndexes.at(consumed);
+                        consumedSignalsByTimestamp.insert(timestamp, consumed + 1);
+                        ++matchedSignals;
+                    }
+                    if (!insertRawTick(tick, writtenTicks, signalIndex)) {
+                        streamError = QStringLiteral(
+                            "写入回测原始 Tick 与信号快照失败：%1")
+                                          .arg(rawTickQuery.lastError().text());
+                        return false;
+                    }
+                    if (!firstTimestamp.isValid()) firstTimestamp = tick.timestamp;
+                    lastTimestamp = tick.timestamp;
+                    previousTimestamp = tick.timestamp;
+                    previousSourceLine = tick.sourceLine;
+                    ++writtenTicks;
+                    return true;
+                });
+            if (residencyReported && residencyObserver) residencyObserver(0);
+            const RawTradeFingerprint after = rawTradeFingerprint(
+                config.instrument, day.tradingDate);
+            if (!loaded || !streamError.isEmpty()
+                || writtenTicks - dayStartCount != day.rawCount
+                || !identityMatches(day, after)) {
+                if (streamError.isEmpty()) {
+                    streamError = QStringLiteral(
+                        "归档拒绝：原始 Tick 读取不完整或读取期间身份变化：%1")
+                                      .arg(day.tradingDate.toString(Qt::ISODate));
+                }
+                return reject(streamError);
+            }
+        }
+        const QString streamedDataVersion = dataVersionBuilder.finish();
+        if (writtenTicks != config.actualBars
+            || matchedSignals != record.result.chartSignals.size()
+            || firstTimestamp != config.from || lastTimestamp != config.to
+            || streamedDataVersion != config.dataVersion) {
+            return reject(QStringLiteral(
+                "归档拒绝：流式原始 Tick 快照与已完成结果身份不一致"));
+        }
+        for (const RawTickDayFingerprint &day : days) {
+            if (!identityMatches(
+                    day, rawTradeFingerprint(config.instrument, day.tradingDate))) {
+                return reject(QStringLiteral(
+                    "归档拒绝：流式写入期间数据集身份发生变化：%1")
+                                  .arg(day.tradingDate.toString(Qt::ISODate)));
+            }
+        }
+    }
 
     QSqlQuery equityQuery(m_database);
     equityQuery.prepare(QStringLiteral(
@@ -2504,7 +6150,7 @@ QVector<BacktestArchiveSummary> SqliteLocalDataStore::loadBacktestArchiveSummari
 }
 
 std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
-    const QString &resultId)
+    const QString &resultId, BacktestArchiveLoadMode mode)
 {
     QSqlQuery query(m_database);
     query.prepare(QStringLiteral(
@@ -2513,7 +6159,11 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         "requested_bars, actual_bars, from_utc, to_utc, initial_capital, commission_rate, "
         "slippage_rate, lot_size, summary_initial_capital, final_equity, total_return_percent, "
         "max_drawdown_percent, win_rate_percent, sharpe_ratio, total_commission, total_trades, "
-        "winning_trades, losing_trades, dataset_identity_json from backtest_results "
+        "winning_trades, losing_trades, dataset_identity_json, candle_series_version, "
+        "data_mode, raw_tick_series_version, final_position_quantity, "
+        "final_position_average_price, final_position_entry_commission, "
+        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc "
+        "from backtest_results "
         "where result_id = ?"));
     query.addBindValue(resultId);
     if (!query.exec()) {
@@ -2540,6 +6190,19 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     config.actualBars = query.value(14).toInt();
     config.from = QDateTime::fromString(query.value(15).toString(), Qt::ISODateWithMs);
     config.to = QDateTime::fromString(query.value(16).toString(), Qt::ISODateWithMs);
+    const QString sampleFromText = query.value(40).toString();
+    const QString sampleToText = query.value(41).toString();
+    config.sampleFrom = QDateTime::fromString(sampleFromText, Qt::ISODateWithMs);
+    config.sampleTo = QDateTime::fromString(sampleToText, Qt::ISODateWithMs);
+    config.sampleWindowKnown = !query.value(40).isNull() && !query.value(41).isNull();
+    if ((!sampleFromText.isEmpty() && !config.sampleFrom.isValid())
+        || (!sampleToText.isEmpty() && !config.sampleTo.isValid())
+        || (config.sampleFrom.isValid() && config.sampleTo.isValid()
+            && config.sampleFrom > config.sampleTo)) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的请求样本窗无效，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
     config.initialCapital = query.value(17).toDouble();
     config.commissionRate = query.value(18).toDouble();
     config.slippageRate = query.value(19).toDouble();
@@ -2559,6 +6222,169 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     if (!datasetJson.isEmpty()) {
         BacktestDatasetIdentity dataset;
         if (dataset.fromJson(datasetJson)) config.datasetIdentity = dataset;
+    }
+    const int candleSeriesVersion = query.value(32).toInt();
+    config.dataMode = query.value(33).toString() == QStringLiteral("raw_ticks")
+        ? BacktestDataMode::RawTicks : BacktestDataMode::Candles;
+    const int rawTickSeriesVersion = query.value(34).toInt();
+    BacktestPosition &finalPosition = record.result.finalPosition;
+    finalPosition.quantity = query.value(35).toDouble();
+    finalPosition.averagePrice = query.value(36).toDouble();
+    finalPosition.entryCommission = query.value(37).toDouble();
+    finalPosition.entryTime = QDateTime::fromString(
+        query.value(38).toString(), Qt::ISODateWithMs);
+    finalPosition.entryReason = query.value(39).toString();
+    if (!std::isfinite(finalPosition.quantity) || finalPosition.quantity < 0.0
+        || !std::isfinite(finalPosition.averagePrice)
+        || !std::isfinite(finalPosition.entryCommission)
+        || finalPosition.entryCommission < 0.0
+        || (finalPosition.quantity > 0.0
+            && (finalPosition.averagePrice <= 0.0
+                || !finalPosition.entryTime.isValid()
+                || finalPosition.entryTime > config.to))) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的最终未平仓持仓无效，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+
+    QSqlQuery candleQuery(m_database);
+    candleQuery.prepare(QStringLiteral(
+        "select start_time_utc, period_seconds, open, high, low, close, volume, "
+        "buy_volume, sell_volume, neutral_volume, directional_volume_known, source, adjustment, "
+        "downloaded_at_utc, has_signal, signal_side, signal_price, signal_volume, signal_reason "
+        "from backtest_candles where result_id = ? order by sequence_no asc"));
+    candleQuery.addBindValue(resultId);
+    if (!candleQuery.exec()) {
+        emitSqlError(QStringLiteral("读取回测 K 线与信号快照"));
+        return std::nullopt;
+    }
+    while (candleQuery.next()) {
+        Candle candle;
+        candle.instrument = config.instrument;
+        candle.startTime = QDateTime::fromString(candleQuery.value(0).toString(),
+                                                 Qt::ISODateWithMs);
+        candle.periodSeconds = candleQuery.value(1).toInt();
+        candle.open = candleQuery.value(2).toDouble();
+        candle.high = candleQuery.value(3).toDouble();
+        candle.low = candleQuery.value(4).toDouble();
+        candle.close = candleQuery.value(5).toDouble();
+        candle.volume = candleQuery.value(6).toDouble();
+        candle.buyVolume = candleQuery.value(7).toDouble();
+        candle.sellVolume = candleQuery.value(8).toDouble();
+        candle.neutralVolume = candleQuery.value(9).toDouble();
+        candle.directionalVolumeKnown = candleQuery.value(10).toBool();
+        candle.source = candleQuery.value(11).toString();
+        candle.adjustment = candleQuery.value(12).toString();
+        candle.downloadedAt = QDateTime::fromString(candleQuery.value(13).toString(),
+                                                    Qt::ISODateWithMs);
+        record.result.candles.append(candle);
+        if (candleQuery.value(14).toBool()) {
+            TradeSignal signal;
+            signal.instrument = config.instrument;
+            signal.timestamp = candle.startTime;
+            signal.side = static_cast<SignalSide>(candleQuery.value(15).toInt());
+            signal.price = candleQuery.value(16).toDouble();
+            signal.volume = candleQuery.value(17).toDouble();
+            signal.reason = candleQuery.value(18).toString();
+            record.result.chartSignals.append(signal);
+        }
+    }
+    if (candleSeriesVersion > 0
+        && record.result.candles.size() != config.actualBars) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的 K 线快照不完整，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+
+    if (rawTickSeriesVersion > 0) {
+        QSqlQuery rawTickMetadataQuery(m_database);
+        rawTickMetadataQuery.prepare(QStringLiteral(
+            "select count(*), min(sequence_no), max(sequence_no), "
+            "sum(case when has_signal <> 0 then 1 else 0 end) "
+            "from backtest_raw_ticks where result_id = ?"));
+        rawTickMetadataQuery.addBindValue(resultId);
+        if (!rawTickMetadataQuery.exec() || !rawTickMetadataQuery.next()) {
+            emitSqlError(QStringLiteral("读取回测原始 Tick 快照元数据"));
+            return std::nullopt;
+        }
+        const int storedTickCount = rawTickMetadataQuery.value(0).toInt();
+        const int firstSequence = rawTickMetadataQuery.value(1).toInt();
+        const int lastSequence = rawTickMetadataQuery.value(2).toInt();
+        const int storedSignalCount = rawTickMetadataQuery.value(3).toInt();
+        if (storedTickCount != config.actualBars || firstSequence != 0
+            || lastSequence != config.actualBars - 1) {
+            emit writeFailed(QStringLiteral(
+                "回测归档 %1 的原始 Tick 快照不完整，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+        record.result.rawTickSnapshotAvailable = true;
+
+        if (mode == BacktestArchiveLoadMode::CompleteInputSnapshot) {
+            QSqlQuery rawTickQuery(m_database);
+            rawTickQuery.setForwardOnly(true);
+            rawTickQuery.prepare(QStringLiteral(
+                "select timestamp_utc, trading_date, source_line, price, volume_shares, amount, "
+                "direction, source from backtest_raw_ticks where result_id = ? "
+                "order by sequence_no asc"));
+            rawTickQuery.addBindValue(resultId);
+            if (!rawTickQuery.exec()) {
+                emitSqlError(QStringLiteral("读取完整回测原始 Tick 快照"));
+                return std::nullopt;
+            }
+            record.result.rawTicks.reserve(storedTickCount);
+            while (rawTickQuery.next()) {
+                RawTradeTick tick;
+                tick.instrument = config.instrument;
+                tick.timestamp = QDateTime::fromString(
+                    rawTickQuery.value(0).toString(), Qt::ISODateWithMs);
+                tick.tradingDate = QDate::fromString(
+                    rawTickQuery.value(1).toString(), Qt::ISODate);
+                tick.sourceLine = rawTickQuery.value(2).toLongLong();
+                tick.price = rawTickQuery.value(3).toDouble();
+                tick.volumeShares = rawTickQuery.value(4).toDouble();
+                tick.amount = rawTickQuery.value(5).toDouble();
+                tick.direction = static_cast<RawTradeDirection>(
+                    rawTickQuery.value(6).toInt());
+                tick.source = rawTickQuery.value(7).toString();
+                record.result.rawTicks.append(tick);
+            }
+            if (record.result.rawTicks.size() != storedTickCount) {
+                emit writeFailed(QStringLiteral(
+                    "回测归档 %1 的原始 Tick 快照读取不完整，拒绝恢复")
+                                     .arg(resultId));
+                return std::nullopt;
+            }
+            record.result.rawTickSnapshotLoaded = true;
+        }
+
+        QSqlQuery rawSignalQuery(m_database);
+        rawSignalQuery.prepare(QStringLiteral(
+            "select timestamp_utc, signal_side, signal_price, signal_volume, signal_reason "
+            "from backtest_raw_ticks where result_id = ? and has_signal <> 0 "
+            "order by sequence_no asc"));
+        rawSignalQuery.addBindValue(resultId);
+        if (!rawSignalQuery.exec()) {
+            emitSqlError(QStringLiteral("读取回测原始 Tick 信号快照"));
+            return std::nullopt;
+        }
+        while (rawSignalQuery.next()) {
+            TradeSignal signal;
+            signal.instrument = config.instrument;
+            signal.timestamp = QDateTime::fromString(
+                rawSignalQuery.value(0).toString(), Qt::ISODateWithMs);
+            signal.side = static_cast<SignalSide>(rawSignalQuery.value(1).toInt());
+            signal.price = rawSignalQuery.value(2).toDouble();
+            signal.volume = rawSignalQuery.value(3).toDouble();
+            signal.reason = rawSignalQuery.value(4).toString();
+            record.result.chartSignals.append(signal);
+        }
+        if (record.result.chartSignals.size() != storedSignalCount) {
+            emit writeFailed(QStringLiteral(
+                "回测归档 %1 的原始 Tick 信号快照读取不完整，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
     }
 
     QSqlQuery equityQuery(m_database);
@@ -2612,7 +6438,96 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         emit writeFailed(QStringLiteral("回测归档 %1 缺少权益曲线，拒绝恢复").arg(resultId));
         return std::nullopt;
     }
+    record.result.equityObservationCount = config.actualBars;
+    record.result.equityCurveSampled = config.dataMode == BacktestDataMode::RawTicks
+        && record.result.equityCurve.size() < record.result.equityObservationCount;
     return record;
+}
+
+std::optional<BacktestRawTickPage>
+SqliteLocalDataStore::loadBacktestRawTickPage(
+    const QString &resultId, int offset, int pageSize)
+{
+    constexpr int kMaximumArchiveRawTickPageSize = 4096;
+    if (resultId.trimmed().isEmpty() || offset < 0 || pageSize <= 0
+        || pageSize > kMaximumArchiveRawTickPageSize) {
+        emit writeFailed(QStringLiteral(
+            "回测归档原始 Tick 分页参数无效（每页最多 %1 条）")
+                             .arg(kMaximumArchiveRawTickPageSize));
+        return std::nullopt;
+    }
+
+    QSqlQuery identityQuery(m_database);
+    identityQuery.prepare(QStringLiteral(
+        "select symbol, name, market, venue, actual_bars, data_mode, "
+        "raw_tick_series_version from backtest_results where result_id = ?"));
+    identityQuery.addBindValue(resultId);
+    if (!identityQuery.exec()) {
+        emitSqlError(QStringLiteral("读取分页回测原始 Tick 身份"));
+        return std::nullopt;
+    }
+    if (!identityQuery.next()
+        || identityQuery.value(5).toString() != QStringLiteral("raw_ticks")
+        || identityQuery.value(6).toInt() <= 0) {
+        return std::nullopt;
+    }
+
+    BacktestRawTickPage page;
+    page.resultId = resultId;
+    page.instrument = {identityQuery.value(0).toString(),
+                       identityQuery.value(1).toString(),
+                       static_cast<Market>(identityQuery.value(2).toInt()),
+                       identityQuery.value(3).toString()};
+    const int expectedTotal = identityQuery.value(4).toInt();
+    if (expectedTotal <= 0) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的原始 Tick 身份无效")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+    // 轻量结果恢复已对整段 count/min/max 做一次完整性校验。分页读取只按父记录
+    // 的不可变 actualBars 验证当前窗口，避免每翻一页都重新扫描全部子表。
+    page.totalCount = expectedTotal;
+    page.offset = offset;
+
+    QSqlQuery pageQuery(m_database);
+    pageQuery.setForwardOnly(true);
+    pageQuery.prepare(QStringLiteral(
+        "select timestamp_utc, trading_date, source_line, price, volume_shares, amount, "
+        "direction, source from backtest_raw_ticks where result_id = ? "
+        "order by sequence_no asc limit ? offset ?"));
+    pageQuery.addBindValue(resultId);
+    pageQuery.addBindValue(pageSize);
+    pageQuery.addBindValue(offset);
+    if (!pageQuery.exec()) {
+        emitSqlError(QStringLiteral("分页读取回测原始 Tick 快照"));
+        return std::nullopt;
+    }
+    page.ticks.reserve(std::min(pageSize, std::max(0, page.totalCount - offset)));
+    while (pageQuery.next()) {
+        RawTradeTick tick;
+        tick.instrument = page.instrument;
+        tick.timestamp = QDateTime::fromString(
+            pageQuery.value(0).toString(), Qt::ISODateWithMs);
+        tick.tradingDate = QDate::fromString(
+            pageQuery.value(1).toString(), Qt::ISODate);
+        tick.sourceLine = pageQuery.value(2).toLongLong();
+        tick.price = pageQuery.value(3).toDouble();
+        tick.volumeShares = pageQuery.value(4).toDouble();
+        tick.amount = pageQuery.value(5).toDouble();
+        tick.direction = static_cast<RawTradeDirection>(pageQuery.value(6).toInt());
+        tick.source = pageQuery.value(7).toString();
+        page.ticks.append(tick);
+    }
+    const int expectedPageCount = std::min(
+        pageSize, std::max(0, page.totalCount - offset));
+    if (page.ticks.size() != expectedPageCount) {
+        emit writeFailed(QStringLiteral(
+            "回测归档 %1 的原始 Tick 分页读取不完整")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+    page.hasMore = offset + page.ticks.size() < page.totalCount;
+    return page;
 }
 
 bool SqliteLocalDataStore::saveValidationRun(const ValidationRun &run)
@@ -2629,9 +6544,9 @@ bool SqliteLocalDataStore::saveValidationRun(const ValidationRun &run)
     query.addBindValue(run.instrumentSymbol);
     query.addBindValue(run.periodSeconds);
     query.addBindValue(run.sampleFrom.isValid()
-                           ? run.sampleFrom.toString(Qt::ISODateWithMs) : QString());
+                           ? run.sampleFrom.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""));
     query.addBindValue(run.sampleTo.isValid()
-                           ? run.sampleTo.toString(Qt::ISODateWithMs) : QString());
+                           ? run.sampleTo.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""));
     query.addBindValue(run.requestedBars);
     query.addBindValue(run.totalReturnPercent);
     query.addBindValue(run.maxDrawdownPercent);
@@ -2639,7 +6554,8 @@ bool SqliteLocalDataStore::saveValidationRun(const ValidationRun &run)
     query.addBindValue(run.totalTrades);
     query.addBindValue(run.completedAt.toString(Qt::ISODateWithMs));
     if (!query.exec()) {
-        emitSqlError(QStringLiteral("保存回测验证记录"));
+        emit writeFailed(QStringLiteral("保存回测验证记录失败：%1")
+                             .arg(query.lastError().text()));
         return false;
     }
     return true;
@@ -3210,11 +7126,191 @@ bool SqliteLocalDataStore::ensureSchema()
             "create index if not exists idx_raw_trade_symbol_day_time "
             "on raw_trade_ticks(symbol, trading_date, timestamp_utc, source_line)"),
         QStringLiteral(
+            "create index if not exists idx_raw_trade_content_order "
+            "on raw_trade_ticks(symbol, trading_date, timestamp_utc, source, source_line, id)"),
+        QStringLiteral(
+            "create table if not exists ashare_instrument_day_status("
+            "symbol text not null, name text not null default '', venue text not null default '', "
+            "trading_date text not null, state integer not null, reason text not null default '', "
+            "source text not null, source_version text not null, updated_at_utc text not null, "
+            "import_run_id text not null default '', "
+            "primary key(symbol, trading_date), "
+            "check(state in (1, 2)))"),
+        QStringLiteral(
+            "create table if not exists ashare_instrument_day_import_runs("
+            "run_id text primary key, imported_at_utc text not null, "
+            "file_name text not null, source text not null, source_version text not null, "
+            "content_sha256 text not null, lines_read integer not null, "
+            "record_count integer not null, first_date text not null, last_date text not null, "
+            "new_record_count integer not null default 0, "
+            "unchanged_record_count integer not null default 0, "
+            "corrected_record_count integer not null default 0, "
+            "revision_reason text not null default '', "
+            "status text not null, error text not null default '', "
+            "unique(source, source_version, content_sha256), "
+            "check(source in ('SSE', 'SZSE')))"),
+        QStringLiteral(
+            "create table if not exists ashare_instrument_day_import_items("
+            "run_id text not null, sequence integer not null, "
+            "symbol text not null, name text not null default '', "
+            "venue text not null default '', trading_date text not null, "
+            "state integer not null, reason text not null default '', "
+            "source text not null, source_version text not null, "
+            "change_kind text not null, previous_import_run_id text not null default '', "
+            "primary key(run_id, sequence), unique(run_id, symbol, trading_date), "
+            "foreign key(run_id) references ashare_instrument_day_import_runs(run_id) on delete restrict, "
+            "check(state in (1, 2)), "
+            "check(change_kind in ('new', 'unchanged', 'corrected')))"),
+        QStringLiteral(
+            "create index if not exists idx_ashare_day_status_date "
+            "on ashare_instrument_day_status(trading_date, symbol)"),
+        QStringLiteral(
+            "create table if not exists ashare_industry_datasets("
+            "dataset_id text primary key, classification text not null, "
+            "source text not null, source_version text not null, "
+            "content_sha256 text not null, imported_at_utc text not null, "
+            "record_count integer not null, file_name text not null default '', "
+            "lines_read integer not null default 0, "
+            "revision_reason text not null default '', "
+            "previous_dataset_id text not null default '', "
+            "unique(classification, source, source_version, content_sha256))"),
+        QStringLiteral(
+            "create table if not exists ashare_industry_memberships("
+            "dataset_id text not null, sequence integer not null, "
+            "symbol text not null, name text not null default '', "
+            "venue text not null default '', industry_code text not null, "
+            "industry_name text not null, effective_from text not null, "
+            "effective_to text not null default '', "
+            "primary key(dataset_id, sequence), "
+            "unique(dataset_id, symbol, effective_from), "
+            "foreign key(dataset_id) references ashare_industry_datasets(dataset_id) "
+            "on delete restrict)"),
+        QStringLiteral(
+            "create index if not exists idx_ashare_industry_resolve "
+            "on ashare_industry_memberships(dataset_id, symbol, effective_from, effective_to)"),
+        QStringLiteral(
+            "create table if not exists factor_definition_versions("
+            "factor_id text not null, version integer not null, name text not null, "
+            "alias text not null, source_strategy_id text not null, "
+            "source_strategy_version integer not null, definition_json text not null, "
+            "preprocessing_json text not null, content_sha256 text not null, "
+            "created_at_utc text not null, primary key(factor_id, version), "
+            "unique(factor_id, content_sha256), check(version > 0))"),
+        QStringLiteral(
+            "create index if not exists idx_factor_definitions_created "
+            "on factor_definition_versions(created_at_utc desc, factor_id, version desc)"),
+        QStringLiteral(
+            "create table if not exists factor_candidate_versions("
+            "candidate_id text not null, version integer not null, name text not null, "
+            "hypothesis text not null, source_kind text not null, source_reference text not null default '', "
+            "factor_definition_json text not null, proposed_at_utc text not null, "
+            "frozen_at_utc text, content_sha256 text not null, "
+            "primary key(candidate_id, version), unique(candidate_id, content_sha256), "
+            "check(version > 0), check(source_kind in ('manual', 'authorized_import')))"),
+        QStringLiteral(
+            "create index if not exists idx_factor_candidates_proposed "
+            "on factor_candidate_versions(proposed_at_utc desc, candidate_id, version desc)"),
+        QStringLiteral(
+            "create table if not exists factor_candidate_evaluations("
+            "evaluation_id text primary key, candidate_id text not null, "
+            "candidate_version integer not null, candidate_content_sha256 text not null, "
+            "archive_result_id text not null, archive_completed_at_utc text not null, "
+            "archive_factor_id text not null, archive_factor_version integer not null, "
+            "research_method_version text not null, evaluation_role text not null, "
+            "preregistered integer not null, archive_identity_sha256 text not null, "
+            "linked_at_utc text not null, "
+            "unique(candidate_id, candidate_version, archive_result_id, evaluation_role), "
+            "foreign key(candidate_id, candidate_version) references "
+            "factor_candidate_versions(candidate_id, version) on delete restrict, "
+            "check(evaluation_role in ('prospective_holdout', 'retrospective_reference')), "
+            "check(preregistered in (0, 1)))"),
+        QStringLiteral(
+            "create index if not exists idx_factor_candidate_evaluations_linked "
+            "on factor_candidate_evaluations(candidate_id, candidate_version, linked_at_utc desc)"),
+        QStringLiteral(
+            "create table if not exists external_factor_datasets("
+            "dataset_id text primary key, factor_key text not null, "
+            "factor_definition_sha256 text not null, source text not null, "
+            "source_version text not null, source_reference text not null, "
+            "content_sha256 text not null, imported_at_utc text not null, "
+            "record_count integer not null, symbol_count integer not null, "
+            "timestamp_count integer not null, first_timestamp_utc text not null, "
+            "last_timestamp_utc text not null, unique(factor_key, "
+            "factor_definition_sha256, source, source_version, content_sha256), "
+            "check(source='authorized_csv'), check(record_count > 0), "
+            "check(symbol_count > 0), check(timestamp_count > 0))"),
+        QStringLiteral(
+            "create table if not exists external_factor_observations("
+            "dataset_id text not null, timestamp_utc text not null, "
+            "symbol text not null, value real not null, "
+            "primary key(dataset_id, timestamp_utc, symbol), "
+            "foreign key(dataset_id) references external_factor_datasets(dataset_id) "
+            "on delete restrict)"),
+        QStringLiteral(
+            "create index if not exists idx_external_factor_observations_lookup "
+            "on external_factor_observations(dataset_id, timestamp_utc, symbol)"),
+        QStringLiteral(
+            "create table if not exists factor_candidate_dataset_bindings("
+            "binding_id text primary key, candidate_id text not null, "
+            "candidate_version integer not null, candidate_content_sha256 text not null, "
+            "factor_definition_sha256 text not null, dataset_id text not null, "
+            "dataset_content_sha256 text not null, bound_at_utc text not null, "
+            "unique(candidate_id, candidate_version, dataset_id), "
+            "foreign key(candidate_id, candidate_version) references "
+            "factor_candidate_versions(candidate_id, version) on delete restrict, "
+            "foreign key(dataset_id) references external_factor_datasets(dataset_id) "
+            "on delete restrict)"),
+        QStringLiteral(
+            "create index if not exists idx_factor_candidate_dataset_bindings "
+            "on factor_candidate_dataset_bindings(candidate_id, candidate_version, "
+            "bound_at_utc desc)"),
+        QStringLiteral(
+            "create table if not exists external_factor_research_archives("
+            "result_id text primary key, completed_at_utc text not null, "
+            "candidate_id text not null, candidate_version integer not null, "
+            "dataset_id text not null, factor_key text not null, "
+            "period_seconds integer not null, evaluated_frame_count integer not null, "
+            "mean_ic real not null, mean_rank_ic real not null, "
+            "identity_sha256 text not null unique, record_json text not null, "
+            "foreign key(candidate_id, candidate_version) references "
+            "factor_candidate_versions(candidate_id, version) on delete restrict, "
+            "foreign key(dataset_id) references external_factor_datasets(dataset_id) "
+            "on delete restrict, check(period_seconds > 0), "
+            "check(evaluated_frame_count > 0))"),
+        QStringLiteral(
+            "create index if not exists idx_external_factor_research_completed "
+            "on external_factor_research_archives(completed_at_utc desc, result_id)"),
+        QStringLiteral(
+            "create table if not exists raw_tick_parameter_sensitivity_results("
+            "result_id text primary key, completed_at_utc text not null, "
+            "strategy_id text not null, symbol text not null, "
+            "training_start_date text not null, training_end_date text not null, "
+            "validation_start_date text not null, validation_end_date text not null, "
+            "candidate_count integer not null, validation_return_percent real not null, "
+            "dataset_version text not null, identity_sha256 text not null unique, "
+            "record_json text not null, check(candidate_count > 0))"),
+        QStringLiteral(
+            "create index if not exists idx_raw_tick_sensitivity_completed "
+            "on raw_tick_parameter_sensitivity_results(completed_at_utc desc, result_id)"),
+        QStringLiteral(
             "create table if not exists raw_tick_content_fingerprints("
             "symbol text not null, trading_date text not null, raw_count integer not null default 0, "
             "raw_max_id integer not null default 0, content_sha256 text not null default '', "
             "dirty integer not null default 1, computed_at_utc text not null default '', "
             "primary key(symbol, trading_date))"),
+        QStringLiteral(
+            "create table if not exists raw_tick_day_quality_audits("
+            "symbol text not null, trading_date text not null, "
+            "raw_content_sha256 text not null, audit_version integer not null, "
+            "lines_read integer not null, valid_records integer not null, "
+            "skipped_records integer not null, out_of_order_records integer not null, "
+            "quality_status text not null, source text not null, audited_at_utc text not null, "
+            "primary key(symbol, trading_date, raw_content_sha256, audit_version), "
+            "check(valid_records > 0), check(skipped_records >= 0), "
+            "check(out_of_order_records >= 0), check(audit_version > 0))"),
+        QStringLiteral(
+            "create index if not exists idx_raw_tick_day_quality_current "
+            "on raw_tick_day_quality_audits(symbol, trading_date, audited_at_utc desc)"),
         QStringLiteral(
             "create trigger if not exists trg_raw_tick_content_insert after insert on raw_trade_ticks "
             "begin insert into raw_tick_content_fingerprints(symbol, trading_date, dirty) "
@@ -3391,7 +7487,16 @@ bool SqliteLocalDataStore::ensureSchema()
             "dataset_gap_day_count integer not null default 0, "
             "dataset_stale_day_count integer not null default 0, "
             "dataset_calendar_source text not null default '', "
-            "dataset_calendar_coverage_known integer not null default 0)"),
+            "dataset_calendar_coverage_known integer not null default 0, "
+            "candle_series_version integer not null default 0, "
+            "data_mode text not null default 'candles', "
+            "raw_tick_series_version integer not null default 0, "
+            "final_position_quantity real not null default 0, "
+            "final_position_average_price real not null default 0, "
+            "final_position_entry_commission real not null default 0, "
+            "final_position_entry_time_utc text not null default '', "
+            "final_position_entry_reason text not null default '', "
+            "sample_from_utc text, sample_to_utc text)"),
         QStringLiteral(
             "create index if not exists idx_backtest_results_completed "
             "on backtest_results(completed_at_utc desc, result_id desc)"),
@@ -3408,6 +7513,29 @@ bool SqliteLocalDataStore::ensureSchema()
             "entry_price real not null, exit_price real not null, quantity real not null, "
             "gross_pnl real not null, net_pnl real not null, commission real not null, "
             "return_percent real not null, entry_reason text not null, exit_reason text not null, "
+            "primary key(result_id, sequence_no), "
+            "foreign key(result_id) references backtest_results(result_id) on delete cascade)"),
+        QStringLiteral(
+            "create table if not exists backtest_candles("
+            "result_id text not null, sequence_no integer not null, start_time_utc text not null, "
+            "period_seconds integer not null, open real not null, high real not null, "
+            "low real not null, close real not null, volume real not null, "
+            "buy_volume real not null default 0, sell_volume real not null default 0, "
+            "neutral_volume real not null default 0, directional_volume_known integer not null default 0, "
+            "source text not null default '', adjustment text not null default 'none', "
+            "downloaded_at_utc text not null default '', has_signal integer not null default 0, "
+            "signal_side integer, signal_price real not null default 0, "
+            "signal_volume real not null default 0, signal_reason text not null default '', "
+            "primary key(result_id, sequence_no), unique(result_id, start_time_utc), "
+            "foreign key(result_id) references backtest_results(result_id) on delete cascade)"),
+        QStringLiteral(
+            "create table if not exists backtest_raw_ticks("
+            "result_id text not null, sequence_no integer not null, timestamp_utc text not null, "
+            "trading_date text not null, source_line integer not null, price real not null, "
+            "volume_shares real not null, amount real not null, direction integer not null, "
+            "source text not null default '', has_signal integer not null default 0, "
+            "signal_side integer, signal_price real not null default 0, "
+            "signal_volume real not null default 0, signal_reason text not null default '', "
             "primary key(result_id, sequence_no), "
             "foreign key(result_id) references backtest_results(result_id) on delete cascade)"),
         QStringLiteral(
@@ -3445,9 +7573,13 @@ bool SqliteLocalDataStore::ensureSchema()
             "create table if not exists batch_backtest_runs("
             "run_id text primary key, created_at_utc text not null, completed_at_utc text, "
             "strategy_id text not null, strategy_parameters_json text not null default '', "
-            "frequency text not null, period_seconds integer not null, bar_count integer not null, "
+            "data_mode text not null default 'candles', start_date text not null default '', "
+            "end_date text not null default '', frequency text not null, "
+            "period_seconds integer not null, bar_count integer not null, "
             "initial_capital real not null, commission_rate real not null, "
             "slippage_rate real not null, lot_size integer not null, "
+            "holdout_trading_days integer not null default 0, "
+            "walk_forward_fold_count integer not null default 0, "
             "total_symbols integer not null, completed_symbols integer not null default 0, "
             "succeeded_symbols integer not null default 0, "
             "failed_symbols integer not null default 0, "
@@ -3471,6 +7603,9 @@ bool SqliteLocalDataStore::ensureSchema()
             "completed_at_utc text not null, definition_json text not null, "
             "leg_count integer not null, period_seconds integer not null, "
             "bar_count integer not null, dataset_versions_json text not null default '[]', "
+            "result_kind text not null default 'fixed_portfolio', "
+            "immutable_identity_json text not null default '{}', "
+            "dataset_identities_json text not null default '[]', "
             "initial_capital real not null, final_equity real not null, "
             "total_return_percent real not null, max_drawdown_percent real not null, "
             "sharpe_ratio real not null, total_commission real not null, "
@@ -3604,7 +7739,84 @@ bool SqliteLocalDataStore::ensureSchema()
         || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_calendar_source"),
                          QStringLiteral("text not null default ''"))
         || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("dataset_calendar_coverage_known"),
-                         QStringLiteral("integer not null default 0"))) {
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("candle_series_version"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("data_mode"),
+                         QStringLiteral("text not null default 'candles'"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("raw_tick_series_version"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("final_position_quantity"),
+                         QStringLiteral("real not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("final_position_average_price"),
+                         QStringLiteral("real not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("final_position_entry_commission"),
+                         QStringLiteral("real not null default 0"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("final_position_entry_time_utc"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"),
+                         QStringLiteral("final_position_entry_reason"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("sample_from_utc"),
+                         QStringLiteral("text"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("sample_to_utc"),
+                         QStringLiteral("text"))
+        || !ensureColumn(QStringLiteral("batch_backtest_runs"),
+                         QStringLiteral("data_mode"),
+                         QStringLiteral("text not null default 'candles'"))
+        || !ensureColumn(QStringLiteral("batch_backtest_runs"),
+                         QStringLiteral("start_date"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("batch_backtest_runs"),
+                         QStringLiteral("end_date"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("batch_backtest_runs"),
+                         QStringLiteral("holdout_trading_days"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("batch_backtest_runs"),
+                         QStringLiteral("walk_forward_fold_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("portfolio_backtest_results"),
+                         QStringLiteral("result_kind"),
+                         QStringLiteral("text not null default 'fixed_portfolio'"))
+        || !ensureColumn(QStringLiteral("portfolio_backtest_results"),
+                         QStringLiteral("immutable_identity_json"),
+                         QStringLiteral("text not null default '{}'"))
+        || !ensureColumn(QStringLiteral("portfolio_backtest_results"),
+                         QStringLiteral("dataset_identities_json"),
+                         QStringLiteral("text not null default '[]'"))
+        || !ensureColumn(QStringLiteral("ashare_instrument_day_status"),
+                         QStringLiteral("import_run_id"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("ashare_instrument_day_import_runs"),
+                         QStringLiteral("new_record_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("ashare_instrument_day_import_runs"),
+                         QStringLiteral("unchanged_record_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("ashare_instrument_day_import_runs"),
+                         QStringLiteral("corrected_record_count"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("ashare_instrument_day_import_runs"),
+                         QStringLiteral("revision_reason"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("ashare_industry_datasets"),
+                         QStringLiteral("file_name"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("ashare_industry_datasets"),
+                         QStringLiteral("lines_read"),
+                         QStringLiteral("integer not null default 0"))
+        || !ensureColumn(QStringLiteral("ashare_industry_datasets"),
+                         QStringLiteral("revision_reason"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("ashare_industry_datasets"),
+                         QStringLiteral("previous_dataset_id"),
+                         QStringLiteral("text not null default ''"))) {
         return false;
     }
 
@@ -3629,7 +7841,7 @@ bool SqliteLocalDataStore::ensureSchema()
 
     QSqlQuery schemaVersionQuery(m_database);
     schemaVersionQuery.prepare(QStringLiteral(
-        "insert into schema_versions(component, version, updated_at_utc) values('backtest_archive', 1, ?) "
+        "insert into schema_versions(component, version, updated_at_utc) values('backtest_archive', 3, ?) "
         "on conflict(component) do update set version=max(version, excluded.version), "
         "updated_at_utc=excluded.updated_at_utc"));
     schemaVersionQuery.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));

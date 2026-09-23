@@ -71,6 +71,9 @@ Item {
             tPlusOne: true,
             maximumLegWeight: 1.0,
             maximumActiveLegs: 0,
+            maximumConsecutiveMissingBars: 0,
+            maximumPortfolioLossPercent: Number(maximumPortfolioLossField.text),
+            maximumPortfolioDrawdownPercent: Number(maximumPortfolioDrawdownField.text),
             legs: legs
         }
         root.controller.runPortfolioBacktest(
@@ -150,6 +153,38 @@ Item {
                 text: Number(root.controller.backtestConfiguredInitialCapital).toLocaleString(Qt.locale("zh_CN"))
                 color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10
             }
+            Text { text: "累计亏损熔断%"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+            TextField {
+                id: maximumPortfolioLossField
+                Layout.fillWidth: true; Layout.preferredHeight: 28
+                text: "0"
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10
+                selectByMouse: true
+                Accessible.name: "固定组合累计亏损熔断百分比"
+                Accessible.description: "相对初始资金计算，输入零表示关闭"
+                background: Rectangle {
+                    radius: 5; color: root.theme.bgInput
+                    border.width: parent.activeFocus ? 2 : 1
+                    border.color: parent.activeFocus ? root.theme.cyan : root.theme.border
+                }
+            }
+            Text { text: "峰值回撤熔断%"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+            TextField {
+                id: maximumPortfolioDrawdownField
+                Layout.fillWidth: true; Layout.preferredHeight: 28
+                text: "0"
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10
+                selectByMouse: true
+                Accessible.name: "固定组合峰值回撤熔断百分比"
+                Accessible.description: "相对运行中最高权益计算，输入零表示关闭"
+                background: Rectangle {
+                    radius: 5; color: root.theme.bgInput
+                    border.width: parent.activeFocus ? 2 : 1
+                    border.color: parent.activeFocus ? root.theme.cyan : root.theme.border
+                }
+            }
         }
 
         RowLayout {
@@ -228,6 +263,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             readonly property var config: root.controller.portfolioResultConfiguration
+            readonly property var risk: (config || ({})).riskSummary || ({})
             Text {
                 Layout.fillWidth: true
                 text: parent.config && parent.config.finalEquity
@@ -238,12 +274,41 @@ Item {
                         + " · 手续费 " + Number(parent.config.totalCommission).toFixed(2)
                         + " · 调仓 " + parent.config.totalTrades + " 笔"
                         + (Number(parent.config.staleValuationPointCount) > 0
-                           ? " · 缺日报价估值 " + parent.config.staleValuationPointCount + " 点"
+                            ? " · 缺日报价估值 " + parent.config.staleValuationPointCount + " 点"
+                            : "")
+                        + (parent.risk.circuitBreakerTriggered
+                           ? " · 已熔断（"
+                             + (parent.risk.circuitBreakerReason === "drawdown_limit"
+                                ? "峰值回撤" : parent.risk.circuitBreakerReason === "loss_limit"
+                                  ? "累计亏损" : "亏损与回撤")
+                             + "）· 已退出 " + parent.risk.completedCircuitBreakerExitCount
+                             + " · 待退出 " + parent.risk.pendingCircuitBreakerExitCount
                            : "")
-                      : "尚未运行组合回测"
+                       : "尚未运行组合回测"
                 color: root.theme.textPrimary; elide: Text.ElideRight
                 font.family: root.theme.fontFamily; font.pixelSize: 9
             }
+        }
+        Text {
+            Layout.fillWidth: true
+            readonly property var calendarRisk:
+                (root.controller.portfolioResultConfiguration || ({})).riskSummary || ({})
+            visible: calendarRisk.calendarSnapshotVersion !== undefined
+                     && String(calendarRisk.calendarSnapshotVersion).length > 0
+            text: "交易日历 "
+                  + (calendarRisk.marketCalendarCoverageComplete
+                     ? "权威覆盖" : "覆盖不完整")
+                  + " · 停牌事实 " + Number(calendarRisk.authoritativeSuspensionPointCount)
+                  + " 腿日 · 未知缺报价 " + Number(calendarRisk.unknownMissingQuotePointCount)
+                  + " 腿日 · 日历补估值 " + Number(calendarRisk.calendarOnlyValuationPointCount)
+                  + " 日"
+            color: calendarRisk.instrumentStatusCoverageComplete
+                   ? root.theme.textMuted : root.theme.yellow
+            elide: Text.ElideRight
+            font.family: root.theme.fontFamily
+            font.pixelSize: 8
+            Accessible.name: text
+            Accessible.description: "缺少权威停复牌事实时保持未知，不从缺失 K 线推断停牌"
         }
 
         Rectangle {

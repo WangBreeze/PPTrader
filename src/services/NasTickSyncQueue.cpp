@@ -6,6 +6,39 @@
 
 namespace pp {
 
+bool NasDownloadRequestGate::begin(quint64 requestId, int queueIndex)
+{
+    if (requestId == 0 || queueIndex < 0 || m_indices.contains(requestId)) return false;
+    m_indices.insert(requestId, queueIndex);
+    return true;
+}
+
+std::optional<int> NasDownloadRequestGate::indexFor(quint64 requestId) const
+{
+    const auto iterator = m_indices.constFind(requestId);
+    if (iterator == m_indices.constEnd()) return std::nullopt;
+    return iterator.value();
+}
+
+std::optional<int> NasDownloadRequestGate::finish(quint64 requestId)
+{
+    const auto iterator = m_indices.find(requestId);
+    if (iterator == m_indices.end()) return std::nullopt;
+    const int index = iterator.value();
+    m_indices.erase(iterator);
+    return index;
+}
+
+QList<quint64> NasDownloadRequestGate::activeRequestIds() const
+{
+    return m_indices.keys();
+}
+
+void NasDownloadRequestGate::cancelAll()
+{
+    m_indices.clear();
+}
+
 bool NasTickSyncQueue::prepare(const QVector<NasCatalogEntry> &entries,
                                const QString &symbol)
 {
@@ -225,7 +258,8 @@ bool NasTickSyncQueue::running() const { return m_running; }
 bool NasTickSyncQueue::canResume() const
 {
     return std::any_of(m_items.cbegin(), m_items.cend(), [](const NasSyncPlanItem &item) {
-        return item.status == NasSyncItemStatus::Failed
+        return item.status == NasSyncItemStatus::Ready
+            || item.status == NasSyncItemStatus::Failed
             || item.status == NasSyncItemStatus::Cancelled
             || item.status == NasSyncItemStatus::Downloading
             || item.status == NasSyncItemStatus::Importing;

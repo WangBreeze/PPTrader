@@ -2,10 +2,27 @@
 
 #include "domain/NasDataNodeTypes.h"
 
+#include <QHash>
+#include <QList>
 #include <QSet>
 #include <QStringList>
 
+#include <optional>
+
 namespace pp {
+
+// 下载响应门控：取消/换代后，迟到 requestId 不得回落到任何队列索引。
+class NasDownloadRequestGate final {
+public:
+    bool begin(quint64 requestId, int queueIndex);
+    std::optional<int> indexFor(quint64 requestId) const;
+    std::optional<int> finish(quint64 requestId);
+    QList<quint64> activeRequestIds() const;
+    void cancelAll();
+
+private:
+    QHash<quint64, int> m_indices;
+};
 
 class NasTickSyncQueue final {
 public:

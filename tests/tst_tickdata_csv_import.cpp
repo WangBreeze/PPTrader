@@ -63,6 +63,7 @@ class TickDataCsvImportTest final : public QObject {
 
 private slots:
     void parsesTickRowsWithTimezoneLotsAndDirections();
+    void parsesStandardEnglishHeaderWithoutCountingItAsBadData();
     void parsesChineseHeaderTickRows();
     void aggregatesSessionsWithoutCrossingLunch();
     void parsesFiveMinuteUnitsAndRejectsUnknown();
@@ -97,9 +98,9 @@ void TickDataCsvImportTest::parsesTickRowsWithTimezoneLotsAndDirections()
     QVERIFY(result.succeeded);
     QCOMPARE(result.filePath, path);
     QCOMPARE(result.linesRead, 7);
-    QCOMPARE(result.validRecords, 5);
-    QCOMPARE(result.skippedRecords, 2);
-    QCOMPARE(result.candles.size(), 4);
+    QCOMPARE(result.validRecords, 6);
+    QCOMPARE(result.skippedRecords, 1);
+    QCOMPARE(result.candles.size(), 5);
     QCOMPARE(result.candles.at(0).startTime,
              QDateTime(TradingDate, QTime(9, 25), QTimeZone("Asia/Shanghai")).toUTC());
     QCOMPARE(result.candles.at(0).volume, 200.0);
@@ -114,9 +115,32 @@ void TickDataCsvImportTest::parsesTickRowsWithTimezoneLotsAndDirections()
     QCOMPARE(opening.volume, 300.0);
     QCOMPARE(opening.sellVolume, 100.0);
     QCOMPARE(opening.neutralVolume, 200.0);
+    QCOMPARE(result.candles.at(3).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
+             QTime(15, 0));
+    QCOMPARE(result.candles.at(3).sellVolume, 300.0);
     QCOMPARE(result.candles.last().startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
-             QTime(14, 59));
-    QCOMPARE(result.candles.last().sellVolume, 300.0);
+             QTime(15, 5));
+    QCOMPARE(result.candles.last().buyVolume, 100.0);
+}
+
+void TickDataCsvImportTest::parsesStandardEnglishHeaderWithoutCountingItAsBadData()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QVERIFY(!writeCsv(directory.path(), QStringLiteral("20260807"),
+        QStringLiteral("time,price,volume,amount,type\n"
+                       "09:25:00,10.00,2,2000,B\n"
+                       "09:30:00,10.10,3,3030,S\n"
+                       "09:30:30,10.20,4,4080,M\n")).isEmpty());
+
+    const TickDataImportResult result = TickDataCsvImporter::parse(
+        tickRequest(directory.path()));
+    QVERIFY(result.succeeded);
+    QCOMPARE(result.linesRead, 4);
+    QCOMPARE(result.validRecords, 3);
+    QCOMPARE(result.skippedRecords, 0);
+    QVERIFY(result.diagnostics.isEmpty());
+    QCOMPARE(result.candles.size(), 2);
 }
 
 void TickDataCsvImportTest::parsesChineseHeaderTickRows()
@@ -134,15 +158,16 @@ void TickDataCsvImportTest::parsesChineseHeaderTickRows()
         tickRequest(directory.path()));
     QVERIFY(result.succeeded);
     QCOMPARE(result.linesRead, 5);
-    QCOMPARE(result.validRecords, 3);
-    QCOMPARE(result.skippedRecords, 1);
-    QCOMPARE(result.candles.size(), 2);
+    QCOMPARE(result.validRecords, 4);
+    QCOMPARE(result.skippedRecords, 0);
+    QCOMPARE(result.candles.size(), 3);
     QCOMPARE(result.candles.first().volume, 200.0);
     QCOMPARE(result.candles.first().sellVolume, 200.0);
-    QCOMPARE(result.candles.last().open, 10.10);
-    QCOMPARE(result.candles.last().close, 10.20);
-    QCOMPARE(result.candles.last().buyVolume, 300.0);
-    QCOMPARE(result.candles.last().neutralVolume, 400.0);
+    QCOMPARE(result.candles.at(1).open, 10.10);
+    QCOMPARE(result.candles.at(1).close, 10.20);
+    QCOMPARE(result.candles.at(1).buyVolume, 300.0);
+    QCOMPARE(result.candles.at(1).neutralVolume, 400.0);
+    QCOMPARE(result.candles.last().sellVolume, 100.0);
 }
 
 void TickDataCsvImportTest::aggregatesSessionsWithoutCrossingLunch()
@@ -155,13 +180,15 @@ void TickDataCsvImportTest::aggregatesSessionsWithoutCrossingLunch()
                        "12:59:59,99,1,9900,M\n"
                        "13:00:00,12,1,1200,M\n"
                        "15:00:00,13,1,1300,B\n"
-                       "15:05:00,14,1,1400,S\n")).isEmpty());
+                       "15:05:00,14,1,1400,S\n"
+                       "15:30:00,15,1,1500,B\n"
+                       "15:30:01,16,1,1600,S\n")).isEmpty());
     const TickDataImportResult result = TickDataCsvImporter::parse(
         tickRequest(directory.path(), 300));
     QVERIFY(result.succeeded);
-    QCOMPARE(result.validRecords, 4);
+    QCOMPARE(result.validRecords, 6);
     QCOMPARE(result.skippedRecords, 2);
-    QCOMPARE(result.candles.size(), 3);
+    QCOMPARE(result.candles.size(), 5);
     QCOMPARE(result.candles.at(0).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
              QTime(11, 25));
     QCOMPARE(result.candles.at(0).open, 10.0);
@@ -169,7 +196,11 @@ void TickDataCsvImportTest::aggregatesSessionsWithoutCrossingLunch()
     QCOMPARE(result.candles.at(1).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
              QTime(13, 0));
     QCOMPARE(result.candles.at(2).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
-             QTime(14, 55));
+             QTime(15, 0));
+    QCOMPARE(result.candles.at(3).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
+             QTime(15, 5));
+    QCOMPARE(result.candles.at(4).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
+             QTime(15, 25));
 }
 
 void TickDataCsvImportTest::parsesFiveMinuteUnitsAndRejectsUnknown()
@@ -196,15 +227,15 @@ void TickDataCsvImportTest::parsesFiveMinuteUnitsAndRejectsUnknown()
     const TickDataImportResult shares = TickDataCsvImporter::parse(
         fiveMinuteRequest(directory.path(), FiveMinuteVolumeUnit::Shares));
     QVERIFY(shares.succeeded);
-    QCOMPARE(shares.validRecords, 5);
-    QCOMPARE(shares.skippedRecords, 2);
-    QCOMPARE(shares.candles.size(), 5);
+    QCOMPARE(shares.validRecords, 6);
+    QCOMPARE(shares.skippedRecords, 1);
+    QCOMPARE(shares.candles.size(), 6);
     QCOMPARE(shares.candles.first().volume, 2.0);
     QVERIFY(!shares.candles.first().directionalVolumeKnown);
     QCOMPARE(shares.candles.at(2).startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
              QTime(11, 25));
     QCOMPARE(shares.candles.last().startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time(),
-             QTime(14, 55));
+             QTime(15, 5));
 
     const TickDataImportResult lots = TickDataCsvImporter::parse(
         fiveMinuteRequest(directory.path(), FiveMinuteVolumeUnit::Lots));
@@ -297,11 +328,11 @@ void TickDataCsvImportTest::reportsQualityForOutOfOrderAndMissingBars()
         tickRequest(directory.path()));
     QVERIFY(result.succeeded);
     QCOMPARE(result.outOfOrderRecords, 1);
-    QCOMPARE(result.expectedContinuousBars, 240);
-    QCOMPARE(result.missingContinuousBars, 238);
+    QCOMPARE(result.expectedContinuousBars, 270);
+    QCOMPARE(result.missingContinuousBars, 268);
     QCOMPARE(result.qualityStatus, QStringLiteral("warning"));
     QVERIFY(result.qualityMessages.join(QLatin1Char(' ')).contains(QStringLiteral("时间倒序")));
-    QVERIFY(result.qualityMessages.join(QLatin1Char(' ')).contains(QStringLiteral("少 238 根")));
+    QVERIFY(result.qualityMessages.join(QLatin1Char(' ')).contains(QStringLiteral("少 268 根")));
 }
 
 void TickDataCsvImportTest::plansOnlyRequestedWeekdaysAndResetsRetryableFiles()
@@ -560,7 +591,41 @@ void TickDataCsvImportTest::servicePersistsRawTicksTransactionally()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-    QCOMPARE(store.rawTradeFingerprint(instrument(), TradingDate).count, 3);
+    const RawTradeFingerprint firstFingerprint =
+        store.rawTradeFingerprint(instrument(), TradingDate);
+    QCOMPARE(firstFingerprint.count, 3);
+    const QVector<RawTickImportDayAudit> audits =
+        store.loadRawTickImportDayAudits(instrument(), TradingDate, TradingDate);
+    QCOMPARE(audits.size(), 1);
+    QCOMPARE(audits.first().rawContentSha256, firstFingerprint.contentSha256);
+    QCOMPARE(audits.first().auditVersion, 2);
+    QCOMPARE(audits.first().linesRead, 3);
+    QCOMPARE(audits.first().validRecords, 3);
+    QCOMPARE(audits.first().skippedRecords, 0);
+    QCOMPARE(audits.first().outOfOrderRecords, 0);
+    QCOMPARE(audits.first().qualityStatus, QStringLiteral("warning"));
+    QCOMPARE(audits.first().source, QStringLiteral("tickdata_csv_tick"));
+
+    QVERIFY(!writeCsv(directory.path(), QStringLiteral("20260807"),
+        QStringLiteral("09:30:00,20,1,2000,B\n"
+                       "13:00:00,21,1,2100,S\n")).isEmpty());
+    spy.clear();
+    QVERIFY(service.start(tickRequest(directory.path())) > 0);
+    QVERIFY(spy.wait(5000));
+    const TickDataImportResult replacement =
+        qvariant_cast<TickDataImportResult>(spy.first().at(1));
+    QVERIFY(replacement.succeeded);
+    QTRY_VERIFY(!service.running());
+    const RawTradeFingerprint replacementFingerprint =
+        store.rawTradeFingerprint(instrument(), TradingDate);
+    QCOMPARE(replacementFingerprint.count, 2);
+    QVERIFY(replacementFingerprint.contentSha256 != firstFingerprint.contentSha256);
+    const QVector<RawTickImportDayAudit> replacementAudits =
+        store.loadRawTickImportDayAudits(instrument(), TradingDate, TradingDate);
+    QCOMPARE(replacementAudits.size(), 1);
+    QCOMPARE(replacementAudits.first().rawContentSha256,
+             replacementFingerprint.contentSha256);
+    QCOMPARE(replacementAudits.first().validRecords, 2);
 
     QVERIFY(!writeCsv(directory.path(), QStringLiteral("20260807"),
                       QStringLiteral("broken,row\n")).isEmpty());
@@ -571,7 +636,33 @@ void TickDataCsvImportTest::servicePersistsRawTicksTransactionally()
         qvariant_cast<TickDataImportResult>(spy.first().at(1));
     QVERIFY(!failed.succeeded);
     QTRY_VERIFY(!service.running());
-    QCOMPARE(store.rawTradeFingerprint(instrument(), TradingDate).count, 3);
+    QCOMPARE(store.rawTradeFingerprint(instrument(), TradingDate).count, 2);
+    QCOMPARE(store.loadRawTickImportDayAudits(
+                 instrument(), TradingDate, TradingDate).size(), 1);
+
+    RawTradeTick incremental;
+    incremental.instrument = instrument();
+    incremental.tradingDate = TradingDate;
+    incremental.timestamp = QDateTime(
+        TradingDate, QTime(14, 0), QTimeZone("Asia/Shanghai")).toUTC();
+    incremental.sourceLine = 99;
+    incremental.price = 22.0;
+    incremental.volumeShares = 100.0;
+    incremental.amount = 2200.0;
+    incremental.direction = RawTradeDirection::Neutral;
+    const RawTradeIncrementalAppendResult appended =
+        store.appendRawTradeTicksIncremental({incremental});
+    QVERIFY(appended.factCommitted);
+    QCOMPARE(appended.insertedCount, 1);
+    QVERIFY(store.loadRawTickImportDayAudits(
+                instrument(), TradingDate, TradingDate).isEmpty());
+    const RawTradeFingerprint appendedFingerprint =
+        store.rawTradeFingerprint(instrument(), TradingDate);
+    QCOMPARE(appendedFingerprint.count, 3);
+    QVERIFY(appendedFingerprint.contentSha256
+            != replacementFingerprint.contentSha256);
+    QVERIFY(store.loadRawTickImportDayAudits(
+                instrument(), TradingDate, TradingDate).isEmpty());
 }
 
 } // namespace pp

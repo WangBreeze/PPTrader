@@ -2,6 +2,7 @@
 
 #include "services/MarketDataProvider.h"
 #include "services/MarketSnapshotAssembler.h"
+#include "services/MootdxCompactSnapshotParser.h"
 
 #include <QHash>
 #include <QProcess>
@@ -28,6 +29,7 @@ private slots:
     void onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
+    void drainStandardOutput(bool finalDrain);
     void parseLine(const QByteArray &line);
     Tick jsonToTick(const QJsonObject &obj) const;
     void completeActiveSnapshot(const QDateTime &completedAt = {});
@@ -37,10 +39,15 @@ private:
 
     QProcess *m_process = nullptr;
     QHash<QString, Instrument> m_instrumentBySymbol;
+    QHash<int, Instrument> m_instrumentByCode;
+    MootdxCompactSnapshotChunk m_compactChunkBuffer;
     MarketSnapshotAssembler m_snapshotAssembler {Market::AShare};
     QString m_symbolsFilePath;
     QString m_activeBatchId;
     QString m_activeBatchError;
+    QByteArray m_stdoutBuffer;
+    QString m_lastProcessDiagnostic;
+    QString m_lastProcessStderr;
     int m_expectedCount = 0;
     int m_lastReceivedCount = 0;
     QString m_lastBatchId;

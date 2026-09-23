@@ -148,6 +148,33 @@ Item {
                 }
             }
         }
+        PpButton {
+            Layout.fillWidth: true
+            theme: root.theme
+            text: "实时行情多窗口"
+            visualWidth: Math.max(190, root.width - 8)
+            primary: true
+            available: root.controller.selectedLiveSymbol.length > 0
+                       && root.controller.realtimeChartWindowCount < 8
+            toolTip: root.controller.selectedLiveSymbol.length === 0
+                     ? "先选择一个 A 股实时品种"
+                     : "打开品种范围独立的实时图表子窗口；默认 1 分钟，可添加到 10 张图表"
+            onClicked: root.controller.openRealtimeChartWindow(
+                root.controller.selectedLiveSymbol)
+        }
+        Text {
+            Layout.fillWidth: true
+            text: root.controller.realtimeChartWindowError.length > 0
+                  ? root.controller.realtimeChartWindowError
+                  : "已打开 " + root.controller.realtimeChartWindowCount
+                    + " 个独立实时窗口"
+            color: root.controller.realtimeChartWindowError.length > 0
+                   ? root.theme.red : root.theme.textMuted
+            elide: Text.ElideRight
+            font.family: root.theme.fontFamily
+            font.pixelSize: 9
+            Accessible.name: text
+        }
         Item { Layout.fillHeight: !liveResults.visible }
     }
 }

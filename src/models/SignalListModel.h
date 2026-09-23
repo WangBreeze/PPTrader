@@ -27,6 +27,7 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void addSignal(const TradeSignal &signal);
+    void loadSignals(const QVector<TradeSignal> &values);
     Q_INVOKABLE void clear();
 
 private:

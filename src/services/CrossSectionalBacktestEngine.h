@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/AShareCalendarTypes.h"
 #include "domain/PortfolioTypes.h"
 #include "services/AlignedBarSeries.h"
 #include "strategy/CrossSectionalCustomStrategy.h"
@@ -15,7 +16,9 @@ public:
     static PortfolioResult run(CrossSectionalCustomStrategy &strategy,
                                const AlignedBarSeries &alignedSeries,
                                const PortfolioDefinition &definition,
-                               QString *error = nullptr);
+                               QString *error = nullptr,
+                               const AShareCalendarSnapshot &calendar = {},
+                               const AShareIndustrySnapshot &industry = {});
 };
 
 } // namespace pp

@@ -84,6 +84,14 @@ CustomStrategyPreviewService::PreviewResult CustomStrategyPreviewService::buildP
             case CustomIndicatorKind::Roc: kindName = QStringLiteral("ROC"); break;
             case CustomIndicatorKind::Vwap: kindName = QStringLiteral("VWAP"); break;
             case CustomIndicatorKind::PpFlow: kindName = QStringLiteral("PP_FLOW"); break;
+            case CustomIndicatorKind::Wma: kindName = QStringLiteral("WMA"); break;
+            case CustomIndicatorKind::Bias: kindName = QStringLiteral("BIAS"); break;
+            case CustomIndicatorKind::Cci: kindName = QStringLiteral("CCI"); break;
+            case CustomIndicatorKind::Wr: kindName = QStringLiteral("WR"); break;
+            case CustomIndicatorKind::Donchian: kindName = QStringLiteral("DONCHIAN"); break;
+            case CustomIndicatorKind::Obv: kindName = QStringLiteral("OBV"); break;
+            case CustomIndicatorKind::Mfi: kindName = QStringLiteral("MFI"); break;
+            case CustomIndicatorKind::Kdj: kindName = QStringLiteral("KDJ"); break;
             }
             if (indicator.period > 0) label = kindName + QString::number(indicator.period);
             else label = kindName;

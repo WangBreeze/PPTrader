@@ -83,7 +83,7 @@ v2 在 v1 基础上新增三项能力，v1 文档保持原语义不变（v1 仍�
 
 约束与 v1 保持一致：`market` 仍仅支持 `A股`、`executionScope` 仍为 `backtest_only`、T+1 强制开启；新指标只允许出现在 v2 文档中。
 
-`TradingController.customStrategyPreview(json, symbol, periodSeconds, barCount)` 是只读预览接口：校验并编译后，在本地最近 K 线上重放，返回指标序列（按 series 顺序）与 B/S 信号，供向导预览图使用；不写库、不启动回测任务。
+`TradingController.requestCustomStrategyPreview(json, symbol, periodSeconds, barCount)` 是 QML 使用的异步只读预览接口：后台校验并编译后，在本地最近 K 线上重放，返回指标序列（按 series 顺序）与 B/S 信号；不写库、不启动回测任务。Controller 的 requestId/resolvedRequestId 门控保证旧结果不会覆盖新请求。
 
 ## DSL v3（schemaVersion=3）
 

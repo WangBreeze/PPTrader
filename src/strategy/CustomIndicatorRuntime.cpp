@@ -39,6 +39,9 @@ void CustomIndicatorRuntime::reset()
     m_closes.clear();
     m_volumes.clear();
     m_trueRanges.clear();
+    m_typicalPrices.clear();
+    m_highs.clear();
+    m_lows.clear();
     m_previousClose.reset();
 }
 
@@ -47,6 +50,12 @@ void CustomIndicatorRuntime::append(const Candle &candle)
     const double close = validPrice(candle.close) ? candle.close : missingValue();
     m_closes.append(close);
     m_volumes.append(validVolume(candle.volume) ? candle.volume : missingValue());
+    const bool validHlc = std::isfinite(close) && validPrice(candle.high)
+        && validPrice(candle.low) && candle.low <= close && close <= candle.high;
+    m_typicalPrices.append(validHlc
+        ? candle.high / 3.0 + candle.low / 3.0 + close / 3.0 : missingValue());
+    m_highs.append(validHlc ? candle.high : missingValue());
+    m_lows.append(validHlc ? candle.low : missingValue());
 
     double trueRange = missingValue();
     if (validPrice(candle.high) && validPrice(candle.low) && candle.high >= candle.low) {
@@ -114,6 +123,113 @@ void CustomIndicatorRuntime::updateIndicator(int index, const Candle &candle)
     case CustomIndicatorKind::Sma:
         state.current = windowAverage(m_closes, indicator.period);
         break;
+    case CustomIndicatorKind::Wma: {
+        if (!windowAverage(m_closes, indicator.period)) break;
+        double weighted = 0.0;
+        for (int offset = 0; offset < indicator.period; ++offset) {
+            weighted += m_closes.at(m_closes.size() - indicator.period + offset)
+                * (offset + 1.0);
+        }
+        state.current = weighted / (indicator.period * (indicator.period + 1.0) / 2.0);
+        break;
+    }
+    case CustomIndicatorKind::Bias: {
+        const auto average = windowAverage(m_closes, indicator.period);
+        if (average && std::isfinite(*average) && *average > 0.0) {
+            state.current = (m_closes.last() / *average - 1.0) * 100.0;
+        }
+        break;
+    }
+    case CustomIndicatorKind::Cci: {
+        const auto average = windowAverage(m_typicalPrices, indicator.period);
+        if (!average || !std::isfinite(*average)) break;
+        double deviation = 0.0;
+        for (int row = m_typicalPrices.size() - indicator.period;
+             row < m_typicalPrices.size(); ++row) {
+            deviation += std::abs(m_typicalPrices.at(row) - *average);
+        }
+        deviation /= indicator.period;
+        if (!std::isfinite(deviation)) break;
+        state.current = deviation > 0.0
+            ? (m_typicalPrices.last() - *average) / (0.015 * deviation) : 0.0;
+        break;
+    }
+    case CustomIndicatorKind::Wr: {
+        if (!windowAverage(m_highs, indicator.period)
+            || !windowAverage(m_lows, indicator.period)) break;
+        const double high = *std::max_element(m_highs.cend() - indicator.period, m_highs.cend());
+        const double low = *std::min_element(m_lows.cend() - indicator.period, m_lows.cend());
+        state.current = high > low ? (m_closes.last() - high) / (high - low) * 100.0 : -50.0;
+        break;
+    }
+    case CustomIndicatorKind::Donchian: {
+        if (!windowAverage(m_highs, indicator.period)
+            || !windowAverage(m_lows, indicator.period)) break;
+        const double high = *std::max_element(m_highs.cend() - indicator.period, m_highs.cend());
+        const double low = *std::min_element(m_lows.cend() - indicator.period, m_lows.cend());
+        if (indicator.output == QStringLiteral("upper")) state.current = high;
+        else if (indicator.output == QStringLiteral("lower")) state.current = low;
+        else state.current = high / 2.0 + low / 2.0;
+        break;
+    }
+    case CustomIndicatorKind::Obv: {
+        const double close = m_closes.last();
+        const double volume = m_volumes.last();
+        if (!std::isfinite(close) || !std::isfinite(volume)) {
+            state.obvPreviousClose.reset();
+            break;
+        }
+        double nextObv = state.cumulativeObv;
+        if (state.obvPreviousClose) {
+            if (close > *state.obvPreviousClose) nextObv += volume;
+            else if (close < *state.obvPreviousClose) nextObv -= volume;
+        }
+        if (!std::isfinite(nextObv)) {
+            state.obvPreviousClose.reset();
+            break;
+        }
+        state.cumulativeObv = nextObv;
+        state.obvPreviousClose = close;
+        state.current = state.cumulativeObv;
+        break;
+    }
+    case CustomIndicatorKind::Mfi: {
+        if (!windowAverage(m_typicalPrices, indicator.period + 1)
+            || !windowAverage(m_volumes, indicator.period)) break;
+        double positive = 0.0;
+        double negative = 0.0;
+        for (int row = m_typicalPrices.size() - indicator.period;
+             row < m_typicalPrices.size(); ++row) {
+            const double typicalPrice = m_typicalPrices.at(row);
+            const double previousPrice = m_typicalPrices.at(row - 1);
+            const double moneyFlow = typicalPrice * m_volumes.at(row);
+            if (!std::isfinite(moneyFlow)) return;
+            if (typicalPrice > previousPrice) positive += moneyFlow;
+            else if (typicalPrice < previousPrice) negative += moneyFlow;
+        }
+        const double total = positive + negative;
+        if (!std::isfinite(positive) || !std::isfinite(negative) || !std::isfinite(total)) break;
+        if (positive == 0.0 && negative == 0.0) state.current = 50.0;
+        else if (negative == 0.0) state.current = 100.0;
+        else state.current = positive / total * 100.0;
+        break;
+    }
+    case CustomIndicatorKind::Kdj: {
+        if (!windowAverage(m_highs, indicator.period)
+            || !windowAverage(m_lows, indicator.period)) {
+            state.kValue = state.dValue = 50.0;
+            break;
+        }
+        const double high = *std::max_element(m_highs.cend() - indicator.period, m_highs.cend());
+        const double low = *std::min_element(m_lows.cend() - indicator.period, m_lows.cend());
+        const double rsv = high > low ? (m_closes.last() - low) / (high - low) * 100.0 : 50.0;
+        state.kValue += (rsv - state.kValue) / indicator.kPeriod;
+        state.dValue += (state.kValue - state.dValue) / indicator.dPeriod;
+        if (indicator.output == QStringLiteral("k")) state.current = state.kValue;
+        else if (indicator.output == QStringLiteral("d")) state.current = state.dValue;
+        else state.current = 3.0 * state.kValue - 2.0 * state.dValue;
+        break;
+    }
     case CustomIndicatorKind::VolumeSma:
         state.current = windowAverage(m_volumes, indicator.period);
         break;
@@ -222,6 +338,13 @@ void CustomIndicatorRuntime::updateIndicator(int index, const Candle &candle)
         break;
     }
     }
+    // 新增指标不向条件表达式发布溢出结果，既有指标的数值口径保持不变。
+    const bool expandedIndicator = indicator.kind == CustomIndicatorKind::Wma
+        || indicator.kind == CustomIndicatorKind::Bias || indicator.kind == CustomIndicatorKind::Cci
+        || indicator.kind == CustomIndicatorKind::Wr || indicator.kind == CustomIndicatorKind::Donchian
+        || indicator.kind == CustomIndicatorKind::Obv || indicator.kind == CustomIndicatorKind::Mfi
+        || indicator.kind == CustomIndicatorKind::Kdj;
+    if (expandedIndicator && state.current && !std::isfinite(*state.current)) state.current.reset();
 }
 
 } // namespace pp

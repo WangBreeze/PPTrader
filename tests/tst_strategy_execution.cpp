@@ -112,10 +112,42 @@ private slots:
     void enforcesDailyStrategyBudgetsAndBuildsOrderLifetime();
     void preservesStrategyIdentityWhenDispatchingSignals();
     void routesTicksOnlyToSubscribedStrategies();
+    void recordsOptionalDispatchMetricsAndDrainsPool();
     void normalizesStrategyExecutionBounds();
     void reportsConfigurationPersistenceFailureAndSortsConfigurations();
     void exposesStrategyIntentRolesAndUpdatesRows();
 };
+
+void StrategyExecutionTest::recordsOptionalDispatchMetricsAndDrainsPool()
+{
+    StrategyEngine engine;
+    engine.setMaxThreadCount(2);
+    engine.addStrategy(new EmittingStrategy(
+        QStringLiteral("metric-1"), {QStringLiteral("000001")}));
+    engine.addStrategy(new EmittingStrategy(
+        QStringLiteral("metric-2"), {QStringLiteral("600519")}));
+    engine.setPerformanceMetricsEnabled(true);
+    engine.resetPerformanceMetrics();
+
+    Tick first;
+    first.instrument.symbol = QStringLiteral("000001");
+    first.timestamp = QDateTime::currentDateTimeUtc();
+    first.price = 10.0;
+    Tick second = first;
+    second.instrument.symbol = QStringLiteral("600519");
+    engine.dispatchTick(first);
+    engine.dispatchTick(second);
+
+    QCOMPARE(engine.dispatchedTaskCount(), quint64(2));
+    QVERIFY(engine.waitForIdle(5000));
+    QCOMPARE(engine.completedTaskCount(), quint64(2));
+
+    engine.setPerformanceMetricsEnabled(false);
+    engine.dispatchTick(first);
+    QVERIFY(engine.waitForIdle(5000));
+    QCOMPARE(engine.dispatchedTaskCount(), quint64(2));
+    QCOMPARE(engine.completedTaskCount(), quint64(2));
+}
 
 void StrategyExecutionTest::routesAutomaticAndManualExecutionWithoutUiDependencies()
 {

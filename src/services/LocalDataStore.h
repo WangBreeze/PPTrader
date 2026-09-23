@@ -69,7 +69,10 @@ public:
     virtual bool saveBacktestArchive(const BacktestArchiveRecord &record) = 0;
     virtual QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() = 0;
     virtual std::optional<BacktestArchiveRecord> loadBacktestArchive(
-        const QString &resultId) = 0;
+        const QString &resultId,
+        BacktestArchiveLoadMode mode = BacktestArchiveLoadMode::Display) = 0;
+    virtual std::optional<BacktestRawTickPage> loadBacktestRawTickPage(
+        const QString &resultId, int offset, int pageSize) = 0;
     virtual bool upsertOrder(const Order &order) = 0;
     virtual bool appendExecution(const Execution &execution) = 0;
     virtual bool saveTradingState(const AccountSnapshot &account, const QVector<Position> &positions) = 0;

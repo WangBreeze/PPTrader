@@ -17,6 +17,13 @@ PREFERRED_SERVERS = [
     ("123.125.108.14", 7709),
 ]
 
+# 全市场股票池通常按代码排序，开头可能包含已退市或长期无报价代码。
+# 连接探测不能直接取 symbols[:10]，否则会把“样本无行情”误判成服务器不可用。
+PREFERRED_PROBE_SYMBOLS = [
+    "000001", "000002", "000063", "000333", "000651",
+    "000858", "600000", "600036", "600519", "601318",
+]
+
 
 def build_tick(row):
     """将 DataFrame 行转换为与 PPTrader Tick 结构一致的 JSON 字典。"""
@@ -44,8 +51,30 @@ def build_tick(row):
 
 
 def emit(obj):
-    """输出 JSON 行并立即刷新。"""
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    """输出 ASCII 安全的 JSON 行并立即刷新。
+
+    Windows 重定向 stdout 时可能使用 CP936；只输出 ASCII 可保证 C++ 端按
+    UTF-8 读取时仍能稳定解析，中文由 JSON ``\\uXXXX`` 转义无损还原。
+    """
+    print(json.dumps(obj, ensure_ascii=True, separators=(",", ":")), flush=True)
+
+
+def emit_snapshot_rows(batch_id, timestamp, quotes):
+    """以紧凑 ASCII 行发送小批量报价，避免桌面端构造大型 JSON 树。"""
+    def number(value):
+        return format(float(value or 0), ".15g")
+
+    rows = []
+    for quote in quotes:
+        rows.append(",".join([
+            quote["symbol"], number(quote["price"]), number(quote["volume"]),
+            number(quote["bid"]), number(quote["ask"]), number(quote["open"]),
+            number(quote["high"]), number(quote["low"]),
+            number(quote["pre_close"]), number(quote["amount"]),
+        ]))
+    if rows:
+        sys.stdout.write(f"S\t{batch_id}\t{timestamp}\t" + ";".join(rows) + "\n")
+        sys.stdout.flush()
 
 
 def parse_server(value):
@@ -57,11 +86,28 @@ def parse_server(value):
     return host, int(port)
 
 
+def build_probe_groups(symbols):
+    symbol_set = set(symbols)
+    preferred = [symbol for symbol in PREFERRED_PROBE_SYMBOLS
+                 if symbol in symbol_set]
+    groups = []
+    if preferred:
+        groups.append(preferred[:10])
+        groups.extend([[symbol] for symbol in preferred[:10]])
+
+    # 小型或定制股票池未必包含固定样本；逐只探测最多 10 只，避免某个
+    # 停牌/退市代码让整个 Provider 启动失败。
+    fallback = [symbol for symbol in symbols if symbol not in preferred][:10]
+    groups.extend([[symbol] for symbol in fallback])
+    return groups
+
+
 def connect_client(symbols, configured_server=None):
     candidates = [configured_server] if configured_server else list(PREFERRED_SERVERS)
     attempted = set()
     discovery_attempted = False
-    sample = symbols[:10]
+    probe_groups = build_probe_groups(symbols)
+    diagnostics = []
 
     while candidates:
         endpoint = candidates.pop(0)
@@ -70,11 +116,18 @@ def connect_client(symbols, configured_server=None):
         attempted.add(endpoint)
         try:
             client = Quotes.factory(market="std", server=endpoint, timeout=10)
-            frame = client.quotes(symbol=sample)
-            if frame is not None and not frame.empty:
-                return client, endpoint
-        except Exception:
-            pass
+            for sample in probe_groups:
+                try:
+                    frame = client.quotes(symbol=sample)
+                    if frame is not None and not frame.empty:
+                        return client, endpoint, diagnostics
+                    diagnostics.append(
+                        f"{endpoint[0]}:{endpoint[1]} probe {','.join(sample)}: empty")
+                except Exception as exc:
+                    diagnostics.append(
+                        f"{endpoint[0]}:{endpoint[1]} probe {','.join(sample)}: {exc}")
+        except Exception as exc:
+            diagnostics.append(f"{endpoint[0]}:{endpoint[1]} connect: {exc}")
 
         if not candidates and not configured_server and not discovery_attempted:
             discovery_attempted = True
@@ -83,7 +136,7 @@ def connect_client(symbols, configured_server=None):
             except Exception:
                 pass
 
-    return None, None
+    return None, None, diagnostics
 
 
 def main():
@@ -120,9 +173,10 @@ def main():
         sys.exit(1)
 
     emit({"status": f"connecting to TDX servers for {len(symbols)} symbols..."})
-    client, endpoint = connect_client(symbols, configured_server)
+    client, endpoint, diagnostics = connect_client(symbols, configured_server)
     if client is None:
-        emit({"error": "没有找到能返回实时行情的 TDX 服务器"})
+        detail = diagnostics[-1] if diagnostics else "没有探测到有效报价样本"
+        emit({"error": f"没有找到能返回实时行情的 TDX 服务器；{detail}"})
         sys.exit(1)
 
     emit({"status": f"connected, polling {len(symbols)} symbols",
@@ -148,15 +202,15 @@ def main():
                 continue
             if df is None or df.empty:
                 continue
+            quotes = []
             for _, row in df.iterrows():
                 tick = build_tick(row)
                 if tick is None or tick["price"] <= 0:
                     continue
-                tick["event"] = "quote"
-                tick["batch_id"] = batch_id
-                tick["timestamp"] = captured_at
                 received.add(tick["symbol"])
-                emit(tick)
+                quotes.append(tick)
+            # 以网络请求批次为边界流式输出；不产生逐股跨线程通知。
+            emit_snapshot_rows(batch_id, captured_at, quotes)
         completed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         emit({"event": "snapshot_end", "batch_id": batch_id,
               "timestamp": captured_at, "completed_at": completed_at,

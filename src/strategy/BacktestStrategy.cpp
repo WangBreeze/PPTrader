@@ -25,6 +25,8 @@ QVariantMap BacktestStrategyDescriptor::toVariantMap() const
             {QStringLiteral("description"), description},
             {QStringLiteral("supportedMarket"), supportedMarket},
             {QStringLiteral("minimumWarmupBars"), minimumWarmupBars},
+            {QStringLiteral("supportsRawTicks"), supportsRawTicks},
+            {QStringLiteral("supportsCandles"), supportsCandles},
             {QStringLiteral("parameters"), parameterList}};
 }
 

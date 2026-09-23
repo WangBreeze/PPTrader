@@ -62,11 +62,35 @@ void CustomExecutionStrategy::onTick(const Tick &tick)
 void CustomExecutionStrategy::onCandle(const Candle &candle)
 {
     QMutexLocker locker(&m_mutex);
+    processCandle(candle, false, true);
+}
+
+void CustomExecutionStrategy::evaluateAccountCandle(
+    const Candle &candle, const Position &position, const QDate &lastBuyDay, bool allowSignals)
+{
+    QMutexLocker locker(&m_mutex);
+    const bool heldBefore = m_hasPosition;
+    m_hasPosition = position.quantity > 0.000001;
+    m_entryReferencePrice = m_hasPosition ? position.averageCost : 0.0;
+    m_entryTradingDate = m_hasPosition ? lastBuyDay : QDate{};
+    m_pendingEntry = false;
+    if (!m_hasPosition || !heldBefore) {
+        m_holdingBars = 0;
+        m_pendingExitReason.clear();
+    }
+    processCandle(candle, true, allowSignals);
+}
+
+void CustomExecutionStrategy::processCandle(const Candle &candle, bool accountDriven,
+                                          bool allowSignals)
+{
 
     m_indicators.append(candle);
     const std::optional<bool> entry = evaluateCondition(m_plan.entryCondition, candle);
     const std::optional<bool> exit = evaluateCondition(m_plan.exitCondition, candle);
-    if (m_indicators.barCount() < m_plan.minimumWarmupBars
+    // 补回分钟和等待成交期间仍推进持仓时长，但不能补发历史交易意图。
+    if (accountDriven && m_hasPosition) ++m_holdingBars;
+    if (!allowSignals || m_indicators.barCount() < m_plan.minimumWarmupBars
         || !std::isfinite(candle.close) || candle.close <= 0.0) {
         return;
     }
@@ -98,6 +122,11 @@ void CustomExecutionStrategy::onCandle(const Candle &candle)
 
     if (!m_hasPosition) {
         if (!entry.value_or(false)) return;
+        if (accountDriven) {
+            emitSignal(SignalSide::Buy, QStringLiteral("进入条件成立，等待后续报价模拟撮合"),
+                       candle.close);
+            return;
+        }
         if (m_plan.signalPriceMode == CustomSignalPriceMode::NextOpen) {
             m_pendingEntry = true;
             return;
@@ -111,10 +140,11 @@ void CustomExecutionStrategy::onCandle(const Candle &candle)
         return;
     }
 
-    ++m_holdingBars;
+    if (!accountDriven) ++m_holdingBars;
     if (!m_pendingExitReason.isEmpty() && tradingDate > m_entryTradingDate) {
         emitSignal(SignalSide::Sell,
                    m_pendingExitReason + QStringLiteral("（T+1 延迟执行）"), candle.close);
+        if (accountDriven) return;
         m_hasPosition = false;
         m_entryReferencePrice = 0.0;
         m_entryTradingDate = {};
@@ -146,6 +176,7 @@ void CustomExecutionStrategy::onCandle(const Candle &candle)
     }
 
     emitSignal(SignalSide::Sell, exitReason, candle.close);
+    if (accountDriven) return;
     m_hasPosition = false;
     m_entryReferencePrice = 0.0;
     m_entryTradingDate = {};

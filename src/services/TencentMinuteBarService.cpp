@@ -1,8 +1,10 @@
 #include "services/TencentMinuteBarService.h"
 
+#include "services/MarketDataProvider.h"
 #include "services/TencentQuoteParser.h"
 
 #include <QJsonArray>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
@@ -15,6 +17,34 @@
 
 namespace pp {
 
+namespace {
+
+bool sessionBucketStart(const QDateTime &timestamp, int periodSeconds,
+                        QDateTime *bucketStart)
+{
+    static const QTimeZone shanghai("Asia/Shanghai");
+    const QDateTime local = timestamp.toUTC().toTimeZone(shanghai);
+    QTime sessionStart;
+    QTime sessionEnd;
+    if (local.time() >= QTime(9, 30) && local.time() <= QTime(11, 30)) {
+        sessionStart = QTime(9, 30);
+        sessionEnd = QTime(11, 30);
+    } else if (local.time() >= QTime(13, 0) && local.time() <= QTime(15, 30)) {
+        sessionStart = QTime(13, 0);
+        sessionEnd = QTime(15, 30);
+    } else {
+        return false;
+    }
+    int offset = sessionStart.secsTo(local.time());
+    if (local.time() == sessionEnd && offset > 0) --offset;
+    const QDateTime start(local.date(), sessionStart.addSecs(
+                              (offset / periodSeconds) * periodSeconds), shanghai);
+    *bucketStart = start.toUTC();
+    return true;
+}
+
+} // namespace
+
 quint64 RealtimeMinuteRequestGate::begin()
 {
     m_loading = true;
@@ -23,7 +53,7 @@ quint64 RealtimeMinuteRequestGate::begin()
 
 bool RealtimeMinuteRequestGate::finish(quint64 requestId)
 {
-    if (requestId == 0 || requestId != m_currentRequestId) return false;
+    if (!m_loading || requestId == 0 || requestId != m_currentRequestId) return false;
     m_resolvedRequestId = requestId;
     m_loading = false;
     return true;
@@ -37,6 +67,33 @@ void RealtimeMinuteRequestGate::cancel()
     ++m_currentRequestId;
     m_loading = false;
 }
+
+bool RealtimeLiveSessionState::requestStart()
+{
+    if (m_requested) return false;
+    m_requested = true;
+    return true;
+}
+
+bool RealtimeLiveSessionState::requestStop()
+{
+    if (!m_requested && !m_providerActive) return false;
+    m_requested = false;
+    m_providerActive = false;
+    return true;
+}
+
+void RealtimeLiveSessionState::updateProviderHealth(int health)
+{
+    const bool processActive = health == static_cast<int>(ProviderHealthState::Starting)
+        || health == static_cast<int>(ProviderHealthState::Healthy)
+        || health == static_cast<int>(ProviderHealthState::Degraded);
+    m_providerActive = processActive;
+}
+
+bool RealtimeLiveSessionState::requested() const { return m_requested; }
+bool RealtimeLiveSessionState::providerActive() const { return m_providerActive; }
+bool RealtimeLiveSessionState::minuteRefreshEnabled() const { return m_requested; }
 
 TencentMinuteBarService::TencentMinuteBarService(QObject *parent)
     : QObject(parent)
@@ -77,6 +134,8 @@ bool TencentMinuteBarService::request(
         if (reply->error() == QNetworkReply::NoError) {
             result = parseResponse(reply->readAll(), instrument, requestedAt,
                                    QDateTime::currentDateTimeUtc());
+            result.httpDate = QString::fromLatin1(reply->rawHeader("Date"));
+            result.httpAge = QString::fromLatin1(reply->rawHeader("Age"));
         } else {
             result.instrument = instrument;
             result.requestedAt = requestedAt;
@@ -109,6 +168,8 @@ RealtimeMinuteSeriesResult TencentMinuteBarService::parseResponse(
     result.requestedAt = requestedAt;
     result.fetchedAt = fetchedAt;
     result.providerId = QStringLiteral("tencent_public_m1");
+    result.payloadSha256 = QString::fromLatin1(
+        QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex());
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
@@ -126,6 +187,16 @@ RealtimeMinuteSeriesResult TencentMinuteBarService::parseResponse(
     const QJsonObject symbolObject = root.value(QStringLiteral("data")).toObject()
                                          .value(providerSymbol).toObject();
     const QJsonArray rows = symbolObject.value(QStringLiteral("m1")).toArray();
+    result.responseRowCount = rows.size();
+    // 白名单留存末三行标签与 OHLCV，供验收校准；不记录 URL、请求头或整份响应。
+    for (qsizetype index = std::max(qsizetype(0), rows.size() - 3);
+         index < rows.size(); ++index) {
+        const QJsonArray row = rows.at(index).toArray();
+        QVariantList fields;
+        for (qsizetype field = 0; field < std::min(qsizetype(6), row.size()); ++field)
+            fields.append(row.at(field).toVariant());
+        result.providerTailRows.append(QVariant(fields));
+    }
     QMap<QDateTime, Candle> parsed;
     const QTimeZone shanghai("Asia/Shanghai");
     QDate latestTradingDate;
@@ -176,6 +247,71 @@ RealtimeMinuteSeriesResult TencentMinuteBarService::parseResponse(
     }
     result.lastBarTime = result.candles.last().startTime;
     result.succeeded = true;
+    return result;
+}
+
+bool TencentMinuteBarService::supportsPeriod(int periodSeconds)
+{
+    return periodSeconds == 60 || periodSeconds == 300
+        || periodSeconds == 600
+        || periodSeconds == 900 || periodSeconds == 1800
+        || periodSeconds == 3600;
+}
+
+int TencentMinuteBarService::millisecondsUntilNextMinuteRefresh(
+    const QDateTime &nowUtc, int settleDelayMilliseconds)
+{
+    if (!nowUtc.isValid()) return 60000;
+    constexpr qint64 minuteMilliseconds = 60000;
+    const qint64 nowMilliseconds = nowUtc.toUTC().toMSecsSinceEpoch();
+    const qint64 remainder = ((nowMilliseconds % minuteMilliseconds)
+                              + minuteMilliseconds) % minuteMilliseconds;
+    const qint64 nextMinute = nowMilliseconds - remainder + minuteMilliseconds;
+    const int settleDelay = std::clamp(settleDelayMilliseconds, 1000, 2000);
+    return int(nextMinute + settleDelay - nowMilliseconds);
+}
+
+QDateTime TencentMinuteBarService::expectedClosedMinute(
+    const QDateTime &fetchedAtUtc)
+{
+    if (!fetchedAtUtc.isValid()) return {};
+    const QDateTime utc = fetchedAtUtc.toUTC();
+    QDateTime minuteStart(utc.date(),
+                          QTime(utc.time().hour(), utc.time().minute(), 0),
+                          Qt::UTC);
+    return minuteStart.addSecs(-60);
+}
+
+QVector<Candle> TencentMinuteBarService::aggregateCandles(
+    const QVector<Candle> &minuteCandles, int periodSeconds)
+{
+    if (!supportsPeriod(periodSeconds)) return {};
+    if (periodSeconds == 60) return minuteCandles;
+    QMap<QDateTime, Candle> buckets;
+    for (const Candle &minute : minuteCandles) {
+        if (minute.periodSeconds != 60 || minute.open <= 0.0
+            || minute.high < minute.low || minute.low <= 0.0) continue;
+        QDateTime bucketTime;
+        if (!sessionBucketStart(minute.startTime, periodSeconds, &bucketTime)) continue;
+        auto it = buckets.find(bucketTime);
+        if (it == buckets.end()) {
+            Candle bucket = minute;
+            bucket.startTime = bucketTime;
+            bucket.periodSeconds = periodSeconds;
+            bucket.source = minute.source + QStringLiteral("_agg");
+            buckets.insert(bucketTime, bucket);
+        } else {
+            it->high = std::max(it->high, minute.high);
+            it->low = std::min(it->low, minute.low);
+            it->close = minute.close;
+            it->volume += minute.volume;
+            if (minute.downloadedAt > it->downloadedAt)
+                it->downloadedAt = minute.downloadedAt;
+        }
+    }
+    QVector<Candle> result;
+    result.reserve(buckets.size());
+    for (const Candle &candle : std::as_const(buckets)) result.append(candle);
     return result;
 }
 

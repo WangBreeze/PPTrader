@@ -58,6 +58,7 @@ class MarketSnapshotContractTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void reportsExplicitCollectionDurationWithoutChangingMarketTime();
     void parsesShanghaiMarketTimes();
     void resolvesMostRecentCompletedSnapshotAndTenSecondBoundary();
     void exposesNumericRolesBoardFallbackAndFiveThousandRows();
@@ -65,9 +66,24 @@ private slots:
     void loadsAndValidatesFullAShareUniverse();
     void rejectsStaleSnapshotResponsesByGeneration();
     void reportsStructuredProviderHealth();
+    void assemblerReusesUniverseWithoutLeakingPreviousBatchQuotes();
+    void realtimeTickIsMemoryOnlyByControllerContract();
+    void realtimeSnapshotIsMemoryOnlyByControllerContract();
+    void presentsLatestRealtimeSnapshotWithoutDatabaseMutation();
     void queriesSnapshotOnIndependentDatabaseThread();
     void sustainsWritesAndQueriesWithoutBlockingOrGenerationRegression();
 };
+
+void MarketSnapshotContractTest::reportsExplicitCollectionDurationWithoutChangingMarketTime()
+{
+    MarketSnapshot value;
+    value.timestamp = QDateTime(QDate(2026, 9, 14), QTime(1, 30), Qt::UTC);
+    value.completedAt = value.timestamp.addSecs(30);
+    value.collectionDurationMilliseconds = 3456;
+    QCOMPARE(value.durationMilliseconds(), 3456);
+    QCOMPARE(value.timestamp,
+             QDateTime(QDate(2026, 9, 14), QTime(1, 30), Qt::UTC));
+}
 
 void MarketSnapshotContractTest::parsesShanghaiMarketTimes()
 {
@@ -290,6 +306,114 @@ void MarketSnapshotContractTest::reportsStructuredProviderHealth()
     QVERIFY(providerHealthForBatch(5000, 4999, true) == ProviderHealthState::Degraded);
     QVERIFY(providerHealthForBatch(5000, 0, true) == ProviderHealthState::Error);
     QVERIFY(providerHealthForBatch(0, 0, false) == ProviderHealthState::Error);
+}
+
+void MarketSnapshotContractTest::assemblerReusesUniverseWithoutLeakingPreviousBatchQuotes()
+{
+    const QDateTime timestamp = QDateTime::currentDateTimeUtc();
+    const QVector<Instrument> universe {
+        {QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+         Market::AShare, QStringLiteral("上交所")},
+        {QStringLiteral("000001"), QStringLiteral("平安银行"),
+         Market::AShare, QStringLiteral("深交所")}
+    };
+    MarketSnapshotAssembler assembler(Market::AShare);
+    assembler.setUniverse(universe);
+
+    Tick first;
+    first.instrument = universe.first();
+    first.timestamp = timestamp;
+    first.price = 100.0;
+    assembler.beginBatch(QStringLiteral("batch-1"), timestamp);
+    QVERIFY(assembler.addTick(first));
+    first.price = 101.0;
+    QVERIFY(assembler.addTick(first));
+    QCOMPARE(assembler.receivedCount(), 1);
+    const MarketSnapshot firstSnapshot = assembler.completeBatch(timestamp.addSecs(1));
+    QCOMPARE(firstSnapshot.quotes.size(), 1);
+    QCOMPARE(firstSnapshot.quotes.first().price, 101.0);
+    QCOMPARE(assembler.receivedCount(), 0);
+
+    Tick second;
+    second.instrument = universe.last();
+    second.timestamp = timestamp.addSecs(60);
+    second.price = 10.0;
+    assembler.beginBatch(QStringLiteral("batch-2"), second.timestamp);
+    QVERIFY(assembler.addTick(second));
+    const MarketSnapshot secondSnapshot = assembler.completeBatch(
+        second.timestamp.addSecs(1));
+    QCOMPARE(secondSnapshot.quotes.size(), 1);
+    QCOMPARE(secondSnapshot.quotes.first().instrument.symbol,
+             QStringLiteral("000001"));
+}
+
+void MarketSnapshotContractTest::realtimeTickIsMemoryOnlyByControllerContract()
+{
+    QFile source(QStringLiteral(PPTRADER_SOURCE_DIR)
+                 + QStringLiteral("/src/app/TradingController.cpp"));
+    QVERIFY2(source.open(QIODevice::ReadOnly | QIODevice::Text),
+             qPrintable(source.errorString()));
+    const QByteArray contents = source.readAll();
+    const qsizetype begin = contents.indexOf(
+        "void TradingController::handleTick(const Tick &tick)");
+    const qsizetype end = contents.indexOf(
+        "void TradingController::handleMarketSnapshot", begin);
+    QVERIFY(begin >= 0);
+    QVERIFY(end > begin);
+    const QByteArray realtimeHandler = contents.mid(begin, end - begin);
+
+    QVERIFY2(!realtimeHandler.contains("m_dataStore.appendTick"),
+             "实时 Tick 只能进入内存展示，不能直接写 SQLite");
+}
+
+void MarketSnapshotContractTest::realtimeSnapshotIsMemoryOnlyByControllerContract()
+{
+    QFile source(QStringLiteral(PPTRADER_SOURCE_DIR)
+                 + QStringLiteral("/src/app/TradingController.cpp"));
+    QVERIFY2(source.open(QIODevice::ReadOnly | QIODevice::Text),
+             qPrintable(source.errorString()));
+    const QByteArray contents = source.readAll();
+    const qsizetype begin = contents.indexOf(
+        "void TradingController::handleMarketSnapshot(const MarketSnapshot &snapshot)");
+    const qsizetype end = contents.indexOf(
+        "void TradingController::handleRealtimeSignal", begin);
+    QVERIFY(begin >= 0);
+    QVERIFY(end > begin);
+    const QByteArray realtimeHandler = contents.mid(begin, end - begin);
+
+    QVERIFY2(!realtimeHandler.contains("m_tickWriter.enqueue"),
+             "实时全市场快照不能进入 AsyncTickWriter");
+    QVERIFY2(!realtimeHandler.contains("appendMarketSnapshot"),
+             "实时全市场快照不能同步写 SQLite");
+}
+
+void MarketSnapshotContractTest::presentsLatestRealtimeSnapshotWithoutDatabaseMutation()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(QStringLiteral("memory-only.db"))));
+
+    const QDateTime snapshotTime = QDateTime::currentDateTimeUtc().addSecs(-2);
+    const MarketSnapshot live = snapshot(
+        QStringLiteral("LIVE-MEMORY-ONLY"), snapshotTime,
+        snapshotTime.addMSecs(300), 2,
+        {quote(QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+               QStringLiteral("上交所"), snapshotTime),
+         quote(QStringLiteral("000001"), QStringLiteral("平安银行"),
+               QStringLiteral("深交所"), snapshotTime)});
+
+    const MarketSnapshotQueryResult result = MarketSnapshotQueryService::evaluate(
+        live, snapshotTime.addSecs(2), 10000);
+    QVERIFY(result.found);
+    QVERIFY(result.health == MarketSnapshotHealth::Healthy);
+
+    MarketSnapshotListModel model;
+    model.loadSnapshot(result.snapshot, false);
+    QCOMPARE(model.count(), 2);
+    QVERIFY(model.indexOfSymbol(QStringLiteral("600519")) >= 0);
+    QVERIFY(model.indexOfSymbol(QStringLiteral("000001")) >= 0);
+    QVERIFY(!store.loadMarketSnapshotAtOrBefore(snapshotTime.addSecs(2)).has_value());
 }
 
 void MarketSnapshotContractTest::queriesSnapshotOnIndependentDatabaseThread()

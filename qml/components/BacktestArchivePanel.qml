@@ -8,6 +8,22 @@ Item {
     required property var controller
     readonly property var selectedSummary: archiveList.currentIndex >= 0
         ? controller.backtestArchiveModel.get(archiveList.currentIndex) : ({})
+    readonly property bool rawTickArchiveReady:
+        !!root.selectedSummary.resultId
+        && root.controller.selectedBacktestArchiveId === root.selectedSummary.resultId
+        && root.controller.backtestResultConfiguration.rawTickSnapshotAvailable === true
+    readonly property bool rawTickBrowserOpened: rawTickBrowser.opened
+    property string rawTickBrowserResultId: ""
+
+    function openRawTickBrowser() {
+        if (!root.rawTickArchiveReady)
+            return false
+        root.rawTickBrowserResultId = root.selectedSummary.resultId
+        rawTickBrowser.open()
+        root.controller.requestBacktestArchiveRawTickPage(
+            root.rawTickBrowserResultId, 0, 256)
+        return true
+    }
 
     function restoreSelection() {
         const selected = controller.selectedBacktestArchiveId
@@ -57,9 +73,18 @@ Item {
                 required property int totalTrades
                 width: ListView.view.width; height: 47
                 activeFocusOnTab: true; highlighted: ListView.isCurrentItem
-                onClicked: archiveList.currentIndex = index
-                Keys.onReturnPressed: archiveList.currentIndex = index
-                Keys.onEnterPressed: archiveList.currentIndex = index
+                onClicked: {
+                    archiveList.currentIndex = index
+                    rawTickBrowser.close()
+                }
+                Keys.onReturnPressed: {
+                    archiveList.currentIndex = index
+                    rawTickBrowser.close()
+                }
+                Keys.onEnterPressed: {
+                    archiveList.currentIndex = index
+                    rawTickBrowser.close()
+                }
                 Accessible.name: "归档回测 " + symbol + " " + strategyId
                     + "，完成于 " + Qt.formatDateTime(completedAt, "yyyy-MM-dd HH:mm:ss")
                 Accessible.description: "按回车选择，再使用右侧按钮从 SQLite 加载"
@@ -154,7 +179,7 @@ Item {
             visualWidth: 116; primary: true
             available: !!root.selectedSummary.resultId && !root.controller.backtestRunning
                        && !root.controller.backtestArchiveLoading
-            toolTip: available ? "从 SQLite 恢复权益曲线、成交与不可变身份"
+            toolTip: available ? "在后台从 SQLite 恢复结果与不可变身份；原始 Tick 输入保持按需分页"
                                : "请先选择归档，且等待当前回测结束"
             Accessible.name: "加载所选归档回测"; Accessible.description: toolTip
             onClicked: root.controller.loadBacktestArchive(root.selectedSummary.resultId)
@@ -166,6 +191,175 @@ Item {
             toolTip: "仅刷新 SQLite 归档目录，不访问网络"
             Accessible.name: "刷新归档回测列表"
             onClicked: root.controller.refreshBacktestArchiveList()
+        }
+        PpButton {
+            x: 232; y: parent.height - 42
+            theme: root.theme; text: "逐笔浏览"; visualWidth: 80
+            available: root.rawTickArchiveReady
+                       && !root.controller.backtestArchiveRawTickPageLoading
+            toolTip: root.rawTickArchiveReady
+                ? "按页读取已归档的原始 Tick；每页 256 条，不访问网络"
+                : "请先加载包含完整原始 Tick 快照的归档"
+            Accessible.name: "浏览归档原始 Tick"
+            Accessible.description: toolTip
+            onClicked: root.openRawTickBrowser()
+        }
+    }
+
+    Popup {
+        id: rawTickBrowser
+        objectName: "backtestArchiveRawTickBrowser"
+        parent: Overlay.overlay
+        modal: false
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onClosed: root.rawTickBrowserResultId = ""
+        width: Math.min(parent ? parent.width - 32 : 960, 960)
+        height: Math.min(parent ? parent.height - 32 : 600, 600)
+        x: parent ? Math.round((parent.width - width) / 2) : 0
+        y: parent ? Math.round((parent.height - height) / 2) : 0
+        padding: 0
+        background: Rectangle {
+            radius: 10
+            color: root.theme.bgPanel
+            border.color: root.theme.border
+        }
+        Item {
+            anchors.fill: parent
+            Text {
+                x: 16; y: 12; width: parent.width - 150
+                text: "归档原始 Tick · " + root.rawTickBrowserResultId
+                color: root.theme.textPrimary; elide: Text.ElideMiddle
+                font.family: root.theme.fontFamily; font.pixelSize: 13
+                font.weight: Font.Bold
+                Accessible.name: text
+            }
+            Text {
+                anchors.right: parent.right; anchors.rightMargin: 16; y: 14
+                text: root.controller.backtestArchiveRawTickPageLoading
+                      ? "读取中…"
+                      : (root.controller.backtestArchiveRawTickTotalCount > 0
+                         ? (root.controller.backtestArchiveRawTickPageOffset + 1)
+                           + "–" + Math.min(
+                               root.controller.backtestArchiveRawTickPageOffset
+                               + root.controller.backtestArchiveRawTickModel.count,
+                               root.controller.backtestArchiveRawTickTotalCount)
+                           + " / " + root.controller.backtestArchiveRawTickTotalCount
+                         : "尚未读取")
+                color: root.controller.backtestArchiveRawTickPageLoading
+                       ? root.theme.cyan : root.theme.textMuted
+                font.family: root.theme.fontFamily; font.pixelSize: 9
+                Accessible.name: text
+            }
+            Rectangle {
+                x: 12; y: 42; width: parent.width - 24; height: 26
+                radius: 4; color: root.theme.bgRaised
+                Text { x: 8; width: 62; anchors.verticalCenter: parent.verticalCenter; text: "序号"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 72; width: 184; anchors.verticalCenter: parent.verticalCenter; text: "成交时间"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 260; width: 92; anchors.verticalCenter: parent.verticalCenter; text: "价格"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 356; width: 100; anchors.verticalCenter: parent.verticalCenter; text: "成交量（股）"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 460; width: 116; anchors.verticalCenter: parent.verticalCenter; text: "成交额"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 580; width: 58; anchors.verticalCenter: parent.verticalCenter; text: "方向"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 642; width: 80; anchors.verticalCenter: parent.verticalCenter; text: "源行"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                Text { x: 726; width: parent.width - 734; anchors.verticalCenter: parent.verticalCenter; text: "来源"; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+            }
+            Rectangle {
+                x: 12; y: 72; width: parent.width - 24; height: parent.height - 126
+                radius: 5; color: root.theme.bgInput; border.color: root.theme.border
+                ListView {
+                    id: rawTickList
+                    anchors.fill: parent; anchors.margins: 4
+                    model: root.controller.backtestArchiveRawTickModel
+                    clip: true; boundsBehavior: Flickable.StopAtBounds
+                    keyNavigationEnabled: true
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: ItemDelegate {
+                        required property int index
+                        required property var timestamp
+                        required property real eventIndex
+                        required property real price
+                        required property real volumeShares
+                        required property real amount
+                        required property string direction
+                        required property string directionText
+                        required property real sourceLine
+                        required property string source
+                        width: ListView.view.width; height: 27
+                        activeFocusOnTab: true
+                        Accessible.name: "第 " + (eventIndex + 1) + " 笔，"
+                            + directionText + "，价格 " + price
+                            + "，成交量 " + volumeShares + " 股"
+                        background: Rectangle {
+                            color: index % 2 === 0 ? "transparent" : root.theme.bgRaised
+                            border.color: parent.activeFocus ? root.theme.cyan : "transparent"
+                            border.width: parent.activeFocus ? 1 : 0
+                        }
+                        contentItem: Item {
+                            Text { x: 8; width: 62; anchors.verticalCenter: parent.verticalCenter; text: eventIndex + 1; color: root.theme.textPrimary; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 72; width: 184; anchors.verticalCenter: parent.verticalCenter; text: Qt.formatDateTime(timestamp, "yyyy-MM-dd HH:mm:ss.zzz"); color: root.theme.textPrimary; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 260; width: 92; anchors.verticalCenter: parent.verticalCenter; text: price.toFixed(4); color: root.theme.textPrimary; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 356; width: 100; anchors.verticalCenter: parent.verticalCenter; text: volumeShares.toFixed(0); color: root.theme.textPrimary; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 460; width: 116; anchors.verticalCenter: parent.verticalCenter; text: amount.toFixed(2); color: root.theme.textPrimary; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 580; width: 58; anchors.verticalCenter: parent.verticalCenter; text: direction; color: direction === "B" ? root.theme.green : (direction === "S" ? root.theme.red : root.theme.yellow); font.pixelSize: 9; font.family: root.theme.fontFamily; font.weight: Font.Bold }
+                            Text { x: 642; width: 80; anchors.verticalCenter: parent.verticalCenter; text: sourceLine; color: root.theme.textMuted; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                            Text { x: 726; width: parent.width - 734; anchors.verticalCenter: parent.verticalCenter; text: source; color: root.theme.textMuted; elide: Text.ElideRight; font.pixelSize: 9; font.family: root.theme.fontFamily }
+                        }
+                    }
+                }
+                Text {
+                    anchors.centerIn: parent
+                    visible: root.controller.backtestArchiveRawTickModel.count === 0
+                             && !root.controller.backtestArchiveRawTickPageLoading
+                    text: root.controller.backtestArchiveRawTickPageError.length > 0
+                          ? root.controller.backtestArchiveRawTickPageError
+                          : "该页没有可显示的原始 Tick"
+                    color: root.controller.backtestArchiveRawTickPageError.length > 0
+                           ? root.theme.red : root.theme.textMuted
+                    font.family: root.theme.fontFamily; font.pixelSize: 10
+                    Accessible.name: text
+                }
+            }
+            Text {
+                x: 16; y: parent.height - 45; width: parent.width - 324
+                text: root.controller.backtestArchiveRawTickPageError
+                visible: text.length > 0
+                color: root.theme.red; elide: Text.ElideRight
+                font.family: root.theme.fontFamily; font.pixelSize: 9
+                Accessible.name: text
+            }
+            PpButton {
+                x: parent.width - 300; y: parent.height - 48
+                theme: root.theme; text: "上一页"; visualWidth: 82
+                available: root.controller.backtestArchiveRawTickHasPrevious
+                           && !root.controller.backtestArchiveRawTickPageLoading
+                toolTip: available ? "读取前一页 256 条" : "当前已是第一页或正在读取"
+                Accessible.name: "归档原始 Tick 上一页"
+                onClicked: root.controller.requestBacktestArchiveRawTickPage(
+                    root.controller.backtestArchiveRawTickPageResultId,
+                    Math.max(0, root.controller.backtestArchiveRawTickPageOffset
+                             - root.controller.backtestArchiveRawTickPageSize),
+                    root.controller.backtestArchiveRawTickPageSize)
+            }
+            PpButton {
+                x: parent.width - 212; y: parent.height - 48
+                theme: root.theme; text: "下一页"; visualWidth: 82
+                available: root.controller.backtestArchiveRawTickHasNext
+                           && !root.controller.backtestArchiveRawTickPageLoading
+                toolTip: available ? "读取后一页 256 条" : "当前已是最后一页或正在读取"
+                Accessible.name: "归档原始 Tick 下一页"
+                onClicked: root.controller.requestBacktestArchiveRawTickPage(
+                    root.controller.backtestArchiveRawTickPageResultId,
+                    root.controller.backtestArchiveRawTickPageOffset
+                    + root.controller.backtestArchiveRawTickPageSize,
+                    root.controller.backtestArchiveRawTickPageSize)
+            }
+            PpButton {
+                x: parent.width - 124; y: parent.height - 48
+                theme: root.theme; text: "关闭"; visualWidth: 82
+                toolTip: "关闭逐笔归档浏览器"
+                Accessible.name: "关闭归档原始 Tick 浏览器"
+                onClicked: rawTickBrowser.close()
+            }
         }
     }
 
@@ -187,6 +381,15 @@ Item {
     }
     Connections {
         target: root.controller
-        function onBacktestArchiveStateChanged() { root.restoreSelection() }
+        function onBacktestArchiveStateChanged() {
+            root.restoreSelection()
+            if (rawTickBrowser.opened
+                    && root.controller.selectedBacktestArchiveId
+                       !== root.rawTickBrowserResultId) {
+                rawTickBrowser.close()
+            }
+        }
     }
+
+    Component.onCompleted: root.restoreSelection()
 }

@@ -36,7 +36,7 @@ bool MarketSession::isOpen(const Instrument &instrument, const QDateTime &utcNow
         const QTime time = localNow.time();
         return AShareTradingCalendar::status(date).tradingDay
             && (inTimeRange(time, QTime(9, 30), QTime(11, 30))
-                || inTimeRange(time, QTime(13, 0), QTime(15, 0)));
+                || inTimeRange(time, QTime(13, 0), QTime(15, 30)));
     }
 
     if (instrument.market == Market::HongKong) {
@@ -76,7 +76,7 @@ QString MarketSession::statusText(const Instrument &instrument, const QDateTime 
         const QString calendarText = calendar.coverageKnown
             ? QStringLiteral("日历 %1").arg(calendar.source)
             : QStringLiteral("日历未覆盖，工作日推定");
-        return QStringLiteral("A股%1，北京时间：%2，%3，%4，交易时段 09:30-11:30 / 13:00-15:00")
+        return QStringLiteral("A股%1，北京时间：%2，%3，%4，项目交易时段 09:30-11:30 / 13:00-15:30")
             .arg(isOpen(instrument, utcNow) ? QStringLiteral("开盘中") : QStringLiteral("休市中"),
                  marketTimeText(localNow), calendar.reason, calendarText);
     }

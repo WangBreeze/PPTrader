@@ -13,8 +13,11 @@ class PortfolioArchiveListModel final : public QAbstractListModel {
 public:
     enum Role {
         ResultIdRole = Qt::UserRole + 1,
+        ResultKindRole,
         PortfolioIdRole,
         NameRole,
+        StrategyIdRole,
+        StrategyVersionRole,
         CompletedAtRole,
         LegCountRole,
         PeriodSecondsRole,

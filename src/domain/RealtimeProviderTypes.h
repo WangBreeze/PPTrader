@@ -26,6 +26,7 @@ struct RealtimeProviderCapability {
 
 int realtimeProviderHealthScore(int health, int expectedCount, int receivedCount,
                                 int failureStreak, qint64 silenceMilliseconds);
+int normalizedRealtimePollingIntervalSeconds(int requestedSeconds);
 
 } // namespace pp
 

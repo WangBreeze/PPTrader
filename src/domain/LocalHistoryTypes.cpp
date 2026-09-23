@@ -1,5 +1,7 @@
 #include "domain/LocalHistoryTypes.h"
 
+#include <QRegularExpression>
+
 namespace pp {
 
 QString localHistoryFrequency(int periodSeconds)
@@ -13,6 +15,25 @@ QString localHistoryFrequency(int periodSeconds)
     case 86400: return QStringLiteral("day");
     default: return QStringLiteral("%1s").arg(periodSeconds);
     }
+}
+
+int localHistoryPeriodSeconds(const QString &frequency)
+{
+    const QString normalized = frequency.trimmed().toLower();
+    if (normalized == QStringLiteral("day")) return 86400;
+    static const QRegularExpression pattern(QStringLiteral("^(\\d+)([smhd])$"));
+    const QRegularExpressionMatch match = pattern.match(normalized);
+    if (!match.hasMatch()) return 0;
+    bool ok = false;
+    const int value = match.captured(1).toInt(&ok);
+    if (!ok || value <= 0) return 0;
+    qint64 multiplier = 1;
+    const QChar unit = match.captured(2).at(0);
+    if (unit == QLatin1Char('m')) multiplier = 60;
+    else if (unit == QLatin1Char('h')) multiplier = 3600;
+    else if (unit == QLatin1Char('d')) multiplier = 86400;
+    const qint64 seconds = qint64(value) * multiplier;
+    return seconds >= 1 && seconds <= 86400 ? int(seconds) : 0;
 }
 
 QString LocalHistoryDataset::frequency() const

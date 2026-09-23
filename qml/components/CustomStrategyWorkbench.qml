@@ -5,6 +5,7 @@ import QtQuick.Layouts
 
 Item {
     id: root
+    objectName: "customStrategyWorkbench"
     required property var theme
     required property var controller
 
@@ -16,6 +17,10 @@ Item {
     property string operationMessage: ""
     property bool editorDirty: false
     property bool wizardMode: false
+    clip: wizardMode
+    property double pendingSaveRequestId: 0
+    property string pendingSaveStrategyId: ""
+    property int pendingSaveVersion: 0
 
     readonly property bool savedDefinitionMatches: validation.valid === true
         && selectedStrategyId.length > 0
@@ -57,6 +62,7 @@ Item {
     }
 
     function saveNewVersion() {
+        if (controller.customStrategySaveLoading) return
         if (!validateEditor()) return
         const definition = validation.definition
         if (controller.customStrategyModel.indexOf(definition.strategyId,
@@ -64,17 +70,15 @@ Item {
             operationMessage = "该策略版本已存在；请递增 JSON 中的 version 后再保存"
             return
         }
-        if (!controller.saveCustomStrategyJson(jsonEditor.text)) {
-            operationMessage = controller.customStrategyError
+        const requestId = controller.requestSaveCustomStrategyJson(jsonEditor.text)
+        if (requestId <= 0) {
+            operationMessage = controller.customStrategySaveError
             return
         }
-        selectedStrategyId = definition.strategyId
-        selectedVersion = definition.version
-        const row = controller.customStrategyModel.indexOf(selectedStrategyId,
-                                                           selectedVersion)
-        loadDefinition(selectedStrategyId, selectedVersion, row)
-        operationMessage = "新版本已保存并选中：" + selectedStrategyId
-                         + " v" + selectedVersion
+        pendingSaveRequestId = requestId
+        pendingSaveStrategyId = definition.strategyId
+        pendingSaveVersion = definition.version
+        operationMessage = "正在后台保存新版本…"
     }
 
     function runLocalBacktest() {
@@ -103,6 +107,7 @@ Item {
 
     Row {
         id: modeHeader
+        visible: !root.wizardMode
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
@@ -114,7 +119,7 @@ Item {
             visualWidth: 96
             text: "向导创建"
             active: root.wizardMode
-            toolTip: "按设计稿向导逐步创建策略（当前实现第 3 步：指标组合）"
+            toolTip: "逐步配置指标与条件，保存版本后运行严格本地回测"
             onClicked: root.wizardMode = true
         }
         PpButton {
@@ -129,7 +134,8 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             text: root.wizardMode
                 ? "向导生成的 JSON 可在右侧 JSON 模式校验、保存与回测"
-                : "DSL v2 支持 ROC / VWAP / PP_FLOW 与 series 别名引用"
+                : "DSL v2 · " + (root.controller.customStrategySchema.indicatorSchemas || []).length
+                  + " 类指标可组合，series 别名与参数随策略版本保存"
             color: root.theme.textMuted
             font.family: root.theme.fontFamily
             font.pixelSize: 9
@@ -138,6 +144,8 @@ Item {
     }
 
     RowLayout {
+        objectName: "customStrategyJsonLayer"
+        visible: !root.wizardMode
         anchors.fill: parent
         anchors.topMargin: 38
         spacing: 14
@@ -238,7 +246,7 @@ Item {
             Row {
                 x: 10; y: parent.height - 46; spacing: 8
                 PpButton { theme: root.theme; text: "校验"; visualWidth: 78; toolTip: "校验 JSON、字段路径、指标和规则"; onClicked: root.validateEditor() }
-                PpButton { theme: root.theme; text: "保存新版本"; visualWidth: 104; primary: true; toolTip: "写入不可变版本并刷新本地策略模型"; onClicked: root.saveNewVersion() }
+                PpButton { theme: root.theme; text: root.controller.customStrategySaveLoading ? "保存中…" : "保存新版本"; visualWidth: 104; primary: true; available: !root.controller.customStrategySaveLoading; toolTip: "后台写入不可变版本并刷新本地策略模型"; onClicked: root.saveNewVersion() }
                 PpButton {
                     theme: root.theme; text: "本地回测"; visualWidth: 92
                     success: root.canRun; available: root.canRun
@@ -288,6 +296,23 @@ Item {
                 return
             }
             root.refreshRunAvailability()
+        }
+        function onCustomStrategySaveStateChanged() {
+            if (root.controller.customStrategySaveLoading
+                    || root.controller.customStrategySaveResolvedRequestId
+                       !== root.pendingSaveRequestId)
+                return
+            if (root.controller.customStrategySaveError.length > 0) {
+                root.operationMessage = root.controller.customStrategySaveError
+                return
+            }
+            root.selectedStrategyId = root.pendingSaveStrategyId
+            root.selectedVersion = root.pendingSaveVersion
+            const row = root.controller.customStrategyModel.indexOf(
+                root.selectedStrategyId, root.selectedVersion)
+            root.loadDefinition(root.selectedStrategyId, root.selectedVersion, row)
+            root.operationMessage = "新版本已保存并选中：" + root.selectedStrategyId
+                + " v" + root.selectedVersion
         }
     }
 

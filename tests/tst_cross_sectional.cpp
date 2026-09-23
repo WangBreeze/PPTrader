@@ -71,6 +71,8 @@ void CrossSectionalTest::assemblesUniverseAndCalculatesRelativeStrength()
     const FactorValue &secondStrongest = frames.first().values[1];
     const FactorValue &invalid = frames.first().values[2];
     QVERIFY(strongest.valid);
+    QCOMPARE(strongest.sourcePrice, 110.0);
+    QCOMPARE(strongest.sourcePreviousClose, 100.0);
     QCOMPARE(strongest.rank, 1);
     QCOMPARE(strongest.percentile, 1.0);
     QVERIFY(qAbs(strongest.rawValue - 0.10) < 0.000001);

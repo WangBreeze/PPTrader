@@ -113,7 +113,8 @@ void SimulatedBrokerGateway::updateMarketPrice(const Tick &tick)
         : std::numeric_limits<double>::infinity();
     const QList<QString> orderIds = m_orders.keys();
     for (const QString &orderId : orderIds) {
-        if (isActiveOrder(m_orders.value(orderId).status)) {
+        if (isActiveOrder(m_orders.value(orderId).status)
+            && m_orders.value(orderId).request.instrument.symbol == tick.instrument.symbol) {
             tryFill(orderId, &availableLiquidity);
         }
     }
@@ -263,7 +264,7 @@ QDateTime SimulatedBrokerGateway::defaultExpiry(const OrderRequest &request) con
     const QTimeZone zone = request.instrument.market == Market::USStock
         ? QTimeZone("America/New_York") : QTimeZone("Asia/Shanghai");
     const QTime closeTime = request.instrument.market == Market::HongKong
-        || request.instrument.market == Market::USStock ? QTime(16, 0) : QTime(15, 0);
+        || request.instrument.market == Market::USStock ? QTime(16, 0) : QTime(15, 30);
     return QDateTime(createdAt.toTimeZone(zone).date(), closeTime, zone).toUTC();
 }
 

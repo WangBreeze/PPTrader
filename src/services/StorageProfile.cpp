@@ -40,10 +40,15 @@ bool StorageProfile::validateLocalDatabasePath(const QString &path, QString *err
 
 QString StorageProfile::configuredDatabasePath()
 {
+    const QString environmentPath = qEnvironmentVariable(
+        "PPTRADER_DATABASE_PATH").trimmed();
+    QString error;
+    if (validateLocalDatabasePath(environmentPath, &error))
+        return QDir::cleanPath(environmentPath);
+
     QSettings settings;
     const QString configured = settings.value(
         QStringLiteral("storage/databasePath")).toString();
-    QString error;
     return validateLocalDatabasePath(configured, &error)
         ? QDir::cleanPath(configured) : defaultDatabasePath();
 }

@@ -8,14 +8,27 @@ Item {
     required property var theme
     required property var controller
     property int strategyMode: 0
-    property int subPage: 0 // 二级入口索引：0回测研究 1自定义策略 2组合回测 3多股回测 4参数网格扫描 5执行与审批 6数据管理
+    property int subPage: 0 // 二级入口索引：0回测研究 1自定义策略 2组合回测 3多股回测 4参数网格扫描 5执行与审批 6数据管理 7插件管理
     property bool identityExpanded: false
+    property string pageHeading: "指标与策略"
+    property string pageDescription: "内置与自定义策略统一使用 SQLite 中的历史 Tick 派生 K 线；运行回测不会访问网络 Provider"
+    property string pageContextText: ""
     readonly property bool hasBacktestResult: controller.completedBacktestTaskId > 0
     readonly property bool customMode: strategyMode === 1
     readonly property var resultConfiguration: controller.backtestResultConfiguration
     readonly property bool customResultMismatch: customMode && hasBacktestResult
         && !controller.backtestResultMatchesCustomStrategy(
             customWorkbench.selectedStrategyId, customWorkbench.selectedVersion)
+
+    Connections {
+        target: root.controller
+        function onBacktestSampleWindowChanged() {
+            if (!sampleFromField.activeFocus)
+                sampleFromField.text = root.controller.backtestSampleFromDate
+            if (!sampleToField.activeFocus)
+                sampleToField.text = root.controller.backtestSampleToDate
+        }
+    }
 
     component ConfigField: TextField {
         height: 34
@@ -45,8 +58,26 @@ Item {
                                                    commission, slippage)
     }
 
+    function showBatchBacktestPanel() {
+        strategyMode = 0
+        subPage = 0
+        batchPanelScrollTimer.restart()
+    }
+
+    Timer {
+        id: batchPanelScrollTimer
+        interval: 0
+        repeat: false
+        onTriggered: {
+            const targetY = grid.y + batchBacktestCard.y - 18
+            scroll.contentY = Math.max(0, Math.min(targetY,
+                                                   scroll.contentHeight - scroll.height))
+        }
+    }
+
     Flickable {
         id: scroll
+        objectName: "strategyResearchScroll"
         anchors.fill: parent
         contentWidth: width
         contentHeight: Math.max(height, grid.y + grid.height + 20)
@@ -57,13 +88,13 @@ Item {
 
         Text {
             x: 20; y: 14; width: parent.width - 40; height: 34
-            text: "指标与策略"
+            text: root.pageHeading
             color: root.theme.textPrimary
             font.family: root.theme.fontFamily; font.pixelSize: 24; font.weight: Font.Bold
         }
         Text {
             x: 20; y: 50; width: parent.width - 40; height: 22
-            text: "内置与自定义策略统一使用 SQLite 中的历史 Tick 派生 K 线；运行回测不会访问网络 Provider"
+            text: root.pageDescription
             color: root.theme.textMuted
             font.family: root.theme.fontFamily; font.pixelSize: 11
         }
@@ -71,17 +102,24 @@ Item {
             x: 20; y: 80; width: parent.width - 40; height: 58; radius: 8
             color: root.theme.bgSelected; border.color: root.theme.cyan
             Text {
-                x: 12; y: 8; width: parent.width - 280; height: 42
+                x: 12; y: 8
+                width: parent.width - (modeToggleRow.visible ? 280 : 24)
+                height: 42
                 verticalAlignment: Text.AlignVCenter
-                text: root.customMode
+                text: root.subPage === 7
+                      ? "统一管理声明式策略运行时与第三方 C++ 插件；所有执行仅进入本机模拟账户，真实券商保持禁用。"
+                      : root.pageContextText.length > 0 ? root.pageContextText
+                      : root.customMode
                       ? "自定义 DSL 只允许历史回测；定义、版本、参数和数据 SHA-256 身份会随结果保存。"
                       : "已接入 4 项内置策略；品种、周期和根数必须来自历史 Tick 派生数据集，远端 K 线只作研究缓存。"
                 color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 10
                 elide: Text.ElideRight
             }
             Row {
+                id: modeToggleRow
                 anchors.right: parent.right; anchors.rightMargin: 10
                 anchors.verticalCenter: parent.verticalCenter; spacing: 8
+                visible: root.subPage !== 5 && root.subPage !== 7
                 PpButton { theme: root.theme; text: "内置策略"; visualWidth: 108; active: !root.customMode; toolTip: "使用历史 Tick 派生 K 线，不访问网络"; onClicked: root.strategyMode = 0 }
                 PpButton { theme: root.theme; text: "自定义策略"; visualWidth: 108; active: root.customMode; toolTip: "使用受限 JSON DSL 和历史 Tick 派生 K 线"; onClicked: root.strategyMode = 1 }
             }
@@ -195,6 +233,7 @@ Item {
             }
 
             Rectangle {
+                id: batchBacktestCard
                 Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 500
                 visible: root.subPage === 6
@@ -225,11 +264,18 @@ Item {
                 Layout.fillWidth: true; Layout.preferredHeight: 250
                 visible: root.subPage === 0 && !root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
-                Text { x: 18; y: 16; text: "内置回测策略"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
-                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 18; text: "单击选择 · 参数按策略独立校验"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                Text { x: 18; y: 16; text: "内置周期 K 线策略"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 18; text: "原始 Tick 策略请使用下方批量回测 · 参数独立校验"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                 ListView {
                     x: 18; y: 52; width: parent.width - 36; height: 180
-                    model: root.controller.backtestStrategyCatalog
+                    model: {
+                        const result = []
+                        const catalog = root.controller.backtestStrategyCatalog || []
+                        for (const strategy of catalog) {
+                            if (strategy.supportsCandles) result.push(strategy)
+                        }
+                        return result
+                    }
                     clip: true; spacing: 6; boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                     delegate: Rectangle {
@@ -270,7 +316,25 @@ Item {
                         ComboBox {
                             id: frequencyBox
                             width: 130; height: 34
-                            model: [{ label: "日线", value: "day" }, { label: "60 分钟", value: "60m" }, { label: "30 分钟", value: "30m" }, { label: "15 分钟", value: "15m" }, { label: "5 分钟", value: "5m" }, { label: "1 分钟", value: "1m" }]
+                            model: {
+                                const options = [{ label: "日线", value: "day" },
+                                                 { label: "60 分钟", value: "60m" },
+                                                 { label: "30 分钟", value: "30m" },
+                                                 { label: "15 分钟", value: "15m" },
+                                                 { label: "5 分钟", value: "5m" },
+                                                 { label: "1 分钟", value: "1m" }]
+                                const selected = root.controller.selectedBacktestFrequency
+                                for (let index = 0; index < options.length; ++index) {
+                                    if (options[index].value === selected)
+                                        return options
+                                }
+                                if (root.controller.selectedBacktestPeriodSeconds > 0) {
+                                    return [{ label: root.controller.selectedBacktestPeriodSeconds
+                                                      + " 秒（任意）",
+                                              value: selected }].concat(options)
+                                }
+                                return options
+                            }
                             textRole: "label"; valueRole: "value"
                             enabled: false
                             currentIndex: {
@@ -282,6 +346,7 @@ Item {
                                 return 0
                             }
                             Accessible.name: "K 线周期"
+                            Accessible.description: "只读；由上方历史 Tick 数据集决定，支持 1 到 86400 秒任意周期"
                             contentItem: Text {
                                 leftPadding: 10
                                 verticalAlignment: Text.AlignVCenter
@@ -335,8 +400,22 @@ Item {
                         Text { text: "样本窗（可留空）"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                         Row {
                             spacing: 6
-                            ConfigField { id: sampleFromField; width: 118; placeholderText: "起始 yyyy-MM-dd"; Accessible.name: "样本窗起始日期" }
-                            ConfigField { id: sampleToField; width: 118; placeholderText: "结束 yyyy-MM-dd"; Accessible.name: "样本窗结束日期" }
+                            ConfigField {
+                                id: sampleFromField; width: 118
+                                text: root.controller.backtestSampleFromDate
+                                placeholderText: "起始 yyyy-MM-dd"
+                                Accessible.name: "样本窗起始日期"
+                                onTextEdited: root.controller.setBacktestSampleDateRange(
+                                    text, root.controller.backtestSampleToDate)
+                            }
+                            ConfigField {
+                                id: sampleToField; width: 118
+                                text: root.controller.backtestSampleToDate
+                                placeholderText: "结束 yyyy-MM-dd"
+                                Accessible.name: "样本窗结束日期"
+                                onTextEdited: root.controller.setBacktestSampleDateRange(
+                                    root.controller.backtestSampleFromDate, text)
+                            }
                             PpButton {
                                 theme: root.theme; text: "应用"; visualWidth: 56
                                 toolTip: "按日期范围过滤回测 K 线（留空则不限制）"
@@ -379,7 +458,9 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
-                Layout.fillWidth: true; Layout.preferredHeight: 610
+                Layout.fillWidth: true
+                Layout.preferredHeight: customWorkbench.wizardMode
+                    ? Math.max(360, Math.min(610, scroll.height - grid.y - 20)) : 610
                 visible: root.subPage === 1 && root.customMode
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "自定义策略版本与 JSON"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
@@ -388,6 +469,7 @@ Item {
                     id: customWorkbench
                     x: 18; y: 48; width: parent.width - 36; height: parent.height - 66
                     theme: root.theme; controller: root.controller
+                    onWizardModeChanged: if (customWorkbench.wizardMode) scroll.contentY = 0
                 }
             }
 
@@ -466,10 +548,24 @@ Item {
                               + " · version=" + (root.resultConfiguration.strategyVersion || 0)
                               + " · parameters=" + JSON.stringify(root.resultConfiguration.strategyParameters || {})
                               + "\ndataVersion=" + (root.resultConfiguration.dataVersion || "--")
+                              + "\nequityPoints="
+                              + (root.resultConfiguration.equityDisplayPointCount || 0)
+                              + "/"
+                              + (root.resultConfiguration.equityObservationCount || 0)
+                              + (root.resultConfiguration.equityCurveSampled
+                                 ? "（展示采样，绩效按全部观测计算）" : "")
                               + "\ndatasetVersion="
                               + (root.resultConfiguration.datasetIdentity
                                  && root.resultConfiguration.datasetIdentity.datasetVersion
                                  ? root.resultConfiguration.datasetIdentity.datasetVersion : "--")
+                              + "\nposition="
+                              + (root.resultConfiguration.hasOpenPosition
+                                 ? "OPEN " + root.resultConfiguration.openPositionQuantity
+                                   + "@" + root.resultConfiguration.openPositionAveragePrice
+                                   + " · " + Qt.formatDateTime(
+                                       root.resultConfiguration.openPositionEntryTime,
+                                       "yyyy-MM-dd HH:mm:ss")
+                                 : "FLAT")
                         color: root.theme.textMuted; selectionColor: root.theme.cyan
                         selectedTextColor: root.theme.bgCanvas
                         font.family: "Consolas"; font.pixelSize: 8
@@ -507,8 +603,26 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 360
                         color: root.theme.bgInput; radius: 8; border.color: root.theme.border
-                        Text { x: 12; y: 8; text: "K 线与买卖点"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
-                        BacktestCandleChart { anchors.fill: parent; anchors.margins: 8; anchors.topMargin: 30; theme: root.theme; model: root.controller.candleModel }
+                        Text {
+                            x: 12; y: 8
+                            text: "K 线与买卖点"
+                                  + (root.hasBacktestResult
+                                     && root.resultConfiguration.frequency
+                                     ? " · " + root.resultConfiguration.frequency : "")
+                            color: root.theme.textPrimary
+                            font.family: root.theme.fontFamily; font.pixelSize: 11
+                            font.weight: Font.Bold
+                        }
+                        BacktestCandleChart {
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            anchors.topMargin: 30
+                            theme: root.theme
+                            model: root.controller.candleModel
+                            emptyText: root.controller.backtestResultHistoricalSnapshot
+                                ? "该旧归档未保存 K 线与信号快照；权益和成交已按历史身份恢复"
+                                : "完成回测后显示 K 线与买卖点"
+                        }
                     }
                     Rectangle {
                         Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumWidth: 320
@@ -590,6 +704,17 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: width < 850 ? 820 : 680
+                visible: root.subPage === 5
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                PaperStrategyPanel {
+                    anchors.fill: parent; anchors.margins: 18
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 480
                 visible: root.subPage === 5
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
@@ -603,11 +728,50 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
-                Layout.fillWidth: true; Layout.preferredHeight: 420
-                visible: root.subPage === 4 && root.customMode
+                Layout.fillWidth: true; Layout.preferredHeight: 430
+                visible: root.subPage === 6
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
-                Text { x: 18; y: 14; text: "参数网格扫描"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
-                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "笛卡尔积回测 · 收益率降序"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                Text { x: 18; y: 14; text: "A 股停复牌事实导入"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "差异预览 · 不可变批次 · 显式修订"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                AShareInstrumentDayImportPanel {
+                    x: 18; y: 46; width: parent.width - 36; height: parent.height - 62
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true
+                Layout.preferredHeight: width < 940 ? 700 : 500
+                visible: root.subPage === 6
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                Text { x: 18; y: 14; text: "A 股行业分类数据集导入"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "双哈希 · 不可变数据集 · 显式同版本修订"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                AShareIndustryImportPanel {
+                    x: 18; y: 46; width: parent.width - 36; height: parent.height - 62
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true
+                Layout.preferredHeight: width < 940 ? 1540 : 790
+                visible: root.subPage === 7
+                radius: 10; color: root.theme.bgCanvas; border.color: root.theme.border
+                StrategyPluginPanel {
+                    anchors.fill: parent; anchors.margins: 16
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 420
+                visible: root.subPage === 4
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                Text { x: 18; y: 14; text: "参数研究"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }
+                Text { anchors.right: parent.right; anchors.rightMargin: 18; y: 17; text: "自定义 K 线网格 / 原始 Tick 训练选参与最终留出"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                 ParameterGridPanel {
                     x: 18; y: 46; width: parent.width - 36; height: parent.height - 60
                     theme: root.theme; controller: root.controller
@@ -616,7 +780,8 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
-                Layout.fillWidth: true; Layout.preferredHeight: 640
+                Layout.fillWidth: true
+                Layout.preferredHeight: width < 940 ? 1320 : 900
                 visible: root.subPage === 3
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
                 Text { x: 18; y: 14; text: "多股横截面回测"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 15; font.weight: Font.Bold }

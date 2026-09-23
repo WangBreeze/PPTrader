@@ -7,6 +7,27 @@ Item {
     id: root
     required property var theme
     required property var controller
+    readonly property var preparationState:
+        root.controller.nasBacktestPreparationSummary || ({})
+
+    function configureBacktestPreparation() {
+        if (!periodField.acceptableInput || !minimumBarsField.acceptableInput)
+            return false
+        return root.controller.configureNasBacktestPreparation(
+                    Number(periodField.text), Number(minimumBarsField.text))
+    }
+
+    Connections {
+        target: root.controller
+        function onBacktestSampleWindowChanged() {
+            if (!startDateField.activeFocus
+                    && root.controller.backtestSampleFromDate.length > 0)
+                startDateField.text = root.controller.backtestSampleFromDate
+            if (!endDateField.activeFocus
+                    && root.controller.backtestSampleToDate.length > 0)
+                endDateField.text = root.controller.backtestSampleToDate
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -39,6 +60,7 @@ Item {
                         theme: root.theme; text: "应用"; visualWidth: 58
                         available: !root.controller.nasDataNodeLoading
                                    && !root.controller.nasDataNodeSyncRunning
+                                   && !root.preparationState.running
                         toolTip: "只保存端点；令牌仅从 PPTRADER_NAS_TOKEN 读取"
                         onClicked: root.controller.configureNasDataNode(endpointField.text)
                     }
@@ -68,17 +90,25 @@ Item {
                     Layout.fillWidth: true; spacing: 5
                     TextField {
                         id: startDateField; Layout.fillWidth: true; Layout.preferredHeight: 34
-                        text: Qt.formatDate(new Date(), "yyyy-MM-dd")
+                        text: root.controller.backtestSampleFromDate.length > 0
+                              ? root.controller.backtestSampleFromDate
+                              : Qt.formatDate(new Date(), "yyyy-MM-dd")
                         inputMask: "0000-00-00"; color: root.theme.textPrimary
                         font.family: root.theme.fontFamily; font.pixelSize: 9
                         Accessible.name: "NAS catalog 起始日期"
+                        onTextEdited: root.controller.setBacktestSampleDateRange(text, text)
                         background: Rectangle { radius: 6; color: root.theme.bgCanvas; border.width: startDateField.activeFocus ? 2 : 1; border.color: startDateField.activeFocus ? root.theme.cyan : root.theme.border }
                     }
                     TextField {
                         id: endDateField; Layout.fillWidth: true; Layout.preferredHeight: 34
-                        text: startDateField.text; inputMask: "0000-00-00"
+                        text: root.controller.backtestSampleToDate.length > 0
+                              ? root.controller.backtestSampleToDate
+                              : startDateField.text
+                        inputMask: "0000-00-00"
                         color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 9
                         Accessible.name: "NAS catalog 结束日期"
+                        onTextEdited: root.controller.setBacktestSampleDateRange(
+                            root.controller.backtestSampleFromDate, text)
                         background: Rectangle { radius: 6; color: root.theme.bgCanvas; border.width: endDateField.activeFocus ? 2 : 1; border.color: endDateField.activeFocus ? root.theme.cyan : root.theme.border }
                     }
                 }
@@ -94,6 +124,7 @@ Item {
                         visualWidth: 104
                         available: !root.controller.nasDataNodeLoading
                                    && !root.controller.nasDataNodeSyncRunning
+                                   && !root.preparationState.running
                                    && endpointField.text.length > 0
                         toolTip: "只查询指定代码与日期范围，不扫描整个 NAS"
                         onClicked: root.controller.requestNasTickCatalog(
@@ -104,19 +135,31 @@ Item {
                         visualWidth: 86
                         available: !root.controller.nasDataNodeLoading
                                    && !root.controller.nasDataNodeSyncRunning
+                                   && !root.preparationState.running
                                    && catalogBox.currentIndex >= 0
+                                   && periodField.acceptableInput
+                                   && minimumBarsField.acceptableInput
                         toolTip: "显式下载选中交易日，校验 SHA-256 后事务写入本地 SQLite"
-                        onClicked: root.controller.syncNasTickDay(
-                            symbolField.text, catalogBox.currentValue)
+                        onClicked: {
+                            if (root.configureBacktestPreparation())
+                                root.controller.syncNasTickDay(
+                                    symbolField.text, catalogBox.currentValue)
+                        }
                     }
                     PpButton {
                         theme: root.theme; text: "同步全部"
                         visualWidth: 86
                         available: !root.controller.nasDataNodeLoading
                                    && !root.controller.nasDataNodeSyncRunning
+                                   && !root.preparationState.running
                                    && root.controller.nasDataNodeCatalog.length > 0
-                        toolTip: "显式串行同步当前 catalog 的全部交易日；单日失败不影响其他日期"
-                        onClicked: root.controller.syncNasTickRange(symbolField.text)
+                                   && periodField.acceptableInput
+                                   && minimumBarsField.acceptableInput
+                        toolTip: "显式同步全部交易日，完成后生成目标周期回测缓存"
+                        onClicked: {
+                            if (root.configureBacktestPreparation())
+                                root.controller.syncNasTickRange(symbolField.text)
+                        }
                     }
                 }
                 RowLayout {
@@ -124,12 +167,21 @@ Item {
                     PpButton {
                         theme: root.theme; text: "取消"; visualWidth: 68
                         available: root.controller.nasDataNodeSyncRunning
-                        toolTip: "取消当前下载或导入；已成功日期保持不变"
-                        onClicked: root.controller.cancelNasTickSync()
+                                   || root.preparationState.running
+                        toolTip: root.preparationState.running
+                                 ? "取消周期缓存准备；已完成缓存保持可用"
+                                 : "取消当前下载或导入；已成功日期保持不变"
+                        onClicked: {
+                            if (root.preparationState.running)
+                                root.controller.cancelNasBacktestPreparation()
+                            else
+                                root.controller.cancelNasTickSync()
+                        }
                     }
                     PpButton {
                         theme: root.theme; text: "重试未完成"; visualWidth: 96
                         available: !root.controller.nasDataNodeSyncRunning
+                                   && !root.preparationState.running
                                    && root.controller.nasDataNodeSyncCanResume
                         toolTip: "只重试失败或取消的交易日，不重复成功日期"
                         onClicked: root.controller.resumeNasTickSync()
@@ -165,11 +217,58 @@ Item {
                     }
                 }
             }
+            ColumnLayout {
+                Layout.preferredWidth: 112; spacing: 3
+                Text {
+                    text: "回测周期（秒）"
+                    color: root.theme.textMuted
+                    font.family: root.theme.fontFamily; font.pixelSize: 9
+                }
+                TextField {
+                    id: periodField
+                    Layout.fillWidth: true; Layout.preferredHeight: 32
+                    text: String(root.preparationState.periodSeconds || 60)
+                    validator: IntValidator { bottom: 1; top: 86400 }
+                    color: root.theme.textPrimary
+                    font.family: root.theme.fontFamily; font.pixelSize: 9
+                    selectByMouse: true; activeFocusOnTab: true
+                    Accessible.name: "NAS 回测 K 线周期秒数"
+                    background: Rectangle {
+                        radius: 5; color: root.theme.bgCanvas
+                        border.color: periodField.activeFocus
+                                      ? root.theme.cyan : root.theme.border
+                    }
+                }
+            }
+            ColumnLayout {
+                Layout.preferredWidth: 102; spacing: 3
+                Text {
+                    text: "最低 K 线"
+                    color: root.theme.textMuted
+                    font.family: root.theme.fontFamily; font.pixelSize: 9
+                }
+                TextField {
+                    id: minimumBarsField
+                    Layout.fillWidth: true; Layout.preferredHeight: 32
+                    text: String(root.preparationState.minimumBars || 200)
+                    validator: IntValidator { bottom: 2; top: 5000 }
+                    color: root.theme.textPrimary
+                    font.family: root.theme.fontFamily; font.pixelSize: 9
+                    selectByMouse: true; activeFocusOnTab: true
+                    Accessible.name: "NAS 回测最低 K 线根数"
+                    background: Rectangle {
+                        radius: 5; color: root.theme.bgCanvas
+                        border.color: minimumBarsField.activeFocus
+                                      ? root.theme.cyan : root.theme.border
+                    }
+                }
+            }
             PpButton {
                 theme: root.theme; text: root.controller.nasDataNodeLoading ? "查询中" : "查询 manifest"
                 visualWidth: 108
                 available: !root.controller.nasDataNodeLoading
                            && !root.controller.nasDataNodeSyncRunning
+                           && !root.preparationState.running
                            && endpointField.text.length > 0
                            && manifestField.text.trim().length > 0
                 toolTip: "只检查显式代码清单与最多 31 天日期范围"
@@ -180,9 +279,31 @@ Item {
                 theme: root.theme; text: "同步 manifest"; visualWidth: 104
                 available: !root.controller.nasDataNodeLoading
                            && !root.controller.nasDataNodeSyncRunning
+                           && !root.preparationState.running
                            && root.controller.nasDataNodeManifestSummary.entries > 0
-                toolTip: "当前固定单文件串行导入；每个代码交易日独立事务"
-                onClicked: root.controller.syncNasTickManifest()
+                           && periodField.acceptableInput
+                           && minimumBarsField.acceptableInput
+                toolTip: "下载并串行导入 Tick，随后批量生成目标周期回测缓存"
+                onClicked: {
+                    if (root.configureBacktestPreparation())
+                        root.controller.syncNasTickManifest()
+                }
+            }
+            PpButton {
+                theme: root.theme
+                text: root.preparationState.running ? "准备中" : "准备已同步"
+                visualWidth: 104
+                available: !root.controller.nasDataNodeLoading
+                           && !root.controller.nasDataNodeSyncRunning
+                           && !root.preparationState.running
+                           && root.controller.nasDataNodeSyncSummary.succeeded > 0
+                           && periodField.acceptableInput
+                           && minimumBarsField.acceptableInput
+                toolTip: "不访问 NAS；只为已同步 Tick 生成目标周期缓存并刷新回测目录"
+                onClicked: {
+                    if (root.configureBacktestPreparation())
+                        root.controller.prepareNasBacktestDatasets()
+                }
             }
         }
 
@@ -214,6 +335,11 @@ Item {
                            + " · " + (root.controller.nasDataNodeSyncProgress * 100).toFixed(1) + "% · "
                            + root.controller.nasDataNodeReceivedBytes
                            + "/" + root.controller.nasDataNodeExpectedBytes + " bytes" : "")
+                      + (root.preparationState.running
+                         ? " · 回测准备 "
+                           + root.preparationState.completedSymbols + "/"
+                           + root.preparationState.totalSymbols + " · "
+                           + root.preparationState.currentSymbol : "")
                 color: root.controller.nasDataNodeError.length > 0
                        ? root.theme.red : root.theme.textMuted
                 font.family: root.theme.fontFamily; font.pixelSize: 9
@@ -226,7 +352,8 @@ Item {
             Layout.fillWidth: true
             text: root.controller.nasDataNodeError.length > 0
                   ? root.controller.nasDataNodeError
-                  : "单代码 catalog 最多 367 天；多代码 manifest 最多 6000 个代码、31 天，固定串行事务导入。打开页面和选择日期不会自动联网。"
+                  : (root.preparationState.statusText
+                     || "单代码 catalog 最多 367 天；多代码 manifest 最多 6000 个代码、31 天。打开页面和选择日期不会自动联网。")
             color: root.controller.nasDataNodeError.length > 0 ? root.theme.red : root.theme.yellow
             font.family: root.theme.fontFamily; font.pixelSize: 9
             wrapMode: Text.Wrap
@@ -238,6 +365,7 @@ Item {
                 visualWidth: 108
                 available: !root.controller.nasDataNodeLoading
                            && !root.controller.nasDataNodeSyncRunning
+                           && !root.preparationState.running
                            && root.controller.nasDataNodeEndpoint.length > 0
                 toolTip: "只读取 NAS 日期目录层变更摘要；不下载、不自动同步"
                 onClicked: root.controller.requestNasNodeChanges()
@@ -245,6 +373,7 @@ Item {
             PpButton {
                 theme: root.theme; text: "刷新缓存统计"; visualWidth: 96
                 available: !root.controller.nasDataNodeSyncRunning
+                           && !root.preparationState.running
                 toolTip: "只扫描应用 NAS 暂存目录的日期/代码 CSV，不访问网络"
                 onClicked: root.controller.refreshNasTickCacheSummary()
             }
@@ -252,6 +381,7 @@ Item {
                 theme: root.theme; text: "清理 30 天前"; visualWidth: 96
                 available: !root.controller.nasDataNodeSyncRunning
                            && !root.controller.nasDataNodeLoading
+                           && !root.preparationState.running
                 toolTip: "显式删除 NAS 暂存目录中超过 30 天的代码 CSV；不会删除 SQLite 数据"
                 onClicked: root.controller.pruneNasTickCache(30)
             }

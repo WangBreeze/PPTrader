@@ -3,6 +3,7 @@
 #include "domain/CustomStrategyTypes.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
 

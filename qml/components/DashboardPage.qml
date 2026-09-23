@@ -7,8 +7,12 @@ Item {
     id: root
     required property var theme
     required property var controller
+    required property bool pageActive
     property var liveQuote: ({})
+    property int realtimePeriodSeconds: 60
     property int historyPeriodSeconds: 300
+    property bool showRawTickSeries: false
+    signal backtestWorkspaceRequested()
 
     function refreshLiveQuote() {
         const row = root.controller.marketSnapshotModel.indexOfSymbol(
@@ -26,7 +30,8 @@ Item {
 
     function requestRealtimeMinute() {
         if (root.controller.selectedLiveSymbol.length > 0)
-            root.controller.requestRealtimeMinuteSeries(root.controller.selectedLiveSymbol)
+            root.controller.requestRealtimeMinuteSeriesPeriod(
+                root.controller.selectedLiveSymbol, root.realtimePeriodSeconds)
     }
 
     function requestHistory() {
@@ -36,10 +41,18 @@ Item {
                 0, 3000, 800)
     }
 
+    function requestRawTicks() {
+        if (root.controller.selectedBacktestSymbol.length > 0)
+            root.controller.requestLocalTickSeries(
+                root.controller.selectedBacktestSymbol, tickDateField.text, 100000)
+    }
+
     Component.onCompleted: {
         refreshLiveQuote()
         if (root.controller.selectedBacktestPeriodSeconds > 0)
             root.historyPeriodSeconds = root.controller.selectedBacktestPeriodSeconds
+        root.realtimePeriodSeconds = root.controller.realtimeMinutePeriodSeconds
+        requestRealtimeMinute()
         requestHistory()
     }
 
@@ -66,7 +79,7 @@ Item {
         }
         Text {
             x: 20; y: 46; width: parent.width - 40; height: 20
-            text: "实时图使用免费 1 分钟行情且仅驻留内存 · 回测继续使用独立下载的历史 Tick 数据"
+            text: "实时图以免费 1 分钟行情派生常用周期且仅驻留内存 · 回测继续使用独立下载的历史 Tick 数据"
             color: root.theme.textMuted
             font.family: root.theme.fontFamily
             font.pixelSize: 10
@@ -105,6 +118,8 @@ Item {
                     LocalBacktestSelector {
                         anchors.fill: parent; anchors.margins: 16
                         theme: root.theme; controller: root.controller
+                        showWorkspaceActions: true
+                        onBacktestWorkspaceRequested: root.backtestWorkspaceRequested()
                     }
                 }
             }
@@ -123,7 +138,9 @@ Item {
 
                     Text {
                         x: 18; y: 14; width: parent.width - 36
-                        text: "实时 1 分钟 K 线"
+                        text: "实时 " + root.controller.realtimeMinutePeriodOptions[
+                                  realtimePeriodCombo.currentIndex >= 0
+                                  ? realtimePeriodCombo.currentIndex : 0].label + " K 线"
                         color: root.theme.textPrimary
                         font.family: root.theme.fontFamily; font.pixelSize: 14; font.weight: Font.Bold
                     }
@@ -139,7 +156,29 @@ Item {
                     }
                     Row {
                         x: 18; y: 62; height: 34; spacing: 8
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: "周期 1min"; color: root.theme.cyan; font.family: root.theme.fontFamily; font.pixelSize: 10; font.weight: Font.DemiBold }
+                        ComboBox {
+                            id: realtimePeriodCombo
+                            width: 82; height: 32
+                            model: root.controller.realtimeMinutePeriodOptions
+                            textRole: "label"; valueRole: "periodSeconds"
+                            currentIndex: {
+                                const options = root.controller.realtimeMinutePeriodOptions
+                                for (let index = 0; index < options.length; ++index) {
+                                    if (Number(options[index].periodSeconds)
+                                            === root.realtimePeriodSeconds) return index
+                                }
+                                return 0
+                            }
+                            Accessible.name: "实时 K 线常用周期"
+                            onActivated: function(index) {
+                                root.realtimePeriodSeconds = Number(
+                                    root.controller.realtimeMinutePeriodOptions[index].periodSeconds)
+                                root.controller.setRealtimeMinutePeriod(
+                                    root.realtimePeriodSeconds)
+                                if (root.controller.realtimeMinuteCount === 0)
+                                    root.requestRealtimeMinute()
+                            }
+                        }
                         PpButton {
                             theme: root.theme; text: "刷新行情"; visualWidth: 82; primary: true
                             available: !root.controller.realtimeMinuteLoading
@@ -151,7 +190,9 @@ Item {
                     }
                     CandleSeriesChart {
                         x: 18; y: 102; width: parent.width - 36; height: parent.height - 118
-                        theme: root.theme; model: root.controller.realtimeMinuteCandleModel
+                        theme: root.theme
+                        model: root.pageActive ? root.controller.realtimeMinuteCandleModel : null
+                        dynamicMode: true
                         loading: root.controller.realtimeMinuteLoading
                         statusText: root.controller.realtimeMinuteStatusText
                         errorText: root.controller.realtimeMinuteError
@@ -166,7 +207,7 @@ Item {
 
                     Text {
                         x: 18; y: 14; width: parent.width - 36
-                        text: "历史 Tick 派生 K 线"
+                        text: root.showRawTickSeries ? "历史逐笔成交（非周期）" : "历史 Tick 派生 K 线"
                         color: root.theme.textPrimary
                         font.family: root.theme.fontFamily; font.pixelSize: 14; font.weight: Font.Bold
                     }
@@ -174,7 +215,9 @@ Item {
                         x: 18; y: 38; width: parent.width - 36
                         text: root.controller.selectedBacktestInstrumentTitle.length > 0
                               ? root.controller.selectedBacktestInstrumentTitle + " · "
-                                + root.controller.localCandleSeriesStatusText
+                                + (root.showRawTickSeries
+                                   ? root.controller.localTickSeriesStatusText
+                                   : root.controller.localCandleSeriesStatusText)
                               : "尚未选择本地历史品种"
                         color: root.theme.textMuted
                         elide: Text.ElideRight
@@ -182,9 +225,22 @@ Item {
                     }
                     Row {
                         x: 18; y: 62; height: 34; spacing: 8
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: "周期（秒）"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                        PpButton {
+                            theme: root.theme; text: "周期 K 线"; visualWidth: 78
+                            active: !root.showRawTickSeries
+                            toolTip: "从历史 Tick 按指定周期派生 OHLCV"
+                            onClicked: { root.showRawTickSeries = false; root.requestHistory() }
+                        }
+                        PpButton {
+                            theme: root.theme; text: "逐笔成交"; visualWidth: 78
+                            active: root.showRawTickSeries
+                            toolTip: "非周期序列：横轴为成交事件顺序，保留真实时间与 B/S/M 方向"
+                            onClicked: { root.showRawTickSeries = true; root.requestRawTicks() }
+                        }
+                        Text { visible: !root.showRawTickSeries; anchors.verticalCenter: parent.verticalCenter; text: "周期（秒）"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                         TextField {
                             id: historyPeriodField; width: 92; height: 32; text: String(root.historyPeriodSeconds)
+                            visible: !root.showRawTickSeries
                             validator: IntValidator { bottom: 1; top: 86400 }
                             color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10
                             Accessible.name: "历史 K 线周期秒数"
@@ -192,18 +248,48 @@ Item {
                         }
                         PpButton {
                             theme: root.theme; text: "应用周期"; visualWidth: 82; primary: true
+                            visible: !root.showRawTickSeries
                             available: !root.controller.localCandleSeriesLoading
                             toolTip: "优先复用周期缓存；原始 Tick 改变后自动重建"
                             onClicked: { root.historyPeriodSeconds = Number(historyPeriodField.text); root.requestHistory() }
                         }
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.controller.localCandleSeriesTotalBars > 0 ? "共 " + root.controller.localCandleSeriesTotalBars + " 根" : "共 -- 根"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
+                        TextField {
+                            id: tickDateField; width: 104; height: 32
+                            visible: root.showRawTickSeries
+                            placeholderText: "最新交易日"
+                            color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 10
+                            Accessible.name: "逐笔成交交易日，留空读取最新交易日"
+                            background: Rectangle { radius: 5; color: root.theme.bgInput; border.color: tickDateField.activeFocus ? root.theme.cyan : root.theme.border }
+                        }
+                        PpButton {
+                            theme: root.theme; text: "加载逐笔"; visualWidth: 82; primary: true
+                            visible: root.showRawTickSeries
+                            available: !root.controller.localTickSeriesLoading
+                            toolTip: "只读取 SQLite 原始 Tick；日期留空时读取最新交易日，不访问网络"
+                            onClicked: root.requestRawTicks()
+                        }
+                        Text { anchors.verticalCenter: parent.verticalCenter; text: root.showRawTickSeries ? (root.controller.localTickSeriesRawCount > 0 ? "原始 " + root.controller.localTickSeriesRawCount + " 笔" : "原始 -- 笔") : (root.controller.localCandleSeriesTotalBars > 0 ? "共 " + root.controller.localCandleSeriesTotalBars + " 根" : "共 -- 根"); color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9 }
                     }
                     CandleSeriesChart {
                         x: 18; y: 102; width: parent.width - 36; height: parent.height - 118
-                        theme: root.theme; model: root.controller.localCandleSeriesModel
+                        visible: !root.showRawTickSeries
+                        theme: root.theme
+                        model: root.pageActive ? root.controller.localCandleSeriesModel : null
                         loading: root.controller.localCandleSeriesLoading
                         statusText: root.controller.localCandleSeriesStatusText
                         errorText: root.controller.localCandleSeriesError
+                        canLoadOlderData: root.controller.localCandleSeriesHasOlderData
+                        olderDataLoading: root.controller.localCandleSeriesLoading
+                        onOlderDataRequested: root.controller.requestOlderLocalCandleSeries()
+                    }
+                    TickSeriesChart {
+                        x: 18; y: 102; width: parent.width - 36; height: parent.height - 118
+                        visible: root.showRawTickSeries
+                        theme: root.theme
+                        seriesModel: root.pageActive ? root.controller.localTickSeriesModel : null
+                        loadingState: root.controller.localTickSeriesLoading
+                        statusText: root.controller.localTickSeriesStatusText
+                        errorText: root.controller.localTickSeriesError
                     }
                 }
             }
@@ -217,7 +303,7 @@ Item {
     }
     Connections {
         target: root.controller
-        function onLiveInstrumentChanged() { root.refreshLiveQuote() }
+        function onLiveInstrumentChanged() { root.refreshLiveQuote(); root.requestRealtimeMinute() }
         function onMarketSnapshotChanged() { root.refreshLiveQuote() }
         function onSnapshotQueryStateChanged() { root.refreshLiveQuote() }
     }
@@ -226,7 +312,9 @@ Item {
         function onBacktestInstrumentChanged() {
             if (root.controller.selectedBacktestPeriodSeconds > 0)
                 root.historyPeriodSeconds = root.controller.selectedBacktestPeriodSeconds
-            root.requestHistory()
+            if (!root.visible) return
+            if (root.showRawTickSeries) root.requestRawTicks()
+            else root.requestHistory()
         }
     }
 }

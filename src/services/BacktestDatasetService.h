@@ -4,8 +4,11 @@
 #include "domain/MarketTypes.h"
 
 #include <QObject>
+#include <QStringList>
 #include <QThread>
+#include <QVariantMap>
 
+#include <atomic>
 #include <memory>
 
 namespace pp {
@@ -25,18 +28,31 @@ public:
     void stop();
     bool request(quint64 requestId, const QString &symbol, int periodSeconds,
                  int barCount, const QVector<Instrument> &knownInstruments);
+    bool requestBatch(quint64 requestId, const QStringList &symbols,
+                      int periodSeconds, int minimumBars,
+                      const QVector<Instrument> &knownInstruments);
+    void cancelBatch();
     bool isRunning() const;
 
 signals:
     void prepared(quint64 requestId, const pp::BacktestDatasetIdentity &identity,
                   const QVector<pp::Candle> &candles);
     void failed(quint64 requestId, const QString &message);
+    void batchItemStarted(quint64 requestId, const QString &symbol);
+    void batchProgress(quint64 requestId, int completedSymbols,
+                       int totalSymbols, const QString &currentSymbol);
+    void batchFinished(quint64 requestId, int periodSeconds,
+                       const QStringList &preparedSymbols,
+                       const QVariantMap &failedSymbols,
+                       qint64 elapsedMilliseconds, bool cancelled);
 
 private:
     QThread m_thread;
     QObject *m_worker = nullptr;
     std::unique_ptr<SqliteLocalDataStore> m_workerStore;
+    std::shared_ptr<std::atomic_bool> m_batchCancellation;
     bool m_running = false;
+    bool m_batchRunning = false;
 };
 
 } // namespace pp

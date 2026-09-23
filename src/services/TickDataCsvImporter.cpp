@@ -1,5 +1,6 @@
 #include "services/TickDataCsvImporter.h"
 
+#include "services/HistoricalTickSessionRules.h"
 #include "services/SqliteLocalDataStore.h"
 
 #include <QDir>
@@ -60,34 +61,6 @@ bool isWeekday(const QDate &date)
     return date.dayOfWeek() >= Qt::Monday && date.dayOfWeek() <= Qt::Friday;
 }
 
-std::optional<QTime> tickBucketStart(const QTime &time, int periodSeconds)
-{
-    if (time >= QTime(9, 25) && time < QTime(9, 30)) return QTime(9, 25);
-
-    struct Session { QTime start; QTime close; };
-    const Session sessions[] {{QTime(9, 30), QTime(11, 30)},
-                              {QTime(13, 0), QTime(15, 0)}};
-    for (const Session &session : sessions) {
-        if (time < session.start || time > session.close) continue;
-        if (time == session.close) return session.close.addSecs(-periodSeconds);
-        const int elapsed = session.start.secsTo(time);
-        return session.start.addSecs((elapsed / periodSeconds) * periodSeconds);
-    }
-    return std::nullopt;
-}
-
-bool validFiveMinuteLabel(const QTime &time)
-{
-    if (time == QTime(9, 25) || time == QTime(11, 30) || time == QTime(15, 0)) return true;
-    if (time >= QTime(9, 30) && time < QTime(11, 30)) {
-        return QTime(9, 30).secsTo(time) % 300 == 0;
-    }
-    if (time >= QTime(13, 0) && time < QTime(15, 0)) {
-        return QTime(13, 0).secsTo(time) % 300 == 0;
-    }
-    return false;
-}
-
 QDateTime shanghaiToUtc(const QDate &date, const QTime &time)
 {
     return QDateTime(date, time, QTimeZone("Asia/Shanghai")).toUTC();
@@ -95,7 +68,8 @@ QDateTime shanghaiToUtc(const QDate &date, const QTime &time)
 
 void finalizeQuality(TickDataImportResult *result, int periodSeconds)
 {
-    result->expectedContinuousBars = periodSeconds == 60 ? 240 : 48;
+    result->expectedContinuousBars =
+        HistoricalTickSessionRules::expectedContinuousBars(periodSeconds);
     int continuousBars = 0;
     for (const Candle &candle : result->candles) {
         const QTime localTime = candle.startTime.toTimeZone(QTimeZone("Asia/Shanghai")).time();
@@ -213,6 +187,14 @@ TickDataImportResult parseTickFile(QFile *file, const TickDataImportRequest &req
         const QList<QByteArray> fields = trimmed.split(',');
         if (!layoutDetected) {
             layoutDetected = true;
+            if (fields.size() == 5
+                && fields.at(0).trimmed().compare("time", Qt::CaseInsensitive) == 0
+                && fields.at(1).trimmed().compare("price", Qt::CaseInsensitive) == 0
+                && fields.at(2).trimmed().compare("volume", Qt::CaseInsensitive) == 0
+                && fields.at(3).trimmed().compare("amount", Qt::CaseInsensitive) == 0
+                && fields.at(4).trimmed().compare("type", Qt::CaseInsensitive) == 0) {
+                continue;
+            }
             if (fields.size() == 6
                 && QString::fromUtf8(fields.at(0).trimmed()) == QStringLiteral("成交时间")
                 && QString::fromUtf8(fields.at(1).trimmed()) == QStringLiteral("成交价格")
@@ -265,7 +247,8 @@ TickDataImportResult parseTickFile(QFile *file, const TickDataImportRequest &req
                              QStringLiteral("原始成交方向必须是 B/S/M 或买盘/卖盘/中性盘"));
             continue;
         }
-        const std::optional<QTime> bucket = tickBucketStart(time, request.periodSeconds);
+        const std::optional<QTime> bucket =
+            HistoricalTickSessionRules::bucketStart(time, request.periodSeconds);
         if (!bucket.has_value()) {
             ++result.skippedRecords;
             appendDiagnostic(&result, result.linesRead,
@@ -372,7 +355,7 @@ TickDataImportResult parseFiveMinuteFile(
         }
         const QTime label = parseClock(fields.at(0));
         double open = 0.0, close = 0.0, high = 0.0, low = 0.0, volume = 0.0;
-        if (!label.isValid() || !validFiveMinuteLabel(label)
+        if (!label.isValid() || !HistoricalTickSessionRules::validFiveMinuteLabel(label)
             || !parseNumber(fields.at(1), &open) || !parseNumber(fields.at(2), &close)
             || !parseNumber(fields.at(3), &high) || !parseNumber(fields.at(4), &low)
             || !parseNumber(fields.at(5), &volume)
@@ -384,7 +367,8 @@ TickDataImportResult parseFiveMinuteFile(
                              QStringLiteral("5min 时间网格或 OHLCV 数据无效"));
             continue;
         }
-        const std::optional<QTime> bucket = tickBucketStart(label, 300);
+        const std::optional<QTime> bucket =
+            HistoricalTickSessionRules::bucketStart(label, 300);
         if (!bucket.has_value()) {
             ++result.skippedRecords;
             appendDiagnostic(&result, result.linesRead,
@@ -533,7 +517,7 @@ quint64 TickDataCsvImportService::start(const TickDataImportRequest &request)
                        && store) {
                 QElapsedTimer databaseTimer;
                 databaseTimer.start();
-                const bool committed = store->commitRawTradeTickImport();
+                const bool committed = store->commitRawTradeTickImport(result);
                 rawDatabaseNanoseconds += databaseTimer.nsecsElapsed();
                 if (committed) {
                     result.rawTicksWritten = result.validRecords;

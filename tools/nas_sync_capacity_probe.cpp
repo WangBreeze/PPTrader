@@ -17,6 +17,7 @@
 #include <QTextStream>
 #include <QTimer>
 
+#include <algorithm>
 #include <memory>
 
 namespace {
@@ -26,14 +27,15 @@ class NasSyncCapacityRunner final : public QObject {
 
 public:
     NasSyncCapacityRunner(QUrl endpoint, QStringList symbols, QVector<int> tiers,
-                          QDate tradingDate, QString outputPath,
+                          QDate startDate, QDate endDate, QString outputPath,
                           QString keepDir = {}, int concurrency = 4,
                           QObject *parent = nullptr)
         : QObject(parent)
         , m_endpoint(std::move(endpoint))
         , m_symbols(std::move(symbols))
         , m_tiers(std::move(tiers))
-        , m_tradingDate(tradingDate)
+        , m_startDate(startDate)
+        , m_endDate(endDate)
         , m_outputPath(std::move(outputPath))
         , m_keepDir(std::move(keepDir))
         , m_concurrency(concurrency)
@@ -71,7 +73,10 @@ private:
                    << "tiers=" << m_tiers << "entries=" << m_entries.size();
         if (++m_tierIndex >= m_tiers.size()) {
             QJsonObject report;
-            report.insert(QStringLiteral("date"), m_tradingDate.toString(Qt::ISODate));
+            if (m_startDate == m_endDate)
+                report.insert(QStringLiteral("date"), m_startDate.toString(Qt::ISODate));
+            report.insert(QStringLiteral("startDate"), m_startDate.toString(Qt::ISODate));
+            report.insert(QStringLiteral("endDate"), m_endDate.toString(Qt::ISODate));
             report.insert(QStringLiteral("endpoint"), QStringLiteral("loopback-tunnel"));
             report.insert(QStringLiteral("results"), m_results);
             QFile output(m_outputPath);
@@ -90,6 +95,12 @@ private:
         m_tierFinished = false;
         m_activeEntries.clear();
         m_downloadIndexByRequestId.clear();
+        m_downloadStartedAtMilliseconds.clear();
+        m_fileResults = {};
+        m_manifestAvailableSymbols = 0;
+        m_manifestMissingSymbols = 0;
+        m_sourceBytes = 0;
+        m_manifestMilliseconds = 0;
         m_failures = 0;
         m_ticks = 0;
         m_bars = 0;
@@ -98,11 +109,25 @@ private:
         m_rawDatabaseMilliseconds = 0;
         m_candleDatabaseMilliseconds = 0;
         m_runTimer.restart();
+        m_selectedSymbols = m_symbols.mid(0, m_requestedSymbols);
+        m_manifestSymbols.clear();
+        m_nextManifestStart = m_startDate;
+        requestNextManifestRange();
+    }
+
+    void requestNextManifestRange()
+    {
+        if (m_nextManifestStart > m_endDate) {
+            finishManifest();
+            return;
+        }
+        m_activeManifestEnd = m_nextManifestStart.addDays(30);
+        if (m_activeManifestEnd > m_endDate) m_activeManifestEnd = m_endDate;
         m_manifestTimer.restart();
-        const QStringList selected = m_symbols.mid(0, m_requestedSymbols);
         m_activeRequestId = ++m_manifestRequestId;
         if (!m_client.requestManifest(
-                m_activeRequestId, selected, m_tradingDate, m_tradingDate)) {
+                m_activeRequestId, m_selectedSymbols,
+                m_nextManifestStart, m_activeManifestEnd)) {
             emit finished(3);
         }
     }
@@ -110,15 +135,40 @@ private:
     void handleManifest(quint64 requestId, const pp::NasCatalogResult &result)
     {
         if (requestId != m_activeRequestId) return;
-        m_manifestMilliseconds = m_manifestTimer.elapsed();
+        m_manifestMilliseconds += m_manifestTimer.elapsed();
         if (!result.succeeded) {
             emit finished(4);
             return;
         }
-        m_manifestAvailableSymbols = result.availableSymbols;
-        m_manifestMissingSymbols = result.missingSymbols;
-        m_sourceBytes = result.totalBytes;
-        m_entries = result.entries;
+        m_sourceBytes += result.totalBytes;
+        for (const pp::NasCatalogEntry &entry : result.entries) {
+            m_entries.append(entry);
+            m_manifestSymbols.insert(entry.symbol);
+        }
+        m_nextManifestStart = m_activeManifestEnd.addDays(1);
+        requestNextManifestRange();
+    }
+
+    void finishManifest()
+    {
+        std::sort(m_entries.begin(), m_entries.end(),
+                  [](const pp::NasCatalogEntry &left,
+                     const pp::NasCatalogEntry &right) {
+                      if (left.tradingDate != right.tradingDate)
+                          return left.tradingDate < right.tradingDate;
+                      return left.symbol < right.symbol;
+                  });
+        m_entries.erase(std::unique(
+                            m_entries.begin(), m_entries.end(),
+                            [](const pp::NasCatalogEntry &left,
+                               const pp::NasCatalogEntry &right) {
+                                return left.tradingDate == right.tradingDate
+                                    && left.symbol == right.symbol;
+                            }),
+                        m_entries.end());
+        m_manifestAvailableSymbols = m_manifestSymbols.size();
+        m_manifestMissingSymbols = qMax(
+            0, m_requestedSymbols - m_manifestAvailableSymbols);
         const QString tierRoot = QDir(m_keepDir).filePath(
             QStringLiteral("tier-%1").arg(m_requestedSymbols));
         QDir().mkpath(tierRoot);
@@ -139,13 +189,15 @@ private:
                && m_nextEntryIndex < m_entries.size()) {
             const int entryIndex = m_nextEntryIndex++;
             m_activeEntries.insert(entryIndex);
-            m_transferTimer.restart();
             const quint64 requestId = ++m_requestId;
             m_downloadIndexByRequestId.insert(requestId, entryIndex);
+            m_downloadStartedAtMilliseconds.insert(requestId, m_runTimer.elapsed());
             if (!m_client.downloadTickFile(
                     requestId, m_entries.at(entryIndex), m_stagingRoot)) {
                 m_activeEntries.remove(entryIndex);
                 m_downloadIndexByRequestId.remove(requestId);
+                m_downloadStartedAtMilliseconds.remove(requestId);
+                ++m_downloadedCount;
                 ++m_failures;
             }
         }
@@ -161,13 +213,31 @@ private:
 
     void handleDownload(quint64 requestId, const pp::NasDownloadResult &download)
     {
+        if (!m_downloadIndexByRequestId.contains(requestId)) return;
         const int entryIndex = m_downloadIndexByRequestId.take(requestId);
+        const qint64 startedAt = m_downloadStartedAtMilliseconds.take(requestId);
+        const qint64 downloadMilliseconds = qMax<qint64>(
+            0, m_runTimer.elapsed() - startedAt);
         if (!m_activeEntries.contains(entryIndex)) return;
         m_activeEntries.remove(entryIndex);
         ++m_downloadedCount;
-        m_transferMilliseconds += m_transferTimer.elapsed();
+        m_transferMilliseconds += downloadMilliseconds;
+        QJsonObject fileResult;
+        fileResult.insert(QStringLiteral("symbol"), download.entry.symbol);
+        fileResult.insert(QStringLiteral("tradingDate"),
+                          download.entry.tradingDate.toString(Qt::ISODate));
+        fileResult.insert(QStringLiteral("sourceBytes"),
+                          static_cast<double>(download.entry.size));
+        fileResult.insert(QStringLiteral("receivedBytes"),
+                          static_cast<double>(download.receivedBytes));
+        fileResult.insert(QStringLiteral("downloadMilliseconds"),
+                          static_cast<double>(downloadMilliseconds));
+        fileResult.insert(QStringLiteral("fromCache"), download.fromCache);
         if (!download.succeeded) {
             ++m_failures;
+            fileResult.insert(QStringLiteral("succeeded"), false);
+            fileResult.insert(QStringLiteral("error"), download.error);
+            m_fileResults.append(fileResult);
             QTimer::singleShot(0, this,
                                &NasSyncCapacityRunner::startNextDownloads);
             return;
@@ -207,9 +277,10 @@ private:
         pp::TickDataImportResult imported = pp::TickDataCsvImporter::parse(request, {}, sink);
         const qint64 parseAndSinkNanoseconds = parseTimer.nsecsElapsed();
         bool committed = false;
+        bool candlesStored = false;
         if (transactionReady && imported.succeeded) {
             databaseTimer.restart();
-            committed = m_store->commitRawTradeTickImport();
+            committed = m_store->commitRawTradeTickImport(imported);
             rawDatabaseNanoseconds += databaseTimer.nsecsElapsed();
         } else if (transactionReady) {
             m_store->rollbackRawTradeTickImport();
@@ -218,7 +289,7 @@ private:
             ++m_failures;
         } else {
             databaseTimer.restart();
-            const bool candlesStored = m_store->upsertCandles(imported.candles);
+            candlesStored = m_store->upsertCandles(imported.candles);
             m_candleDatabaseMilliseconds += databaseTimer.elapsed();
             if (!candlesStored) {
                 ++m_failures;
@@ -231,6 +302,29 @@ private:
             0, parseAndSinkNanoseconds - rawSinkNanoseconds)) / 1000000.0);
         m_rawDatabaseMilliseconds += qRound64(
             static_cast<double>(rawDatabaseNanoseconds) / 1000000.0);
+        fileResult.insert(QStringLiteral("validRecords"),
+                          static_cast<double>(imported.validRecords));
+        fileResult.insert(QStringLiteral("bars"),
+                          static_cast<double>(imported.candles.size()));
+        fileResult.insert(QStringLiteral("parseMilliseconds"),
+                          static_cast<double>(qRound64(static_cast<double>(
+                              qMax<qint64>(0, parseAndSinkNanoseconds
+                                  - rawSinkNanoseconds)) / 1000000.0)));
+        fileResult.insert(QStringLiteral("rawDatabaseMilliseconds"),
+                          static_cast<double>(qRound64(static_cast<double>(
+                              rawDatabaseNanoseconds) / 1000000.0)));
+        fileResult.insert(QStringLiteral("succeeded"), committed && candlesStored);
+        if (!imported.succeeded) {
+            fileResult.insert(QStringLiteral("error"),
+                              QStringLiteral("逐笔 CSV 解析失败"));
+        } else if (!committed) {
+            fileResult.insert(QStringLiteral("error"),
+                              QStringLiteral("原始逐笔事务提交失败"));
+        } else if (!candlesStored) {
+            fileResult.insert(QStringLiteral("error"),
+                              QStringLiteral("K 线缓存写入失败"));
+        }
+        m_fileResults.append(fileResult);
         QTimer::singleShot(0, this, &NasSyncCapacityRunner::startNextDownloads);
     }
 
@@ -258,6 +352,7 @@ private:
         result.insert(QStringLiteral("rawDatabaseMilliseconds"), m_rawDatabaseMilliseconds);
         result.insert(QStringLiteral("candleDatabaseMilliseconds"), m_candleDatabaseMilliseconds);
         result.insert(QStringLiteral("elapsedMilliseconds"), elapsed);
+        result.insert(QStringLiteral("perFile"), m_fileResults);
         m_results.append(result);
         QTextStream(stdout) << QJsonDocument(result).toJson(QJsonDocument::Compact) << Qt::endl;
         m_store.reset();
@@ -267,7 +362,8 @@ private:
     QUrl m_endpoint;
     QStringList m_symbols;
     QVector<int> m_tiers;
-    QDate m_tradingDate;
+    QDate m_startDate;
+    QDate m_endDate;
     QString m_outputPath;
     QTemporaryDir m_temporaryRoot;
     pp::NasDataNodeClient m_client;
@@ -280,6 +376,8 @@ private:
     bool m_tierFinished = false;
     QSet<int> m_activeEntries;
     QHash<quint64, int> m_downloadIndexByRequestId;
+    QHash<quint64, qint64> m_downloadStartedAtMilliseconds;
+    QJsonArray m_fileResults;
     int m_concurrency = 4;
     int m_requestedSymbols = 0;
     int m_manifestAvailableSymbols = 0;
@@ -299,8 +397,11 @@ private:
     QString m_stagingRoot;
     QString m_databasePath;
     QString m_keepDir;
+    QStringList m_selectedSymbols;
+    QSet<QString> m_manifestSymbols;
+    QDate m_nextManifestStart;
+    QDate m_activeManifestEnd;
     QElapsedTimer m_manifestTimer;
-    QElapsedTimer m_transferTimer;
     QElapsedTimer m_runTimer;
 };
 
@@ -334,6 +435,23 @@ QStringList loadSymbols(const QString &path, QString *error)
     return symbols;
 }
 
+QStringList explicitSymbols(const QString &value, QString *error)
+{
+    QStringList symbols;
+    for (const QString &part : value.split(',', Qt::SkipEmptyParts)) {
+        const QString symbol = part.trimmed();
+        bool valid = symbol.size() == 6;
+        for (const QChar character : symbol) valid = valid && character.isDigit();
+        if (!valid) {
+            if (error) *error = QStringLiteral("显式代码必须为六位数字");
+            return {};
+        }
+        if (!symbols.contains(symbol)) symbols.append(symbol);
+    }
+    if (symbols.isEmpty() && error) *error = QStringLiteral("显式代码列表为空");
+    return symbols;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -345,6 +463,9 @@ int main(int argc, char *argv[])
         {{QStringLiteral("e"), QStringLiteral("endpoint")}, QStringLiteral("回环 NAS 端点"), QStringLiteral("url")},
         {{QStringLiteral("u"), QStringLiteral("universe")}, QStringLiteral("A 股股票池 JSON"), QStringLiteral("path")},
         {{QStringLiteral("d"), QStringLiteral("date")}, QStringLiteral("交易日 yyyy-MM-dd"), QStringLiteral("date")},
+        {{QStringLiteral("s"), QStringLiteral("symbols")}, QStringLiteral("逗号分隔的显式 A 股代码"), QStringLiteral("symbols")},
+        {QStringLiteral("start-date"), QStringLiteral("开始日期 yyyy-MM-dd"), QStringLiteral("date")},
+        {QStringLiteral("end-date"), QStringLiteral("结束日期 yyyy-MM-dd"), QStringLiteral("date")},
         {{QStringLiteral("t"), QStringLiteral("tiers")}, QStringLiteral("逗号分隔档位"), QStringLiteral("counts"), QStringLiteral("10,100,500")},
         {{QStringLiteral("o"), QStringLiteral("output")}, QStringLiteral("结果 JSON"), QStringLiteral("path")},
         {{QStringLiteral("k"), QStringLiteral("keep-dir")}, QStringLiteral("保留临时目录（用于后续回测）"), QStringLiteral("path")},
@@ -352,26 +473,43 @@ int main(int argc, char *argv[])
     });
     parser.process(application);
     QString error;
-    const QStringList symbols = loadSymbols(parser.value(QStringLiteral("universe")), &error);
+    const bool hasExplicitSymbols = parser.isSet(QStringLiteral("symbols"));
+    const QStringList symbols = hasExplicitSymbols
+        ? explicitSymbols(parser.value(QStringLiteral("symbols")), &error)
+        : loadSymbols(parser.value(QStringLiteral("universe")), &error);
     QVector<int> tiers;
-    for (const QString &value : parser.value(QStringLiteral("tiers")).split(',')) {
+    const QString tierValues = hasExplicitSymbols
+            && !parser.isSet(QStringLiteral("tiers"))
+        ? QString::number(symbols.size())
+        : parser.value(QStringLiteral("tiers"));
+    for (const QString &value : tierValues.split(',')) {
         bool ok = false;
         const int tier = value.trimmed().toInt(&ok);
-        if (ok && tier > 0) tiers.append(tier);
+        const int boundedTier = qMin(tier, symbols.size());
+        if (ok && boundedTier > 0 && !tiers.contains(boundedTier))
+            tiers.append(boundedTier);
     }
-    const QDate date = QDate::fromString(parser.value(QStringLiteral("date")), Qt::ISODate);
+    const QDate legacyDate = QDate::fromString(
+        parser.value(QStringLiteral("date")), Qt::ISODate);
+    const QDate startDate = parser.isSet(QStringLiteral("start-date"))
+        ? QDate::fromString(parser.value(QStringLiteral("start-date")), Qt::ISODate)
+        : legacyDate;
+    const QDate endDate = parser.isSet(QStringLiteral("end-date"))
+        ? QDate::fromString(parser.value(QStringLiteral("end-date")), Qt::ISODate)
+        : startDate;
     const QUrl endpoint(parser.value(QStringLiteral("endpoint")));
     bool concurrencyOk = false;
     const int concurrency =
         parser.value(QStringLiteral("concurrency")).toInt(&concurrencyOk);
-    if (!error.isEmpty() || tiers.isEmpty() || !date.isValid() || endpoint.isEmpty()
+    if (!error.isEmpty() || tiers.isEmpty() || !startDate.isValid()
+        || !endDate.isValid() || startDate > endDate || endpoint.isEmpty()
         || parser.value(QStringLiteral("output")).isEmpty()
         || !concurrencyOk || concurrency < 1 || concurrency > 16) {
         QTextStream(stderr) << (error.isEmpty() ? QStringLiteral("容量探针参数无效") : error)
                             << Qt::endl;
         return 1;
     }
-    NasSyncCapacityRunner runner(endpoint, symbols, tiers, date,
+    NasSyncCapacityRunner runner(endpoint, symbols, tiers, startDate, endDate,
                                  parser.value(QStringLiteral("output")),
                                  parser.value(QStringLiteral("keep-dir")),
                                  concurrency);

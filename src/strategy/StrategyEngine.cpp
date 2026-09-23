@@ -28,6 +28,11 @@ StrategyEngine::StrategyEngine(QObject *parent)
     m_pool.setMaxThreadCount(std::max(1, QThread::idealThreadCount() - 1));
 }
 
+StrategyEngine::~StrategyEngine()
+{
+    m_pool.waitForDone();
+}
+
 int StrategyEngine::maxThreadCount() const
 {
     return m_pool.maxThreadCount();
@@ -144,6 +149,37 @@ void StrategyEngine::setStrategyEnabled(const QString &id, bool enabled)
     emit strategyCountChanged();
 }
 
+void StrategyEngine::setPerformanceMetricsEnabled(bool enabled)
+{
+    m_performanceMetricsEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool StrategyEngine::performanceMetricsEnabled() const
+{
+    return m_performanceMetricsEnabled.load(std::memory_order_relaxed);
+}
+
+void StrategyEngine::resetPerformanceMetrics()
+{
+    m_dispatchedTaskCount.store(0, std::memory_order_relaxed);
+    m_completedTaskCount.store(0, std::memory_order_relaxed);
+}
+
+quint64 StrategyEngine::dispatchedTaskCount() const
+{
+    return m_dispatchedTaskCount.load(std::memory_order_relaxed);
+}
+
+quint64 StrategyEngine::completedTaskCount() const
+{
+    return m_completedTaskCount.load(std::memory_order_relaxed);
+}
+
+bool StrategyEngine::waitForIdle(int timeoutMilliseconds)
+{
+    return m_pool.waitForDone(timeoutMilliseconds);
+}
+
 void StrategyEngine::dispatchTick(const Tick &tick)
 {
     QVector<Strategy *> candidates = m_broadcastStrategies;
@@ -156,10 +192,17 @@ void StrategyEngine::dispatchTick(const Tick &tick)
             continue;
         }
 
+        const bool measure = performanceMetricsEnabled();
+        if (measure) m_dispatchedTaskCount.fetch_add(1, std::memory_order_relaxed);
         const QPointer<Strategy> guardedStrategy(strategy);
-        runOnPool(m_pool, [guardedStrategy, tick]() {
+        const QPointer<StrategyEngine> guardedEngine(this);
+        runOnPool(m_pool, [guardedStrategy, guardedEngine, tick, measure]() {
             if (guardedStrategy) {
                 guardedStrategy->onTick(tick);
+            }
+            if (measure && guardedEngine) {
+                guardedEngine->m_completedTaskCount.fetch_add(
+                    1, std::memory_order_relaxed);
             }
         });
     }
@@ -177,10 +220,17 @@ void StrategyEngine::dispatchCandle(const Candle &candle)
             continue;
         }
 
+        const bool measure = performanceMetricsEnabled();
+        if (measure) m_dispatchedTaskCount.fetch_add(1, std::memory_order_relaxed);
         const QPointer<Strategy> guardedStrategy(strategy);
-        runOnPool(m_pool, [guardedStrategy, candle]() {
+        const QPointer<StrategyEngine> guardedEngine(this);
+        runOnPool(m_pool, [guardedStrategy, guardedEngine, candle, measure]() {
             if (guardedStrategy) {
                 guardedStrategy->onCandle(candle);
+            }
+            if (measure && guardedEngine) {
+                guardedEngine->m_completedTaskCount.fetch_add(
+                    1, std::memory_order_relaxed);
             }
         });
     }

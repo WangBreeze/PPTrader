@@ -55,4 +55,9 @@ int realtimeProviderHealthScore(int health, int expectedCount, int receivedCount
     return std::clamp(score, 0, 100);
 }
 
+int normalizedRealtimePollingIntervalSeconds(int requestedSeconds)
+{
+    return std::max(60, requestedSeconds > 0 ? requestedSeconds : 60);
+}
+
 } // namespace pp

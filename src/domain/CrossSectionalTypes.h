@@ -27,6 +27,7 @@ struct MarketSnapshot {
     Market market = Market::AShare;
     QDateTime timestamp;
     QDateTime completedAt;
+    qint64 collectionDurationMilliseconds = -1;
     int expectedCount = 0;
     QVector<CrossSectionalQuote> quotes;
 
@@ -39,6 +40,8 @@ struct MarketSnapshot {
 
     qint64 durationMilliseconds() const
     {
+        if (collectionDurationMilliseconds >= 0)
+            return collectionDurationMilliseconds;
         return timestamp.isValid() && completedAt.isValid()
             ? timestamp.msecsTo(completedAt) : 0;
     }
@@ -46,6 +49,8 @@ struct MarketSnapshot {
 
 struct FactorValue {
     Instrument instrument;
+    double sourcePrice = 0.0;
+    double sourcePreviousClose = 0.0;
     double rawValue = 0.0;
     double zScore = 0.0;
     double percentile = 0.0;

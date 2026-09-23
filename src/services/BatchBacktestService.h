@@ -29,6 +29,8 @@ signals:
                        const pp::BacktestResult &result);
     void progressChanged(quint64 requestId, int completed, int total,
                          int succeeded, int failed);
+    void rawTickResidencyChanged(quint64 requestId, int residentDatasets,
+                                 qint64 residentObservations);
     void finished(quint64 requestId, bool cancelled, const QString &error);
 
 private:

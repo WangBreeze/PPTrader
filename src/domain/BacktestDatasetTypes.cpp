@@ -23,7 +23,10 @@ int BacktestDatasetIdentity::derivedBarTotal() const
 
 bool BacktestDatasetIdentity::isEmpty() const
 {
-    return days.isEmpty() || instrument.symbol.isEmpty() || periodSeconds <= 0;
+    const bool rawTicks = periodSeconds == 0
+        && source == QStringLiteral("raw_trade_ticks_v1");
+    return days.isEmpty() || instrument.symbol.isEmpty()
+        || (periodSeconds <= 0 && !rawTicks);
 }
 
 bool BacktestDatasetIdentity::hasStaleCache() const
@@ -37,7 +40,8 @@ QVariantMap BacktestDatasetIdentity::toVariantMap() const
             {QStringLiteral("name"), instrument.name},
             {QStringLiteral("market"), marketName(instrument.market)},
             {QStringLiteral("venue"), instrument.venue},
-            {QStringLiteral("frequency"), localHistoryFrequency(periodSeconds)},
+            {QStringLiteral("frequency"), periodSeconds == 0
+                ? QStringLiteral("tick") : localHistoryFrequency(periodSeconds)},
             {QStringLiteral("periodSeconds"), periodSeconds},
             {QStringLiteral("source"), source},
             {QStringLiteral("aggregatorVersion"), aggregatorVersion},
@@ -66,7 +70,8 @@ QString BacktestDatasetIdentity::toJson() const
             {QStringLiteral("rawMaximumId"), day.rawMaximumId},
             {QStringLiteral("rawContentSha256"), day.rawContentSha256},
             {QStringLiteral("barCount"), day.barCount},
-            {QStringLiteral("cacheVersion"), day.cacheVersion}});
+            {QStringLiteral("cacheVersion"), day.cacheVersion},
+            {QStringLiteral("cacheFresh"), day.cacheFresh}});
     }
     const QJsonObject root{
         {QStringLiteral("symbol"), instrument.symbol},
@@ -138,6 +143,7 @@ bool BacktestDatasetIdentity::fromJson(const QString &json)
             dayObject.value(QStringLiteral("rawContentSha256")).toString();
         day.barCount = dayObject.value(QStringLiteral("barCount")).toInt();
         day.cacheVersion = dayObject.value(QStringLiteral("cacheVersion")).toInt();
+        day.cacheFresh = dayObject.value(QStringLiteral("cacheFresh")).toBool();
         if (!day.tradingDate.isValid()) return false;
         parsed.days.append(day);
     }

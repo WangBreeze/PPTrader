@@ -10,6 +10,8 @@ data/pptrader.db*
 
 # 个人开发配置与机器特定路径
 /.vscode/
+# DSH 本地技能目录（junction 指向 E:\workspace\_vendor\agent-skills，机器特定）
+/.dsh/
 /cbm-admin-install.ps1
 /hwinfo-report.ps1
 /sensors.ps1

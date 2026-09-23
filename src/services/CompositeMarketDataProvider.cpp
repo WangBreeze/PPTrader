@@ -34,6 +34,9 @@ CompositeMarketDataProvider::CompositeMarketDataProvider(QObject *parent)
     primaryCapability.configured = tdxEnabled && !primaryServer.isEmpty();
     primaryCapability.fullMarket = true;
     primaryCapability.polling = true;
+    primaryCapability.minimumPeriodSeconds = 60;
+    primaryCapability.pollingIntervalSeconds = 60;
+    primaryCapability.watchdogTimeoutMilliseconds = 150000;
     primaryCapability.configurationMessage = QStringLiteral("免费兼容源，无生产 SLA");
     RealtimeProviderCapability backupCapability = primaryCapability;
     backupCapability.providerId = QStringLiteral("public_tdx_backup");
@@ -99,10 +102,19 @@ CompositeMarketDataProvider::CompositeMarketDataProvider(QObject *parent)
 
 CompositeMarketDataProvider::~CompositeMarketDataProvider()
 {
-    if (m_workerThread.isRunning()) {
-        QMetaObject::invokeMethod(m_router, [this]() { m_router->stop(); },
-                                  Qt::BlockingQueuedConnection);
+    shutdown();
+}
+
+void CompositeMarketDataProvider::shutdown()
+{
+    if (!m_workerThread.isRunning()) return;
+    if (QThread::currentThread() == &m_workerThread) {
+        m_router->stop();
+        m_workerThread.quit();
+        return;
     }
+    QMetaObject::invokeMethod(m_router, [this]() { m_router->stop(); },
+                              Qt::BlockingQueuedConnection);
     m_workerThread.quit();
     m_workerThread.wait(3000);
 }

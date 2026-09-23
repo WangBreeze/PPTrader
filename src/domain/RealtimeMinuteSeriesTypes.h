@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QString>
 #include <QVector>
+#include <QVariantList>
 
 namespace pp {
 
@@ -17,6 +18,11 @@ struct RealtimeMinuteSeriesResult {
     QString providerId;
     QString error;
     bool succeeded = false;
+    QString payloadSha256;
+    QVariantList providerTailRows;
+    QString httpDate;
+    QString httpAge;
+    int responseRowCount = 0;
 };
 
 } // namespace pp

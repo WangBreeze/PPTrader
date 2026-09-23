@@ -61,12 +61,14 @@ Windows 客户端开发期通过 SSH 本地端口转发把远端回环服务映�
 
 ## 客户端状态与流程
 
-`TradingController` 向 QML 暴露端点、catalog、请求版本、查询/同步状态、已收/预期字节和错误。`NasTickSyncPanel` 要求用户明确输入端点、代码、起止日期，并再次选择某个 catalog 条目启动下载与导入。同步可并发下载（默认 4、环境上限 16），校验后的文件进入单一导入队列串行写 SQLite；每个下载使用独立 requestId。生产声明前仍需补充乱序完成、取消后迟到响应和重启长稳的控制器级验收。
+`TradingController` 向 QML 暴露端点、catalog、请求版本、查询/同步状态、已收/预期字节和错误。`NasTickSyncPanel` 要求用户明确输入端点、代码、起止日期，并再次选择某个 catalog 条目启动下载与导入。同步可并发下载（默认 4、环境上限 16），校验后的文件进入单一导入队列串行写 SQLite；每个下载使用独立 requestId。H5D.2 已用显式 requestId 门控拒绝取消后的迟到响应，并验证持久化 `ready` 项可继续、既有成功项不重复；真实网络乱序和节点故障长稳仍不能由自动测试替代。
 
-同步成功不等同于只完成下载：校验通过的 CSV 必须继续通过 `TickDataCsvImportService` 流式解析和 SQLite 事务写入。失败不会破坏已有事实或缓存。导入成功后刷新本地历史 catalog、已使用周期缓存和相关主页 K 线。
+同步成功不等同于只完成下载：校验通过的 CSV 必须继续通过 `TickDataCsvImportService` 流式解析和 SQLite 事务写入。失败不会破坏已有事实或缓存。H5A 起，NAS 文件导入期间不再逐文件全量刷新本地目录；整个同步批次完成后，独立 `BacktestDatasetService` 按用户选择的周期和最低根数逐标的准备 `raw_tick_cache_v1`，最后统一刷新一次 `localBacktestDataCatalog`。单项失败只记录该代码，不覆盖其他成功项。
+
+QML 通过 `nasBacktestPreparationSummary` 读取准备周期、最低根数、总数、完成数、成功/失败代码、当前代码、耗时和状态；`configureNasBacktestPreparation()`、`prepareNasBacktestDatasets()` 与 `cancelNasBacktestPreparation()` 分别配置、显式准备和取消。正常同步完成会自动开始准备；同步被取消时只保留已经事务提交的事实，不自动继续派生，避免把不完整计划伪装为完整回测目录。准备和后续回测都只访问本地 SQLite，不请求 NAS 或历史 Provider。
 
 ## 当前限制
 
-v1 已支持 CSV、单代码 catalog、显式多代码 manifest、并发按日下载/串行导入、ETag/SHA-256、`.part` Range 续传、本地缓存、显式取消、跨进程计划恢复、Token 文件热重载、变更摘要轮询、zlib 完整文件压缩、摘要缓存和 systemd 用户服务守护。100 档真实临时库与热缓存并发基线已完成；500 与全市场真实写库延期。
+v1 已支持 CSV、单代码 catalog、显式多代码 manifest、并发按日下载/串行导入、ETag/SHA-256、`.part` Range 续传、本地缓存、显式取消、跨进程计划恢复、Token 文件热重载、变更摘要轮询、zlib 完整文件压缩、摘要缓存、systemd 用户服务守护，以及同步后按指定周期批量准备本地回测目录。100 档真实临时库、热缓存并发基线和本地进程中断恢复已完成；真实 NAS 闭环仍只到受控单标的/100 档同步证据，500 与全市场真实写库延期。
 
 恢复文件不包含端点和凭据，启动恢复不联网。现有 `.part` 是单文件字节续传，不是多块并行/可校验分块状态机；zlib 中断也不会复用部分压缩体。Parquet/Zstd、pyarrow、WebSocket、Token 配置界面、NAS 原生 HTTPS、监控/审计/备份/容量告警尚未实现。Range/轮换/changes/zlib 的生产真实节点验收仍未完成，不能把自动测试等同于上线。

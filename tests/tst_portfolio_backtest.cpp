@@ -1,4 +1,5 @@
 #include "services/PortfolioBacktestEngine.h"
+#include "services/AShareTradingCalendar.h"
 
 #include <QDate>
 #include <QHash>
@@ -59,6 +60,39 @@ PortfolioDefinition equalWeightDefinition(const QString &first,
     return definition;
 }
 
+AShareIndustrySnapshot industrySnapshotFor(
+    const QStringList &technologySymbols,
+    const QStringList &financeSymbols)
+{
+    AShareIndustrySnapshot snapshot;
+    snapshot.datasetId = QStringLiteral("industry-fixture-v1");
+    snapshot.classification = QStringLiteral("test-classification");
+    snapshot.source = QStringLiteral("test-fixture");
+    snapshot.sourceVersion = QStringLiteral("fixture-v1");
+    snapshot.datasetContentSha256 =
+        QStringLiteral("sha256:") + QString(64, 'a');
+    snapshot.snapshotVersion =
+        QStringLiteral("sha256:") + QString(64, 'b');
+    snapshot.asOfDate = QDate(2026, 1, 5);
+    auto append = [&snapshot](const QString &symbol, const QString &code,
+                              const QString &name) {
+        AShareIndustryMembership membership;
+        membership.instrument = instrumentFor(symbol);
+        membership.industryCode = code;
+        membership.industryName = name;
+        membership.effectiveFrom = QDate(2025, 1, 1);
+        snapshot.memberships.append(membership);
+    };
+    for (const QString &symbol : technologySymbols)
+        append(symbol, QStringLiteral("TECH"), QStringLiteral("科技"));
+    for (const QString &symbol : financeSymbols)
+        append(symbol, QStringLiteral("FIN"), QStringLiteral("金融"));
+    snapshot.expectedSymbols = snapshot.memberships.size();
+    snapshot.resolvedSymbols = snapshot.memberships.size();
+    snapshot.coverageComplete = true;
+    return snapshot;
+}
+
 } // namespace
 
 class PortfolioBacktestTest final : public QObject {
@@ -70,8 +104,13 @@ private slots:
     void sellBeforeBuyInvariantHolds();
     void missingDayUsesLastPrice();
     void missingDayDoesNotAdvanceRebalanceClock();
+    void authoritativeCalendarAddsAllMissingValuationDay();
     void invalidDefinitionsRejected();
     void weightsRespectMaximumLegWeight();
+    void industryLimitRequiresCompleteSnapshot();
+    void industryTargetWeightsAreCappedAndIdentified();
+    void drawdownCircuitBreakerLiquidatesAndLatches();
+    void lossCircuitBreakerLiquidates();
 };
 
 void PortfolioBacktestTest::equalWeightRebalancesToTarget()
@@ -213,6 +252,53 @@ void PortfolioBacktestTest::missingDayDoesNotAdvanceRebalanceClock()
     }
 }
 
+void PortfolioBacktestTest::authoritativeCalendarAddsAllMissingValuationDay()
+{
+    const QVector<QDate> observedDays{QDate(2026, 1, 5), QDate(2026, 1, 6),
+                                      QDate(2026, 1, 8)};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             observedDays, {100.0, 110.0, 120.0})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             observedDays, {100.0, 100.0, 100.0})}};
+    AShareInstrumentDayRecord suspended;
+    suspended.instrument = instrumentFor(QStringLiteral("600001"));
+    suspended.tradingDate = QDate(2026, 1, 7);
+    suspended.state = AShareInstrumentDayState::Suspended;
+    suspended.source = QStringLiteral("test-fixture");
+    suspended.sourceVersion = QStringLiteral("fixture-v1");
+    const AShareCalendarSnapshot calendar = AShareTradingCalendar::snapshot(
+        QDate(2026, 1, 5), QDate(2026, 1, 8),
+        {QStringLiteral("600001"), QStringLiteral("600002")}, {suspended});
+
+    QString error;
+    const PortfolioResult result = PortfolioBacktestEngine::run(
+        equalWeightDefinition(QStringLiteral("600001"),
+                              QStringLiteral("600002")),
+        series, &error, calendar);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(result.equityCurve.size(), 4);
+    static const QTimeZone shanghai("Asia/Shanghai");
+    const PortfolioBar &calendarOnly = result.equityCurve.at(2);
+    QCOMPARE(calendarOnly.timestamp.toTimeZone(shanghai).date(), QDate(2026, 1, 7));
+    QCOMPARE(calendarOnly.positions.at(0).marketStatus,
+             QStringLiteral("suspended"));
+    QCOMPARE(calendarOnly.positions.at(1).marketStatus,
+             QStringLiteral("missing_unknown"));
+    QCOMPARE(result.riskSummary.calendarOnlyValuationPointCount, 1);
+    QCOMPARE(result.riskSummary.authoritativeSuspensionPointCount, 1);
+    QCOMPARE(result.riskSummary.unknownMissingQuotePointCount, 1);
+    QVERIFY(result.riskSummary.marketCalendarCoverageComplete);
+    QVERIFY(!result.riskSummary.instrumentStatusCoverageComplete);
+    QCOMPARE(result.riskSummary.calendarSnapshotVersion, calendar.snapshotVersion);
+    QCOMPARE(result.immutableIdentity.value(QStringLiteral("calendarSnapshot"))
+                 .toMap().value(QStringLiteral("snapshotVersion")).toString(),
+             calendar.snapshotVersion);
+    for (const PortfolioTrade &trade : result.trades) {
+        QVERIFY(trade.timestamp.toTimeZone(shanghai).date() != QDate(2026, 1, 7));
+    }
+}
+
 void PortfolioBacktestTest::invalidDefinitionsRejected()
 {
     PortfolioDefinition definition =
@@ -240,6 +326,20 @@ void PortfolioBacktestTest::invalidDefinitionsRejected()
     result = PortfolioBacktestEngine::run(definition, partial, &error);
     QVERIFY(result.equityCurve.isEmpty());
     QVERIFY(error.contains(QStringLiteral("缺少 K 线")));
+
+    definition = equalWeightDefinition(QStringLiteral("600001"),
+                                       QStringLiteral("600002"));
+    definition.maximumPortfolioLossPercent = 100.1;
+    result = PortfolioBacktestEngine::run(definition, {}, &error);
+    QVERIFY(result.equityCurve.isEmpty());
+    QVERIFY(error.contains(QStringLiteral("亏损熔断")));
+
+    definition = equalWeightDefinition(QStringLiteral("600001"),
+                                       QStringLiteral("600002"));
+    definition.maximumPortfolioDrawdownPercent = -0.1;
+    result = PortfolioBacktestEngine::run(definition, {}, &error);
+    QVERIFY(result.equityCurve.isEmpty());
+    QVERIFY(error.contains(QStringLiteral("回撤熔断")));
 }
 
 void PortfolioBacktestTest::weightsRespectMaximumLegWeight()
@@ -249,7 +349,7 @@ void PortfolioBacktestTest::weightsRespectMaximumLegWeight()
     definition.portfolioId = QStringLiteral("portfolio_cap");
     definition.periodSeconds = 60;
     definition.initialCapital = 1000000.0;
-    definition.maximumLegWeight = 0.6;
+    definition.maximumLegWeight = 0.25;
     definition.legs = {
         {instrumentFor(QStringLiteral("600001")), 0.0},
         {instrumentFor(QStringLiteral("600002")), 0.0},
@@ -267,7 +367,135 @@ void PortfolioBacktestTest::weightsRespectMaximumLegWeight()
     QCOMPARE(result.trades.size(), 3);
     const PortfolioBar &bar = result.equityCurve.first();
     for (const PortfolioPosition &position : bar.positions) {
-        QVERIFY(position.weight <= 0.6 + 1e-9);
+        QVERIFY(position.weight <= 0.25 + 1e-9);
+    }
+    QVERIFY(bar.cash >= 249000.0);
+}
+
+void PortfolioBacktestTest::industryLimitRequiresCompleteSnapshot()
+{
+    PortfolioDefinition definition = equalWeightDefinition(
+        QStringLiteral("600001"), QStringLiteral("600002"));
+    definition.maximumIndustryWeight = 0.5;
+    QString error;
+    QVERIFY(!definition.isValid(&error));
+    QVERIFY(error.contains(QStringLiteral("行业数据集")));
+
+    definition.industryDatasetId = QStringLiteral("industry-fixture-v1");
+    const QVector<QDate> days{QDate(2026, 1, 5)};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             days, {100.0})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             days, {100.0})}};
+    AShareIndustrySnapshot incomplete = industrySnapshotFor(
+        {QStringLiteral("600001")}, {});
+    incomplete.expectedSymbols = 2;
+    incomplete.coverageComplete = false;
+    const PortfolioResult result = PortfolioBacktestEngine::run(
+        definition, series, &error, {}, incomplete);
+    QVERIFY(result.equityCurve.isEmpty());
+    QVERIFY(error.contains(QStringLiteral("完整")));
+}
+
+void PortfolioBacktestTest::industryTargetWeightsAreCappedAndIdentified()
+{
+    const QVector<QDate> days{QDate(2026, 1, 5)};
+    PortfolioDefinition definition;
+    definition.portfolioId = QStringLiteral("industry_cap");
+    definition.name = QStringLiteral("行业约束组合");
+    definition.periodSeconds = 60;
+    definition.initialCapital = 1000000.0;
+    definition.commissionRate = 0.0;
+    definition.slippageRate = 0.0;
+    definition.lotSize = 1;
+    definition.maximumIndustryWeight = 0.5;
+    definition.industryDatasetId = QStringLiteral("industry-fixture-v1");
+    definition.legs = {
+        {instrumentFor(QStringLiteral("600001")), 0.4},
+        {instrumentFor(QStringLiteral("600002")), 0.4},
+        {instrumentFor(QStringLiteral("600003")), 0.2}};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             days, {100.0})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             days, {100.0})},
+        {QStringLiteral("600003"), seriesFor(QStringLiteral("600003"),
+                                             days, {100.0})}};
+    const AShareIndustrySnapshot industry = industrySnapshotFor(
+        {QStringLiteral("600001"), QStringLiteral("600002")},
+        {QStringLiteral("600003")});
+    QString error;
+    const PortfolioResult result = PortfolioBacktestEngine::run(
+        definition, series, &error, {}, industry);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(result.riskSummary.industryConstrainedGroupCount, 1);
+    QVERIFY(result.riskSummary.industryCoverageComplete);
+    QVERIFY(result.riskSummary.maximumObservedIndustryWeight <= 0.500001);
+    QCOMPARE(result.riskSummary.industryLimitBreachFrameCount, 0);
+    QVERIFY(result.equityCurve.first().cash >= 299999.0);
+    const QVariantMap identity = result.immutableIdentity
+        .value(QStringLiteral("industrySnapshot")).toMap();
+    QCOMPARE(identity.value(QStringLiteral("datasetId")).toString(),
+             definition.industryDatasetId);
+    QCOMPARE(identity.value(QStringLiteral("snapshotVersion")).toString(),
+             industry.snapshotVersion);
+}
+
+void PortfolioBacktestTest::drawdownCircuitBreakerLiquidatesAndLatches()
+{
+    const QVector<QDate> days{QDate(2026, 1, 5), QDate(2026, 1, 6),
+                              QDate(2026, 1, 7), QDate(2026, 1, 8)};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             days, {100.0, 150.0, 135.0, 160.0})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             days, {100.0, 150.0, 135.0, 160.0})}};
+    PortfolioDefinition definition = equalWeightDefinition(
+        QStringLiteral("600001"), QStringLiteral("600002"));
+    definition.maximumPortfolioDrawdownPercent = 5.0;
+
+    const PortfolioResult result = PortfolioBacktestEngine::run(definition, series);
+
+    QVERIFY(result.riskSummary.circuitBreakerTriggered);
+    QCOMPARE(result.riskSummary.circuitBreakerReason,
+             QStringLiteral("drawdown_limit"));
+    QVERIFY(result.riskSummary.circuitBreakerDrawdownPercent >= 9.9);
+    QCOMPARE(result.riskSummary.completedCircuitBreakerExitCount, 2);
+    QCOMPARE(result.riskSummary.pendingCircuitBreakerExitCount, 0);
+    QCOMPARE(result.trades.size(), 4); // 首日两笔买入，触发日两笔退出；之后不再入场。
+    for (const PortfolioPosition &position : result.equityCurve.last().positions)
+        QCOMPARE(position.quantity, 0.0);
+    const QVariantMap policy = result.immutableIdentity
+        .value(QStringLiteral("portfolioRiskPolicy")).toMap();
+    QCOMPARE(policy.value(QStringLiteral("maximumPortfolioDrawdownPercent")).toDouble(),
+             5.0);
+    QVERIFY(result.immutableIdentity.value(QStringLiteral("riskSummary"))
+                .toMap().value(QStringLiteral("circuitBreakerTriggered")).toBool());
+}
+
+void PortfolioBacktestTest::lossCircuitBreakerLiquidates()
+{
+    const QVector<QDate> days{QDate(2026, 1, 5), QDate(2026, 1, 6)};
+    const QHash<QString, QVector<Candle>> series{
+        {QStringLiteral("600001"), seriesFor(QStringLiteral("600001"),
+                                             days, {100.0, 80.0})},
+        {QStringLiteral("600002"), seriesFor(QStringLiteral("600002"),
+                                             days, {100.0, 80.0})}};
+    PortfolioDefinition definition = equalWeightDefinition(
+        QStringLiteral("600001"), QStringLiteral("600002"));
+    definition.maximumPortfolioLossPercent = 10.0;
+
+    const PortfolioResult result = PortfolioBacktestEngine::run(definition, series);
+
+    QVERIFY(result.riskSummary.circuitBreakerTriggered);
+    QCOMPARE(result.riskSummary.circuitBreakerReason, QStringLiteral("loss_limit"));
+    QVERIFY(result.riskSummary.circuitBreakerLossPercent >= 19.9);
+    QCOMPARE(result.riskSummary.completedCircuitBreakerExitCount, 2);
+    QCOMPARE(result.riskSummary.pendingCircuitBreakerExitCount, 0);
+    for (const PortfolioTrade &trade : result.trades) {
+        if (trade.side == QStringLiteral("sell"))
+            QVERIFY(trade.reason.contains(QStringLiteral("熔断")));
     }
 }
 

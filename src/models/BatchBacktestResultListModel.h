@@ -14,6 +14,9 @@ public:
     enum Role {
         SymbolRole = Qt::UserRole + 1,
         NameRole,
+        DataModeRole,
+        StartDateRole,
+        EndDateRole,
         FrequencyRole,
         RequestedBarsRole,
         ActualBarsRole,
@@ -25,7 +28,11 @@ public:
         DatasetRawTickCountRole,
         DatasetGapDayCountRole,
         DatasetStaleDayCountRole,
+        DataQualityStatusRole,
+        DataQualityEligibleRole,
+        DataQualityAssessmentRole,
         ArchivedRole,
+        ArchivableRole,
         ArchivedResultIdRole,
         FinalEquityRole,
         TotalReturnPercentRole,
@@ -34,7 +41,45 @@ public:
         SharpeRatioRole,
         TotalCommissionRole,
         TotalTradesRole,
-        ElapsedMillisecondsRole
+        HasOpenPositionRole,
+        OpenPositionQuantityRole,
+        OpenPositionAveragePriceRole,
+        OpenPositionEntryTimeRole,
+        ElapsedMillisecondsRole,
+        HoldoutEnabledRole,
+        HoldoutTradingDaysRole,
+        TrainingStartDateRole,
+        TrainingEndDateRole,
+        HoldoutStartDateRole,
+        HoldoutEndDateRole,
+        TrainingActualTicksRole,
+        HoldoutActualTicksRole,
+        TrainingDataVersionRole,
+        HoldoutDataVersionRole,
+        TrainingDatasetVersionRole,
+        HoldoutDatasetVersionRole,
+        TrainingTotalReturnPercentRole,
+        TrainingMaxDrawdownPercentRole,
+        TrainingTotalTradesRole,
+        HoldoutTotalReturnPercentRole,
+        HoldoutMaxDrawdownPercentRole,
+        HoldoutTotalTradesRole,
+        WalkForwardEnabledRole,
+        WalkForwardFoldCountRole,
+        ResearchOnlyRole,
+        WalkForwardFoldsRole,
+        WalkForwardMeanReturnPercentRole,
+        WalkForwardMedianReturnPercentRole,
+        WalkForwardWorstReturnPercentRole,
+        WalkForwardBestReturnPercentRole,
+        SegmentedResearchRole,
+        ResearchSegmentsRole,
+        ResearchSegmentCountRole,
+        SegmentedMeanReturnPercentRole,
+        SegmentedMedianReturnPercentRole,
+        SegmentedWorstReturnPercentRole,
+        SegmentedBestReturnPercentRole,
+        SegmentedWorstDrawdownPercentRole
     };
 
     explicit BatchBacktestResultListModel(QObject *parent = nullptr);
@@ -47,6 +92,7 @@ public:
     void clear();
     void addResult(const BatchBacktestItemResult &result);
     void updateArchiveState(const QString &symbol, const QString &resultId);
+    void updateArchivableState(const QString &symbol, bool archivable);
 
 signals:
     void countChanged();

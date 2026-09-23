@@ -23,6 +23,7 @@ public:
     int strategyVersion() const override;
     QVariantMap normalizedParameters() const override;
     QVariantMap ruleSnapshot() const override;
+    CandleExecutionContext candleExecutionContext() const override;
     void onTick(const Tick &tick) override;
     void onCandle(const Candle &candle) override;
     void reset() override;
@@ -37,6 +38,8 @@ private:
     QVector<std::optional<double>> m_previousRight;
     bool m_hasPosition = false;
     bool m_pendingEntry = false;
+    QDateTime m_pendingEntryDecisionTime;
+    CandleExecutionContext m_candleExecutionContext;
     double m_entryReferencePrice = 0.0;
     QDate m_entryTradingDate;
     int m_holdingBars = 0;

@@ -5,17 +5,22 @@
 #include "services/StorageProfile.h"
 #include "services/HistoricalDataService.h"
 #include "services/AsyncTickWriter.h"
+#include "services/RawTickParameterSensitivityScanner.h"
+#include "services/RawTickParameterSensitivityService.h"
 
 #include <QSignalSpy>
 #include <QElapsedTimer>
+#include <QDir>
 #include <QFileInfo>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimeZone>
 #include <QUuid>
 
 #include <algorithm>
+#include <limits>
 
 namespace pp {
 
@@ -59,6 +64,37 @@ BacktestArchiveRecord archiveFixture(const QString &resultId, const QString &tas
         {config.from, 1000000.0, 500000.0, 500000.0, 0.0},
         {config.to, 1012500.0, 1012500.0, 0.0, 0.45}
     };
+    Candle firstCandle;
+    firstCandle.instrument = config.instrument;
+    firstCandle.startTime = config.from;
+    firstCandle.periodSeconds = config.periodSeconds;
+    firstCandle.open = 1500.0;
+    firstCandle.high = 1510.0;
+    firstCandle.low = 1495.0;
+    firstCandle.close = 1505.0;
+    firstCandle.volume = 120000.0;
+    firstCandle.buyVolume = 70000.0;
+    firstCandle.sellVolume = 40000.0;
+    firstCandle.neutralVolume = 10000.0;
+    firstCandle.directionalVolumeKnown = true;
+    firstCandle.source = QStringLiteral("raw_tick_cache_v1");
+    firstCandle.adjustment = QStringLiteral("none");
+    Candle secondCandle = firstCandle;
+    secondCandle.startTime = config.to;
+    secondCandle.open = 1505.0;
+    secondCandle.high = 1525.0;
+    secondCandle.low = 1500.0;
+    secondCandle.close = 1520.0;
+    secondCandle.volume = 180000.0;
+    record.result.candles = {firstCandle, secondCandle};
+    TradeSignal signal;
+    signal.instrument = config.instrument;
+    signal.timestamp = config.to;
+    signal.side = SignalSide::Sell;
+    signal.price = 1520.0;
+    signal.volume = 600.0;
+    signal.reason = QStringLiteral("均线死叉");
+    record.result.chartSignals = {signal};
     BacktestTrade trade;
     trade.instrument = config.instrument;
     trade.entryTime = config.from;
@@ -73,6 +109,49 @@ BacktestArchiveRecord archiveFixture(const QString &resultId, const QString &tas
     trade.entryReason = QStringLiteral("金叉");
     trade.exitReason = QStringLiteral("回测结束平仓");
     record.result.trades = {trade};
+    return record;
+}
+
+BacktestArchiveRecord rawArchiveFixture(const QString &resultId, int tickCount)
+{
+    BacktestArchiveRecord record = archiveFixture(
+        resultId, QStringLiteral("raw-task"), QStringLiteral("tick_momentum"), 0,
+        QDateTime(QDate(2026, 7, 1), QTime(2, 0), Qt::UTC));
+    BacktestConfig &config = record.result.config;
+    config.dataMode = BacktestDataMode::RawTicks;
+    config.frequency = QStringLiteral("tick");
+    config.periodSeconds = 0;
+    config.actualBars = tickCount;
+    record.result.candles.clear();
+    record.result.chartSignals.clear();
+    record.result.rawTicks.clear();
+    for (int index = 0; index < tickCount; ++index) {
+        RawTradeTick tick;
+        tick.instrument = config.instrument;
+        tick.tradingDate = config.from.date();
+        tick.timestamp = config.from.addSecs(index);
+        tick.sourceLine = index + 1;
+        tick.price = 1500.0 + index;
+        tick.volumeShares = 100.0 + index;
+        tick.amount = tick.price * tick.volumeShares;
+        tick.direction = index % 2 == 0
+            ? RawTradeDirection::Buy : RawTradeDirection::Sell;
+        tick.source = QStringLiteral("test-fixture");
+        record.result.rawTicks.append(tick);
+    }
+    config.to = record.result.rawTicks.last().timestamp;
+    config.dataVersion = computeBacktestDataVersion(
+        record.result.rawTicks, config.instrument.symbol);
+    TradeSignal signal;
+    signal.instrument = config.instrument;
+    signal.timestamp = record.result.rawTicks.at(tickCount / 2).timestamp;
+    signal.side = SignalSide::Sell;
+    signal.price = record.result.rawTicks.at(tickCount / 2).price;
+    signal.volume = 100.0;
+    signal.reason = QStringLiteral("原始 Tick 测试信号");
+    record.result.chartSignals = {signal};
+    record.result.equityObservationCount = tickCount;
+    record.result.equityCurveSampled = tickCount > record.result.equityCurve.size();
     return record;
 }
 
@@ -122,13 +201,104 @@ private slots:
     void migratesLegacyAccountSnapshotSchema();
     void writesMarketSnapshotsAsynchronouslyAndIdempotently();
     void archivesBuiltInAndCustomBacktestsRoundTrip();
+    void archiveSampleWindowsSurviveReopen_data();
+    void archiveSampleWindowsSurviveReopen();
+    void legacyArchiveDoesNotInventRequestedSampleWindow();
+    void archiveRejectsCorruptRequestedSampleWindow_data();
+    void archiveRejectsCorruptRequestedSampleWindow();
+    void archiveFinalPositionIsModeIndependent_data();
+    void archiveFinalPositionIsModeIndependent();
+    void validationRunSampleWindowsRoundTrip_data();
+    void validationRunSampleWindowsRoundTrip();
+    void archiveDisplayRestoreDefersRawTickSnapshot();
+    void archiveRawTickPagesPreserveStableOrder();
+    void archiveRawTickPageRejectsUnboundedRequest();
+    void archiveRestoresSampledRawTickEquityMetadata();
     void archivePreservesDatasetIdentity();
     void archiveTransactionRollsBackOnChildFailure();
     void archiveRestoreIsStableAndDoesNotRequestNetwork();
+    void legacyV17ArchiveRestoresWithoutInventedCandles();
+    void incompleteV18CandleSnapshotIsRejected();
     void migratesLegacyDatabaseWithBackupAndStableIdentity();
     void migrationFailureRollsBackWithoutHalfSchema();
     void relocatesDatabaseByVerifiedCopyAndRejectsNetworkPath();
+    void storageProfileAcceptsExplicitEnvironmentOverride();
+    void aShareInstrumentDayStatusRoundTripsTransactionally();
+    void rawTickParameterSensitivityRoundTripsImmutableIdentity();
+    void rawTickNestedWalkForwardArchiveRequiresAndRestoresAllFolds();
+    void rawTickParameterSensitivityRunsAsynchronouslyAndArchives();
+    void rawTickParameterSensitivityKeepsOnlyOneTradingDayResident();
 };
+
+void SqliteLocalDataStoreTest::storageProfileAcceptsExplicitEnvironmentOverride()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString expected = QDir::cleanPath(
+        directory.filePath(QStringLiteral("explicit/pptrader.db")));
+    const QByteArray previous = qgetenv("PPTRADER_DATABASE_PATH");
+    qputenv("PPTRADER_DATABASE_PATH", expected.toLocal8Bit());
+    const QString actual = StorageProfile::configuredDatabasePath();
+    if (previous.isNull()) qunsetenv("PPTRADER_DATABASE_PATH");
+    else qputenv("PPTRADER_DATABASE_PATH", previous);
+    QCOMPARE(actual, expected);
+}
+
+void SqliteLocalDataStoreTest::aShareInstrumentDayStatusRoundTripsTransactionally()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(QStringLiteral("calendar-status.db"))));
+
+    Instrument value;
+    value.symbol = QStringLiteral("600519");
+    value.name = QStringLiteral("贵州茅台");
+    value.market = Market::AShare;
+    value.venue = QStringLiteral("SSE");
+    AShareInstrumentDayRecord record;
+    record.instrument = value;
+    record.tradingDate = QDate(2026, 1, 5);
+    record.state = AShareInstrumentDayState::Suspended;
+    record.reason = QStringLiteral("公告停牌");
+    record.source = QStringLiteral("test-fixture");
+    record.sourceVersion = QStringLiteral("fixture-v1");
+    QVERIFY(record.isValid());
+    QSignalSpy writeFailed(&store, &SqliteLocalDataStore::writeFailed);
+    const bool inserted = store.upsertAShareInstrumentDayRecords({record});
+    const QString insertError = writeFailed.isEmpty()
+        ? QString{} : writeFailed.last().first().toString();
+    QVERIFY2(inserted, qPrintable(insertError));
+
+    QVector<AShareInstrumentDayRecord> loaded =
+        store.loadAShareInstrumentDayRecords(
+            {value.symbol}, QDate(2026, 1, 5), QDate(2026, 1, 5));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().state, AShareInstrumentDayState::Suspended);
+    QCOMPARE(loaded.first().reason, QStringLiteral("公告停牌"));
+
+    record.state = AShareInstrumentDayState::Tradable;
+    record.reason.clear();
+    record.sourceVersion = QStringLiteral("fixture-v2");
+    writeFailed.clear();
+    const bool updated = store.upsertAShareInstrumentDayRecords({record});
+    const QString updateError = writeFailed.isEmpty()
+        ? QString{} : writeFailed.last().first().toString();
+    QVERIFY2(updated, qPrintable(updateError));
+    loaded = store.loadAShareInstrumentDayRecords(
+        {value.symbol}, QDate(2026, 1, 5), QDate(2026, 1, 5));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().state, AShareInstrumentDayState::Tradable);
+    QCOMPARE(loaded.first().sourceVersion, QStringLiteral("fixture-v2"));
+
+    AShareInstrumentDayRecord invalid = record;
+    invalid.state = AShareInstrumentDayState::Unknown;
+    QVERIFY(!store.upsertAShareInstrumentDayRecords({record, invalid}));
+    loaded = store.loadAShareInstrumentDayRecords(
+        {value.symbol}, QDate(2026, 1, 5), QDate(2026, 1, 5));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().sourceVersion, QStringLiteral("fixture-v2"));
+}
 
 void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity()
 {
@@ -154,7 +324,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 25);
         QVERIFY(!store.databaseUuid().isEmpty());
         uuid = store.databaseUuid();
         backupPath = store.lastMigrationBackupPath();
@@ -170,7 +340,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
             QVERIFY(verify.open());
             QSqlQuery query(verify);
             QVERIFY(query.exec(QStringLiteral("pragma user_version")) && query.next());
-            QCOMPARE(query.value(0).toInt(), 7);
+            QCOMPARE(query.value(0).toInt(), 25);
             QVERIFY(query.exec(QStringLiteral(
                 "select migration_name from schema_migration_history where version = 1"))
                 && query.next());
@@ -205,6 +375,81 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
                 && query.next());
             QCOMPARE(query.value(0).toString(),
                      QStringLiteral("backtest_validation_runs"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 8"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("cross_sectional_backtest_archive"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 9"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("ashare_calendar_status"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 10"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("ashare_instrument_day_import_audit"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 11"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("ashare_instrument_day_revision_audit"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 12"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("ashare_industry_dataset"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 13"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("ashare_industry_import_audit"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 14"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("factor_definition_registry"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 15"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("factor_candidate_governance"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 16"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("authorized_factor_dataset"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 17"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("external_factor_research_archive"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 18"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("backtest_candle_snapshot"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 20"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("backtest_open_position"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 22"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("raw_tick_walk_forward"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 23"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("raw_tick_parameter_sensitivity"));
+            QVERIFY(query.exec(QStringLiteral(
+                "select migration_name from schema_migration_history where version = 24"))
+                && query.next());
+            QCOMPARE(query.value(0).toString(),
+                     QStringLiteral("raw_tick_day_quality_audit"));
             QVERIFY(query.exec(QStringLiteral("select value from legacy_marker where id = 1"))
                 && query.next());
             QCOMPARE(query.value(0).toString(), QStringLiteral("preserved"));
@@ -234,7 +479,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
     QCOMPARE(reopened.databaseUuid(), uuid);
-    QCOMPARE(reopened.schemaVersion(), 7);
+    QCOMPARE(reopened.schemaVersion(), 25);
     QVERIFY(reopened.lastMigrationBackupPath().isEmpty());
 }
 
@@ -339,6 +584,303 @@ void SqliteLocalDataStoreTest::relocatesDatabaseByVerifiedCopyAndRejectsNetworkP
     QVERIFY(networkError.contains(QStringLiteral("网络共享")));
 }
 
+void SqliteLocalDataStoreTest::archiveFinalPositionIsModeIndependent_data()
+{
+    QTest::addColumn<bool>("rawMode");
+    QTest::newRow("candles") << false;
+    QTest::newRow("raw-ticks") << true;
+}
+
+void SqliteLocalDataStoreTest::archiveSampleWindowsSurviveReopen_data()
+{
+    QTest::addColumn<bool>("rawMode");
+    QTest::addColumn<bool>("hasFrom");
+    QTest::addColumn<bool>("hasTo");
+    QTest::newRow("candles-empty") << false << false << false;
+    QTest::newRow("candles-from-only") << false << true << false;
+    QTest::newRow("candles-to-only") << false << false << true;
+    QTest::newRow("candles-both") << false << true << true;
+    QTest::newRow("ticks-empty") << true << false << false;
+    QTest::newRow("ticks-from-only") << true << true << false;
+    QTest::newRow("ticks-to-only") << true << false << true;
+    QTest::newRow("ticks-both") << true << true << true;
+}
+
+void SqliteLocalDataStoreTest::archiveSampleWindowsSurviveReopen()
+{
+    QFETCH(bool, rawMode);
+    QFETCH(bool, hasFrom);
+    QFETCH(bool, hasTo);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("sample-window.db"));
+    BacktestArchiveRecord record = rawMode
+        ? rawArchiveFixture(QStringLiteral("window"), 3)
+        : archiveFixture(QStringLiteral("window"), QStringLiteral("window-task"),
+                         QStringLiteral("sma_crossover"), 0,
+                         QDateTime(QDate(2026, 1, 6), QTime(8, 0), Qt::UTC));
+    // 请求边界故意不同于实际输入首末，禁止加载时从行情时间反推。
+    const QDateTime requestedFrom = hasFrom
+        ? QDateTime::fromString(QStringLiteral("2026-01-01T00:00:00.123+08:00"),
+                                Qt::ISODateWithMs) : QDateTime();
+    const QDateTime requestedTo = hasTo
+        ? QDateTime::fromString(QStringLiteral("2026-01-05T23:59:59.987+08:00"),
+                                Qt::ISODateWithMs) : QDateTime();
+    record.result.config.sampleFrom = requestedFrom;
+    record.result.config.sampleTo = requestedTo;
+    {
+        SqliteLocalDataStore writer;
+        QVERIFY(writer.initialize(path));
+        QVERIFY(writer.saveBacktestArchive(record));
+    }
+    SqliteLocalDataStore reader;
+    QVERIFY(reader.initialize(path));
+    for (const auto mode : {BacktestArchiveLoadMode::Display,
+                            BacktestArchiveLoadMode::CompleteInputSnapshot}) {
+        const auto loaded = reader.loadBacktestArchive(record.resultId, mode);
+        QVERIFY(loaded.has_value());
+        QVERIFY(loaded->result.config.sampleWindowKnown);
+        QCOMPARE(loaded->result.config.sampleFrom, requestedFrom.toUTC());
+        QCOMPARE(loaded->result.config.sampleTo, requestedTo.toUTC());
+        QCOMPARE(loaded->result.config.from, record.result.config.from);
+        QCOMPARE(loaded->result.config.to, record.result.config.to);
+        QCOMPARE(loaded->result.config.dataVersion, record.result.config.dataVersion);
+        QCOMPARE(loaded->result.config.ruleSnapshot, record.result.config.ruleSnapshot);
+    }
+}
+
+void SqliteLocalDataStoreTest::legacyArchiveDoesNotInventRequestedSampleWindow()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-v24.db"));
+    const auto original = archiveFixture(QStringLiteral("legacy-window"), QStringLiteral("legacy-task"),
+        QStringLiteral("custom_sample_window"), 1, QDateTime::currentDateTimeUtc());
+    QVERIFY(!original.result.config.ruleSnapshot.isEmpty());
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(original));
+    }
+    // 仅临时库构造真实旧结构：两个新列均不存在，而非只调低版本号。
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        auto legacy = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        legacy.setDatabaseName(path);
+        QVERIFY(legacy.open());
+        QSqlQuery query(legacy);
+        QVERIFY(query.exec(QStringLiteral("alter table backtest_results drop column sample_from_utc")));
+        QVERIFY(query.exec(QStringLiteral("alter table backtest_results drop column sample_to_utc")));
+        QVERIFY(query.exec(QStringLiteral("delete from schema_migration_history where version=25")));
+        QVERIFY(query.exec(QStringLiteral("update app_database_metadata set schema_version=24")));
+        QVERIFY(query.exec(QStringLiteral("pragma user_version=24")));
+    }
+    QSqlDatabase::removeDatabase(connection);
+    {
+        SqliteLocalDataStore upgraded;
+        QVERIFY(upgraded.initialize(path));
+        QCOMPARE(upgraded.schemaVersion(), 25);
+        QVERIFY(QFileInfo::exists(upgraded.lastMigrationBackupPath()));
+        const auto loaded = upgraded.loadBacktestArchive(original.resultId,
+            BacktestArchiveLoadMode::CompleteInputSnapshot);
+        QVERIFY(loaded.has_value());
+        QVERIFY(!loaded->result.config.sampleWindowKnown);
+        QVERIFY(!loaded->result.config.sampleFrom.isValid());
+        QVERIFY(!loaded->result.config.sampleTo.isValid());
+        QCOMPARE(loaded->result.config.from, original.result.config.from);
+        QCOMPARE(loaded->result.config.to, original.result.config.to);
+        QCOMPARE(loaded->result.config.dataVersion, original.result.config.dataVersion);
+        QCOMPARE(loaded->result.config.ruleSnapshot, original.result.config.ruleSnapshot);
+        QCOMPARE(loaded->result.candles.size(), original.result.candles.size());
+        QCOMPARE(loaded->result.equityCurve.size(), original.result.equityCurve.size());
+        QCOMPARE(loaded->result.trades.size(), original.result.trades.size());
+        auto copied = *loaded;
+        copied.resultId = QStringLiteral("copied-legacy-window");
+        QVERIFY(upgraded.saveBacktestArchive(copied));
+    }
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    QVERIFY(reopened.lastMigrationBackupPath().isEmpty());
+    const auto copied = reopened.loadBacktestArchive(QStringLiteral("copied-legacy-window"));
+    QVERIFY(copied.has_value());
+    QVERIFY(!copied->result.config.sampleWindowKnown);
+}
+
+void SqliteLocalDataStoreTest::archiveRejectsCorruptRequestedSampleWindow_data()
+{
+    QTest::addColumn<QString>("fromText");
+    QTest::addColumn<QString>("toText");
+    QTest::newRow("invalid-start") << QStringLiteral("not-a-date") << QStringLiteral("");
+    QTest::newRow("invalid-end") << QStringLiteral("") << QStringLiteral("not-a-date");
+    QTest::newRow("reversed") << QStringLiteral("2026-01-06T00:00:00.000Z")
+                              << QStringLiteral("2026-01-01T00:00:00.000Z");
+}
+
+void SqliteLocalDataStoreTest::archiveRejectsCorruptRequestedSampleWindow()
+{
+    QFETCH(QString, fromText);
+    QFETCH(QString, toText);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("corrupt-sample-window.db"));
+    const auto original = archiveFixture(QStringLiteral("corrupt-window"), QStringLiteral("task"),
+        QStringLiteral("sma_crossover"), 0, QDateTime::currentDateTimeUtc());
+    {
+        SqliteLocalDataStore writer;
+        QVERIFY(writer.initialize(path));
+        QVERIFY(writer.saveBacktestArchive(original));
+    }
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        auto fault = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        fault.setDatabaseName(path);
+        QVERIFY(fault.open());
+        QSqlQuery query(fault);
+        query.prepare(QStringLiteral("update backtest_results set sample_from_utc=?, sample_to_utc=?"));
+        query.addBindValue(fromText);
+        query.addBindValue(toText);
+        QVERIFY(query.exec());
+    }
+    QSqlDatabase::removeDatabase(connection);
+    SqliteLocalDataStore reader;
+    QVERIFY(reader.initialize(path));
+    QSignalSpy errors(&reader, &SqliteLocalDataStore::writeFailed);
+    QVERIFY(!reader.loadBacktestArchive(original.resultId).has_value());
+    QVERIFY(!errors.isEmpty());
+    QVERIFY(errors.last().first().toString().contains(QStringLiteral("请求样本窗")));
+}
+
+void SqliteLocalDataStoreTest::validationRunSampleWindowsRoundTrip_data()
+{
+    QTest::addColumn<bool>("hasFrom");
+    QTest::addColumn<bool>("hasTo");
+    QTest::newRow("empty") << false << false;
+    QTest::newRow("from-only") << true << false;
+    QTest::newRow("to-only") << false << true;
+    QTest::newRow("both") << true << true;
+}
+
+void SqliteLocalDataStoreTest::validationRunSampleWindowsRoundTrip()
+{
+    QFETCH(bool, hasFrom);
+    QFETCH(bool, hasTo);
+    QTemporaryDir directory;
+    const QString path = directory.filePath(QStringLiteral("validation.db"));
+    ValidationRun run;
+    run.name = QStringLiteral("隔离验证");
+    run.strategyId = QStringLiteral("custom_fixture");
+    run.strategyVersion = 1;
+    run.instrumentSymbol = QStringLiteral("600519");
+    run.periodSeconds = 60;
+    run.requestedBars = 500;
+    run.completedAt = QDateTime(QDate(2026, 9, 7), QTime(1, 0), Qt::UTC);
+    if (hasFrom) run.sampleFrom = run.completedAt.addDays(-2);
+    if (hasTo) run.sampleTo = run.completedAt.addDays(-1);
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QSignalSpy failures(&store, &SqliteLocalDataStore::writeFailed);
+        const bool saved = store.saveValidationRun(run);
+        QVERIFY2(saved, failures.isEmpty() ? "" : qPrintable(failures.last().first().toString()));
+    }
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    const auto runs = reopened.loadValidationRuns(10);
+    QCOMPARE(runs.size(), 1);
+    QCOMPARE(runs.first().sampleFrom, run.sampleFrom);
+    QCOMPARE(runs.first().sampleTo, run.sampleTo);
+    QCOMPARE(runs.first().name, run.name);
+    QCOMPARE(runs.first().strategyVersion, 1);
+    QCOMPARE(runs.first().requestedBars, 500);
+}
+
+void SqliteLocalDataStoreTest::archiveFinalPositionIsModeIndependent()
+{
+    QFETCH(bool, rawMode);
+    QTemporaryDir directory;
+    const QString path = directory.filePath(QStringLiteral("position.db"));
+    BacktestArchiveRecord record = rawMode
+        ? rawArchiveFixture(QStringLiteral("position"), 4)
+        : archiveFixture(QStringLiteral("position"), QStringLiteral("task"),
+                         QStringLiteral("sma_crossover"), 0, QDateTime::currentDateTimeUtc());
+    auto &position = record.result.finalPosition;
+    position.quantity = 100.0;
+    position.averagePrice = 1500.0;
+    position.entryCommission = 45.0;
+    position.entryTime = record.result.config.to;
+    position.entryReason = QStringLiteral("末日买入，保留未平仓持仓");
+    const double lastPrice = rawMode ? record.result.rawTicks.last().price
+                                    : record.result.candles.last().close;
+    const double cash = record.result.config.initialCapital
+        - position.quantity * position.averagePrice - position.entryCommission;
+    const double positionValue = position.quantity * lastPrice;
+    record.result.trades.clear();
+    record.result.chartSignals.clear();
+    record.result.equityCurve = {
+        {record.result.config.from, record.result.config.initialCapital,
+         record.result.config.initialCapital, 0.0, 0.0},
+        {record.result.config.to, cash + positionValue, cash, positionValue, 0.0}
+    };
+    record.result.summary = {};
+    record.result.summary.initialCapital = record.result.config.initialCapital;
+    record.result.summary.finalEquity = cash + positionValue;
+    record.result.summary.totalCommission = position.entryCommission;
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(record));
+        const QVector<BacktestPosition> invalidPositions = [&]() {
+            QVector<BacktestPosition> values;
+            auto invalid = position;
+            invalid.quantity = -1.0; values.append(invalid);
+            invalid = position; invalid.quantity = std::numeric_limits<double>::quiet_NaN(); values.append(invalid);
+            invalid = position; invalid.averagePrice = 0.0; values.append(invalid);
+            invalid = position; invalid.averagePrice = std::numeric_limits<double>::infinity(); values.append(invalid);
+            invalid = position; invalid.entryCommission = -1.0; values.append(invalid);
+            invalid = position; invalid.entryCommission = std::numeric_limits<double>::infinity(); values.append(invalid);
+            invalid = position; invalid.entryTime = {}; values.append(invalid);
+            invalid = position; invalid.entryTime = record.result.config.to.addSecs(1); values.append(invalid);
+            return values;
+        }();
+        for (int index = 0; index < invalidPositions.size(); ++index) {
+            auto invalid = record;
+            invalid.resultId = QStringLiteral("invalid-%1").arg(index);
+            invalid.result.finalPosition = invalidPositions.at(index);
+            QVERIFY(!store.saveBacktestArchive(invalid));
+            QVERIFY(!store.loadBacktestArchive(invalid.resultId).has_value());
+        }
+        QCOMPARE(store.loadBacktestArchiveSummaries().size(), 1);
+    }
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    for (const auto mode : {BacktestArchiveLoadMode::CompleteInputSnapshot,
+                            BacktestArchiveLoadMode::Display}) {
+        const auto restored = reopened.loadBacktestArchive(record.resultId, mode);
+        QVERIFY(restored.has_value());
+        QCOMPARE(restored->result.config.dataMode, record.result.config.dataMode);
+        QCOMPARE(restored->result.config.dataVersion, record.result.config.dataVersion);
+        QCOMPARE(restored->result.finalPosition.quantity, position.quantity);
+        QCOMPARE(restored->result.finalPosition.averagePrice, position.averagePrice);
+        QCOMPARE(restored->result.finalPosition.entryCommission, position.entryCommission);
+        QCOMPARE(restored->result.finalPosition.entryTime, position.entryTime);
+        QCOMPARE(restored->result.finalPosition.entryReason, position.entryReason);
+        QCOMPARE(restored->result.equityCurve.last().cash, record.result.equityCurve.last().cash);
+        QCOMPARE(restored->result.equityCurve.last().positionValue, record.result.equityCurve.last().positionValue);
+    }
+    // 临时库被破坏时恢复仍须失败，不能因放开 Candle 模式而放宽字段校验。
+    const QString connectionName = QUuid::createUuid().toString();
+    {
+        auto database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery mutation(database);
+        QVERIFY(mutation.exec(QStringLiteral(
+            "update backtest_results set final_position_average_price = 0 where result_id = 'position'")));
+        QVERIFY(!reopened.loadBacktestArchive(record.resultId).has_value());
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
 void SqliteLocalDataStoreTest::archivesBuiltInAndCustomBacktestsRoundTrip()
 {
     QTemporaryDir directory;
@@ -355,7 +897,11 @@ void SqliteLocalDataStoreTest::archivesBuiltInAndCustomBacktestsRoundTrip()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QVERIFY(store.saveBacktestArchive(builtIn));
+        QSignalSpy failureSpy(&store, &SqliteLocalDataStore::writeFailed);
+        const bool builtInSaved = store.saveBacktestArchive(builtIn);
+        const QString builtInError = failureSpy.isEmpty()
+            ? QString{} : failureSpy.last().first().toString();
+        QVERIFY2(builtInSaved, qPrintable(builtInError));
         QVERIFY(store.saveBacktestArchive(custom));
         QVERIFY(!store.saveBacktestArchive(custom));
     }
@@ -378,6 +924,15 @@ void SqliteLocalDataStoreTest::archivesBuiltInAndCustomBacktestsRoundTrip()
              builtIn.result.config.dataVersion);
     QCOMPARE(restoredBuiltIn->result.equityCurve.size(), 2);
     QCOMPARE(restoredBuiltIn->result.trades.size(), 1);
+    QCOMPARE(restoredBuiltIn->result.candles.size(), 2);
+    QCOMPARE(restoredBuiltIn->result.candles.first().source,
+             QStringLiteral("raw_tick_cache_v1"));
+    QCOMPARE(restoredBuiltIn->result.candles.first().buyVolume, 70000.0);
+    QVERIFY(restoredBuiltIn->result.candles.first().directionalVolumeKnown);
+    QCOMPARE(restoredBuiltIn->result.chartSignals.size(), 1);
+    QCOMPARE(restoredBuiltIn->result.chartSignals.first().timestamp, builtIn.result.config.to);
+    QCOMPARE(restoredBuiltIn->result.chartSignals.first().side, SignalSide::Sell);
+    QCOMPARE(restoredBuiltIn->result.chartSignals.first().reason, QStringLiteral("均线死叉"));
     QCOMPARE(restoredBuiltIn->result.trades.first().entryReason, QStringLiteral("金叉"));
     QCOMPARE(restoredBuiltIn->result.summary.totalReturnPercent, 1.25);
 
@@ -392,6 +947,144 @@ void SqliteLocalDataStoreTest::archivesBuiltInAndCustomBacktestsRoundTrip()
     QCOMPARE(model.indexOfResultId(QStringLiteral("result-built-in")), 1);
     QCOMPARE(model.get(0).value(QStringLiteral("customStrategy")).toBool(), true);
     QVERIFY(model.get(-1).isEmpty());
+}
+
+void SqliteLocalDataStoreTest::archiveDisplayRestoreDefersRawTickSnapshot()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(
+        QStringLiteral("archive-display-restore.db"))));
+    const BacktestArchiveRecord original = rawArchiveFixture(
+        QStringLiteral("display-raw"), 12);
+    QVERIFY(store.saveBacktestArchive(original));
+
+    const auto restored = store.loadBacktestArchive(
+        original.resultId, BacktestArchiveLoadMode::Display);
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->result.config.actualBars, 12);
+    QVERIFY(restored->result.rawTicks.isEmpty());
+    QVERIFY(restored->result.rawTickSnapshotAvailable);
+    QVERIFY(!restored->result.rawTickSnapshotLoaded);
+    QCOMPARE(restored->result.chartSignals.size(), 1);
+    QCOMPARE(restored->result.chartSignals.first().timestamp,
+             original.result.chartSignals.first().timestamp);
+    QCOMPARE(restored->result.equityCurve.size(), 2);
+    QCOMPARE(restored->result.trades.size(), 1);
+}
+
+void SqliteLocalDataStoreTest::archiveRawTickPagesPreserveStableOrder()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(
+        QStringLiteral("archive-raw-pages.db"))));
+    const BacktestArchiveRecord original = rawArchiveFixture(
+        QStringLiteral("paged-raw"), 12);
+    QVERIFY(store.saveBacktestArchive(original));
+
+    const auto first = store.loadBacktestRawTickPage(original.resultId, 0, 5);
+    const auto second = store.loadBacktestRawTickPage(original.resultId, 5, 5);
+    const auto last = store.loadBacktestRawTickPage(original.resultId, 10, 5);
+    QVERIFY(first.has_value());
+    QVERIFY(second.has_value());
+    QVERIFY(last.has_value());
+    QCOMPARE(first->offset, 0);
+    QCOMPARE(first->totalCount, 12);
+    QCOMPARE(first->ticks.size(), 5);
+    QVERIFY(first->hasMore);
+    QCOMPARE(second->offset, 5);
+    QCOMPARE(second->ticks.size(), 5);
+    QVERIFY(second->hasMore);
+    QCOMPARE(last->offset, 10);
+    QCOMPARE(last->ticks.size(), 2);
+    QVERIFY(!last->hasMore);
+    QCOMPARE(first->ticks.first().sourceLine, 1LL);
+    QCOMPARE(first->ticks.last().sourceLine, 5LL);
+    QCOMPARE(second->ticks.first().sourceLine, 6LL);
+    QCOMPARE(second->ticks.last().sourceLine, 10LL);
+    QCOMPARE(last->ticks.first().sourceLine, 11LL);
+    QCOMPARE(last->ticks.last().sourceLine, 12LL);
+}
+
+void SqliteLocalDataStoreTest::archiveRawTickPageRejectsUnboundedRequest()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(
+        QStringLiteral("archive-raw-page-bound.db"))));
+    const BacktestArchiveRecord original = rawArchiveFixture(
+        QStringLiteral("bounded-page-raw"), 12);
+    QVERIFY(store.saveBacktestArchive(original));
+    QSignalSpy failureSpy(&store, &SqliteLocalDataStore::writeFailed);
+
+    QVERIFY(!store.loadBacktestRawTickPage(
+        original.resultId, 0, 4097).has_value());
+    QVERIFY(!failureSpy.isEmpty());
+    QVERIFY(failureSpy.last().first().toString().contains(
+        QStringLiteral("最多 4096")));
+}
+
+void SqliteLocalDataStoreTest::archiveRestoresSampledRawTickEquityMetadata()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("sampled-raw-equity.db"));
+    BacktestArchiveRecord record = archiveFixture(
+        QStringLiteral("result-sampled-raw"), QStringLiteral("sampled-raw-task"),
+        QStringLiteral("tick_momentum"), 0,
+        QDateTime(QDate(2026, 7, 1), QTime(2, 0), Qt::UTC));
+    BacktestConfig &config = record.result.config;
+    config.dataMode = BacktestDataMode::RawTicks;
+    config.frequency = QStringLiteral("tick");
+    config.periodSeconds = 0;
+    config.actualBars = 3;
+    record.result.candles.clear();
+    record.result.chartSignals.clear();
+    record.result.rawTicks.clear();
+    for (int index = 0; index < config.actualBars; ++index) {
+        RawTradeTick tick;
+        tick.instrument = config.instrument;
+        tick.tradingDate = config.from.date();
+        tick.timestamp = config.from.addSecs(index * 60);
+        tick.sourceLine = index + 1;
+        tick.price = 1500.0 + index;
+        tick.volumeShares = 100.0;
+        tick.amount = tick.price * tick.volumeShares;
+        tick.direction = RawTradeDirection::Neutral;
+        tick.source = QStringLiteral("test-fixture");
+        record.result.rawTicks.append(tick);
+    }
+    config.to = record.result.rawTicks.last().timestamp;
+    config.dataVersion = computeBacktestDataVersion(
+        record.result.rawTicks, config.instrument.symbol);
+    record.result.equityCurve = {
+        {config.from, 1000000.0, 1000000.0, 0.0, 0.0},
+        {config.to, 1000100.0, 1000100.0, 0.0, 0.25}
+    };
+    record.result.equityObservationCount = config.actualBars;
+    record.result.equityCurveSampled = true;
+
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(record));
+    }
+
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    const auto restored = reopened.loadBacktestArchive(
+        record.resultId, BacktestArchiveLoadMode::CompleteInputSnapshot);
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->result.equityObservationCount, qint64(config.actualBars));
+    QVERIFY(restored->result.equityCurveSampled);
+    QCOMPARE(restored->result.equityCurve.size(), 2);
+    QCOMPARE(restored->result.rawTicks.size(), config.actualBars);
+    QVERIFY(restored->result.rawTickSnapshotAvailable);
+    QVERIFY(restored->result.rawTickSnapshotLoaded);
 }
 
 void SqliteLocalDataStoreTest::archivePreservesDatasetIdentity()
@@ -481,7 +1174,7 @@ void SqliteLocalDataStoreTest::archiveTransactionRollsBackOnChildFailure()
         QVERIFY(database.open());
         QSqlQuery query(database);
         QVERIFY(query.exec(QStringLiteral(
-            "create trigger reject_archive_equity before insert on backtest_equity_points "
+            "create trigger reject_archive_candles before insert on backtest_candles "
             "begin select raise(abort, 'forced child failure'); end")));
         database.close();
     }
@@ -523,6 +1216,77 @@ void SqliteLocalDataStoreTest::archiveRestoreIsStableAndDoesNotRequestNetwork()
     QCOMPARE(restored->result.config.strategyParameters, persistedParameters);
     QCOMPARE(restored->result.config.dataVersion,
              QStringLiteral("sha256:") + QString(64, 'b'));
+}
+
+void SqliteLocalDataStoreTest::legacyV17ArchiveRestoresWithoutInventedCandles()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-v17.db"));
+    const BacktestArchiveRecord original = archiveFixture(
+        QStringLiteral("legacy-v17"), QStringLiteral("71"),
+        QStringLiteral("sma_crossover"), 0, QDateTime::currentDateTimeUtc());
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(original));
+        store.close();
+    }
+
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral(
+            "delete from backtest_candles where result_id = 'legacy-v17'")));
+        QVERIFY(query.exec(QStringLiteral(
+            "update backtest_results set candle_series_version = 0 "
+            "where result_id = 'legacy-v17'")));
+        QVERIFY(query.exec(QStringLiteral("pragma user_version=17")));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    QCOMPARE(reopened.schemaVersion(), 25);
+    const auto restored = reopened.loadBacktestArchive(QStringLiteral("legacy-v17"));
+    QVERIFY(restored.has_value());
+    QVERIFY(restored->result.candles.isEmpty());
+    QVERIFY(restored->result.chartSignals.isEmpty());
+    QCOMPARE(restored->result.equityCurve.size(), 2);
+    QCOMPARE(restored->result.trades.size(), 1);
+}
+
+void SqliteLocalDataStoreTest::incompleteV18CandleSnapshotIsRejected()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-incomplete-v18.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    QVERIFY(store.saveBacktestArchive(archiveFixture(
+        QStringLiteral("incomplete-v18"), QStringLiteral("72"),
+        QStringLiteral("sma_crossover"), 0, QDateTime::currentDateTimeUtc())));
+
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral(
+            "delete from backtest_candles where result_id = 'incomplete-v18' "
+            "and sequence_no = 1")));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+
+    QSignalSpy failureSpy(&store, &SqliteLocalDataStore::writeFailed);
+    QVERIFY(!store.loadBacktestArchive(QStringLiteral("incomplete-v18")).has_value());
+    QVERIFY(!failureSpy.isEmpty());
 }
 
 void SqliteLocalDataStoreTest::reportsActualLocalHistoryCatalog()
@@ -1206,6 +1970,406 @@ void SqliteLocalDataStoreTest::writesMarketSnapshotsAsynchronouslyAndIdempotentl
     QCOMPARE(restoredSnapshot->expectedCount, stockCount);
     QCOMPARE(restoredSnapshot->quotes.size(), stockCount);
     QVERIFY(!writer.enqueue(snapshot));
+}
+
+void SqliteLocalDataStoreTest::rawTickParameterSensitivityRoundTripsImmutableIdentity()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(QStringLiteral("sensitivity.db"))));
+
+    RawTickParameterSensitivityResult record;
+    record.resultId = QStringLiteral("raw-sensitivity-1");
+    record.completedAt = QDateTime(QDate(2026, 8, 29), QTime(1, 2), Qt::UTC);
+    record.strategyId = QStringLiteral("tick_momentum");
+    record.instrument = {QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+                         Market::AShare, QStringLiteral("上交所")};
+    record.baseParameters = {{QStringLiteral("lookbackTicks"), 2},
+                             {QStringLiteral("thresholdPercent"), 0.05}};
+    record.trainingStartDate = QDate(2026, 8, 17);
+    record.trainingEndDate = QDate(2026, 8, 20);
+    record.validationStartDate = QDate(2026, 8, 21);
+    record.validationEndDate = QDate(2026, 8, 24);
+    record.trainingActualTicks = 32;
+    record.validationActualTicks = 16;
+    record.loadMilliseconds = 17;
+    record.scanMilliseconds = 43;
+    record.trainingDataVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    record.validationDataVersion = QStringLiteral("sha256:") + QString(64, 'b');
+    record.datasetVersion = QStringLiteral("sha256:") + QString(64, 'c');
+    record.candidateSetSha256 = QStringLiteral("sha256:") + QString(64, 'd');
+    record.identitySha256 = QStringLiteral("sha256:") + QString(64, 'e');
+    record.selectionCriterion =
+        QStringLiteral("training_return_desc_drawdown_asc_parameters_v1");
+    record.initialCapital = 1000000.0;
+    record.commissionRate = 0.0003;
+    record.slippageRate = 0.0002;
+    record.lotSize = 100;
+    record.selectedParameters = {{QStringLiteral("lookbackTicks"), 2},
+                                 {QStringLiteral("thresholdPercent"), 0.05}};
+    record.validationSummary = {1000000.0, 1010000.0, 1.0, 0.5,
+                                50.0, 0.8, 20.0, 2, 1, 1};
+    RawTickParameterSensitivityCandidate candidate;
+    candidate.rank = 1;
+    candidate.parameters = record.selectedParameters;
+    candidate.trainingSummary = {1000000.0, 1020000.0, 2.0, 0.4,
+                                 60.0, 1.0, 15.0, 3, 2, 1};
+    record.candidates = {candidate};
+
+    QString error;
+    QVERIFY2(store.saveRawTickParameterSensitivityResult(record, &error),
+             qPrintable(error));
+    const auto restored = store.loadRawTickParameterSensitivityResults();
+    QCOMPARE(restored.size(), 1);
+    QCOMPARE(restored.first().resultId, record.resultId);
+    QCOMPARE(restored.first().identitySha256, record.identitySha256);
+    QCOMPARE(restored.first().datasetVersion, record.datasetVersion);
+    QCOMPARE(restored.first().selectedParameters, record.selectedParameters);
+    QCOMPARE(restored.first().candidates.size(), 1);
+    QCOMPARE(restored.first().loadMilliseconds, 17);
+    QCOMPARE(restored.first().scanMilliseconds, 43);
+    QCOMPARE(restored.first().validationSummary.totalReturnPercent, 1.0);
+    QVERIFY(store.saveRawTickParameterSensitivityResult(record, &error));
+
+    RawTickParameterSensitivityResult duplicateIdentity = record;
+    duplicateIdentity.resultId = QStringLiteral("sensitivity-duplicate-identity");
+    QVERIFY(!store.saveRawTickParameterSensitivityResult(duplicateIdentity, &error));
+    QVERIFY(error.contains(QStringLiteral("已归档")));
+
+    RawTickParameterSensitivityResult conflict = record;
+    conflict.identitySha256 = QStringLiteral("sha256:") + QString(64, 'f');
+    QVERIFY(!store.saveRawTickParameterSensitivityResult(conflict, &error));
+    QVERIFY(error.contains(QStringLiteral("身份不同")));
+}
+
+void SqliteLocalDataStoreTest::rawTickNestedWalkForwardArchiveRequiresAndRestoresAllFolds()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(directory.filePath(QStringLiteral("nested-incomplete.db"))));
+
+    RawTickParameterSensitivityResult record;
+    record.resultId = QStringLiteral("raw-nested-incomplete");
+    record.completedAt = QDateTime(QDate(2026, 8, 29), QTime(2, 3), Qt::UTC);
+    record.analysisMode = QStringLiteral("nested_walk_forward");
+    record.walkForwardFoldCount = 2;
+    record.strategyId = QStringLiteral("tick_momentum");
+    record.instrument = {QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+                         Market::AShare, QStringLiteral("上交所")};
+    record.baseParameters = {{QStringLiteral("lookbackTicks"), 2}};
+    record.trainingStartDate = QDate(2026, 8, 17);
+    record.trainingEndDate = QDate(2026, 8, 20);
+    record.validationStartDate = QDate(2026, 8, 21);
+    record.validationEndDate = QDate(2026, 8, 24);
+    record.trainingActualTicks = 32;
+    record.validationActualTicks = 16;
+    record.trainingDataVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    record.validationDataVersion = QStringLiteral("sha256:") + QString(64, 'b');
+    record.datasetVersion = QStringLiteral("sha256:") + QString(64, 'c');
+    record.candidateSetSha256 = QStringLiteral("sha256:") + QString(64, 'd');
+    record.identitySha256 = QStringLiteral("sha256:") + QString(64, 'e');
+    record.selectionCriterion =
+        QStringLiteral("training_return_desc_drawdown_asc_parameters_v1");
+    record.initialCapital = 1000000.0;
+    record.commissionRate = 0.0003;
+    record.slippageRate = 0.0002;
+    record.lotSize = 100;
+    record.selectedParameters = {{QStringLiteral("lookbackTicks"), 2}};
+    RawTickParameterSensitivityCandidate candidate;
+    candidate.rank = 1;
+    candidate.parameters = record.selectedParameters;
+    candidate.trainingSummary = {1000000.0, 1010000.0, 1.0, 0.5,
+                                 50.0, 0.8, 20.0, 2, 1, 1};
+    record.candidates = {candidate};
+    record.validationSummary = candidate.trainingSummary;
+
+    QString error;
+    QVERIFY(!store.saveRawTickParameterSensitivityResult(record, &error));
+    QVERIFY(error.contains(QStringLiteral("外层折")));
+    QVERIFY(store.loadRawTickParameterSensitivityResults().isEmpty());
+
+    RawTickParameterSensitivityFold firstFold;
+    firstFold.foldNumber = 1;
+    firstFold.trainingStartDate = QDate(2026, 8, 17);
+    firstFold.trainingEndDate = QDate(2026, 8, 18);
+    firstFold.validationStartDate = QDate(2026, 8, 19);
+    firstFold.validationEndDate = QDate(2026, 8, 20);
+    firstFold.trainingActualTicks = 16;
+    firstFold.validationActualTicks = 16;
+    firstFold.trainingDataVersion = QStringLiteral("sha256:") + QString(64, '1');
+    firstFold.validationDataVersion = QStringLiteral("sha256:") + QString(64, '2');
+    firstFold.selectedParameters = record.selectedParameters;
+    firstFold.validationSummary = record.validationSummary;
+    firstFold.candidates = {candidate};
+
+    RawTickParameterSensitivityFold secondFold = firstFold;
+    secondFold.foldNumber = 2;
+    secondFold.trainingEndDate = firstFold.validationEndDate;
+    secondFold.validationStartDate = QDate(2026, 8, 21);
+    secondFold.validationEndDate = QDate(2026, 8, 24);
+    secondFold.trainingActualTicks = 32;
+    secondFold.trainingDataVersion = record.trainingDataVersion;
+    secondFold.validationDataVersion = record.validationDataVersion;
+    record.folds = {firstFold, secondFold};
+    record.meanValidationReturnPercent = 1.0;
+    record.medianValidationReturnPercent = 1.0;
+    record.minimumValidationReturnPercent = 1.0;
+    record.maximumValidationReturnPercent = 1.0;
+    record.positiveValidationFoldCount = 2;
+    record.parameterSelectionVariantCount = 1;
+    record.parameterSelectionDistribution = {QVariantMap {
+        {QStringLiteral("parameters"), record.selectedParameters},
+        {QStringLiteral("count"), 2},
+        {QStringLiteral("foldNumbers"), QVariantList {1, 2}}}};
+
+    QVERIFY2(store.saveRawTickParameterSensitivityResult(record, &error),
+             qPrintable(error));
+    const auto restored = store.loadRawTickParameterSensitivityResults();
+    QCOMPARE(restored.size(), 1);
+    QCOMPARE(restored.first().analysisMode,
+             QStringLiteral("nested_walk_forward"));
+    QCOMPARE(restored.first().folds.size(), 2);
+    QCOMPARE(restored.first().folds.at(0).validationEndDate,
+             firstFold.validationEndDate);
+    QCOMPARE(restored.first().folds.at(1).trainingDataVersion,
+             secondFold.trainingDataVersion);
+    QCOMPARE(restored.first().positiveValidationFoldCount, 2);
+    QCOMPARE(restored.first().parameterSelectionVariantCount, 1);
+}
+
+void SqliteLocalDataStoreTest::rawTickParameterSensitivityRunsAsynchronouslyAndArchives()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("raw-sensitivity-service.db"));
+    const Instrument instrument {QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+                                 Market::AShare, QStringLiteral("上交所")};
+    const QVector<QDate> dates {
+        QDate(2026, 8, 17), QDate(2026, 8, 18), QDate(2026, 8, 19),
+        QDate(2026, 8, 20), QDate(2026, 8, 21), QDate(2026, 8, 24)};
+    const QTimeZone shanghai(QByteArrayLiteral("Asia/Shanghai"));
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        for (int dayIndex = 0; dayIndex < dates.size(); ++dayIndex) {
+            QVector<RawTradeTick> ticks;
+            for (int tickIndex = 0; tickIndex < 8; ++tickIndex) {
+                RawTradeTick tick;
+                tick.instrument = instrument;
+                tick.tradingDate = dates.at(dayIndex);
+                tick.timestamp = QDateTime(dates.at(dayIndex), QTime(9, 30), shanghai)
+                                     .addSecs(tickIndex).toUTC();
+                tick.sourceLine = tickIndex + 1;
+                const double direction = dayIndex < 4 ? 1.0 : -1.0;
+                tick.price = 100.0 + dayIndex * 2.0
+                    + direction * tickIndex * 0.4;
+                tick.volumeShares = 100.0;
+                tick.amount = tick.price * tick.volumeShares;
+                ticks.append(tick);
+            }
+            QVERIFY(store.beginRawTradeTickImport(
+                instrument, dates.at(dayIndex), QStringLiteral("fixture")));
+            QVERIFY(store.appendRawTradeTicks(ticks));
+            QVERIFY(store.commitRawTradeTickImport());
+        }
+    }
+
+    RawTickParameterSensitivityRequest request;
+    request.strategyId = QStringLiteral("tick_momentum");
+    request.baseParameters = {{QStringLiteral("lookbackTicks"), 2},
+                              {QStringLiteral("thresholdPercent"), 0.05},
+                              {QStringLiteral("cooldownSeconds"), 0},
+                              {QStringLiteral("minimumHoldSeconds"), 0}};
+    request.axes = {{QStringLiteral("thresholdPercent"), {0.05, 5.0}}};
+    request.validationTradingDays = 2;
+    request.maximumCombinations = 16;
+    request.baseConfig.instrument = instrument;
+    request.baseConfig.initialCapital = 1000000.0;
+    request.baseConfig.commissionRate = 0.0;
+    request.baseConfig.slippageRate = 0.0;
+    request.baseConfig.lotSize = 100;
+
+    RawTickParameterSensitivityService service;
+    QVERIFY(service.start(path));
+    QSignalSpy completedSpy(&service,
+                            &RawTickParameterSensitivityService::completed);
+    QSignalSpy failedSpy(&service,
+                         &RawTickParameterSensitivityService::failed);
+    QVERIFY(service.request(77, request, dates.first(), dates.last()));
+    QVERIFY(service.isBusy());
+    QTRY_VERIFY_WITH_TIMEOUT(completedSpy.size() + failedSpy.size() > 0, 10000);
+    QVERIFY2(failedSpy.isEmpty(), failedSpy.isEmpty()
+        ? "" : qPrintable(failedSpy.first().at(1).toString()));
+    QCOMPARE(completedSpy.size(), 1);
+    QCOMPARE(completedSpy.first().at(0).toULongLong(), quint64(77));
+    const auto result = qvariant_cast<RawTickParameterSensitivityResult>(
+        completedSpy.first().at(1));
+    QVERIFY(!result.resultId.isEmpty());
+    QCOMPARE(result.trainingStartDate, dates.at(0));
+    QCOMPARE(result.trainingEndDate, dates.at(3));
+    QCOMPARE(result.validationStartDate, dates.at(4));
+    QCOMPARE(result.validationEndDate, dates.at(5));
+    QVERIFY(result.datasetVersion.startsWith(QStringLiteral("sha256:")));
+    QVERIFY(!service.isBusy());
+
+    completedSpy.clear();
+    QVERIFY(service.request(78, request, dates.first(), dates.last()));
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.size(), 1, 10000);
+    QCOMPARE(completedSpy.first().at(0).toULongLong(), quint64(78));
+    const auto reused = qvariant_cast<RawTickParameterSensitivityResult>(
+        completedSpy.first().at(1));
+    QCOMPARE(reused.resultId, result.resultId);
+
+    completedSpy.clear();
+    request.walkForwardFoldCount = 2;
+    QVERIFY(service.request(79, request, dates.first(), dates.last()));
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.size(), 1, 10000);
+    QCOMPARE(failedSpy.size(), 0);
+    const auto nested = qvariant_cast<RawTickParameterSensitivityResult>(
+        completedSpy.first().at(1));
+    QCOMPARE(nested.analysisMode, QStringLiteral("nested_walk_forward"));
+    QCOMPARE(nested.walkForwardFoldCount, 2);
+    QCOMPARE(nested.folds.size(), 2);
+    QVERIFY(nested.folds.at(0).trainingEndDate
+            < nested.folds.at(0).validationStartDate);
+    QVERIFY(nested.folds.at(1).trainingEndDate
+            < nested.folds.at(1).validationStartDate);
+    QVERIFY(nested.resultId != result.resultId);
+    service.stop();
+
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    const auto restored = reopened.loadRawTickParameterSensitivityResults();
+    QCOMPARE(restored.size(), 2);
+    QVERIFY(std::any_of(restored.cbegin(), restored.cend(),
+                        [&](const RawTickParameterSensitivityResult &record) {
+        return record.resultId == result.resultId
+            && record.identitySha256 == result.identitySha256;
+    }));
+    QVERIFY(std::any_of(restored.cbegin(), restored.cend(),
+                        [&](const RawTickParameterSensitivityResult &record) {
+        return record.resultId == nested.resultId
+            && record.identitySha256 == nested.identitySha256
+            && record.folds.size() == 2;
+    }));
+}
+
+void SqliteLocalDataStoreTest::rawTickParameterSensitivityKeepsOnlyOneTradingDayResident()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(
+        QStringLiteral("raw-sensitivity-streamed.db"));
+    const Instrument instrument {QStringLiteral("600519"), QStringLiteral("贵州茅台"),
+                                 Market::AShare, QStringLiteral("上交所")};
+    const QVector<QDate> dates {
+        QDate(2026, 8, 11), QDate(2026, 8, 12), QDate(2026, 8, 13),
+        QDate(2026, 8, 14), QDate(2026, 8, 17), QDate(2026, 8, 18),
+        QDate(2026, 8, 19), QDate(2026, 8, 20)};
+    const QVector<int> dailyCounts {9, 12, 15, 18, 21, 24, 27, 30};
+    const QTimeZone shanghai(QByteArrayLiteral("Asia/Shanghai"));
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        for (int dayIndex = 0; dayIndex < dates.size(); ++dayIndex) {
+            QVector<RawTradeTick> ticks;
+            for (int tickIndex = 0; tickIndex < dailyCounts.at(dayIndex);
+                 ++tickIndex) {
+                RawTradeTick tick;
+                tick.instrument = instrument;
+                tick.tradingDate = dates.at(dayIndex);
+                tick.timestamp = QDateTime(dates.at(dayIndex), QTime(9, 30), shanghai)
+                                     .addSecs(tickIndex).toUTC();
+                tick.sourceLine = tickIndex + 1;
+                tick.price = 100.0 + dayIndex * 0.5 + tickIndex * 0.02;
+                tick.volumeShares = 100.0;
+                tick.amount = tick.price * tick.volumeShares;
+                ticks.append(tick);
+            }
+            QVERIFY(store.beginRawTradeTickImport(
+                instrument, dates.at(dayIndex), QStringLiteral("fixture")));
+            QVERIFY(store.appendRawTradeTicks(ticks));
+            QVERIFY(store.commitRawTradeTickImport());
+        }
+    }
+
+    RawTickParameterSensitivityRequest request;
+    request.strategyId = QStringLiteral("tick_momentum");
+    request.baseParameters = {{QStringLiteral("lookbackTicks"), 2},
+                              {QStringLiteral("thresholdPercent"), 0.05},
+                              {QStringLiteral("cooldownSeconds"), 0},
+                              {QStringLiteral("minimumHoldSeconds"), 0}};
+    request.axes = {{QStringLiteral("thresholdPercent"), {0.05, 5.0}}};
+    request.validationTradingDays = 2;
+    request.walkForwardFoldCount = 3;
+    request.maximumCombinations = 16;
+    request.baseConfig.instrument = instrument;
+    request.baseConfig.initialCapital = 1000000.0;
+    request.baseConfig.commissionRate = 0.0;
+    request.baseConfig.slippageRate = 0.0;
+    request.baseConfig.lotSize = 100;
+
+    RawTickParameterSensitivityService service;
+    QVERIFY(service.start(path));
+    QSignalSpy completedSpy(&service,
+                            &RawTickParameterSensitivityService::completed);
+    QSignalSpy failedSpy(&service,
+                         &RawTickParameterSensitivityService::failed);
+    QSignalSpy residencySpy(
+        &service, SIGNAL(rawTickResidencyChanged(quint64,int)));
+    QVERIFY2(residencySpy.isValid(),
+             "参数敏感度服务必须公开逐日 Tick 驻留量观测信号");
+
+    QVERIFY(service.request(81, request, dates.first(), dates.last()));
+    QTRY_COMPARE_WITH_TIMEOUT(completedSpy.size(), 1, 15000);
+    QCOMPARE(failedSpy.size(), 0);
+    const auto result = qvariant_cast<RawTickParameterSensitivityResult>(
+        completedSpy.first().at(1));
+    QCOMPARE(result.folds.size(), 3);
+    QCOMPARE(result.folds.at(0).trainingActualTicks, 21);
+    QCOMPARE(result.folds.at(0).validationActualTicks, 33);
+    QCOMPARE(result.folds.at(1).trainingActualTicks, 54);
+    QCOMPARE(result.folds.at(1).validationActualTicks, 45);
+    QCOMPARE(result.folds.at(2).trainingActualTicks, 99);
+    QCOMPARE(result.folds.at(2).validationActualTicks, 57);
+
+    int peakResident = 0;
+    int finalResident = -1;
+    for (const QList<QVariant> &arguments : residencySpy) {
+        QCOMPARE(arguments.at(0).toULongLong(), quint64(81));
+        finalResident = arguments.at(1).toInt();
+        peakResident = std::max(peakResident, finalResident);
+    }
+    QCOMPARE(peakResident, dailyCounts.last());
+    QCOMPARE(finalResident, 0);
+    QVERIFY(peakResident < 156);
+
+    RawTickParameterSensitivityRequest cancelledRequest = request;
+    cancelledRequest.maximumCombinations = 64;
+    QVector<double> thresholds;
+    for (int index = 1; index <= 64; ++index)
+        thresholds.append(index * 0.01);
+    cancelledRequest.axes = {
+        {QStringLiteral("thresholdPercent"), thresholds}};
+    residencySpy.clear();
+    completedSpy.clear();
+    QVERIFY(service.request(82, cancelledRequest, dates.first(), dates.last()));
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+        residencySpy.cbegin(), residencySpy.cend(),
+        [](const QList<QVariant> &arguments) {
+            return arguments.at(0).toULongLong() == quint64(82)
+                && arguments.at(1).toInt() > 0;
+        }), 5000);
+    service.stop();
+    QVERIFY(!service.isBusy());
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+        residencySpy.cbegin(), residencySpy.cend(),
+        [](const QList<QVariant> &arguments) {
+            return arguments.at(0).toULongLong() == quint64(82)
+                && arguments.at(1).toInt() == 0;
+        }), 5000);
 }
 
 } // namespace pp

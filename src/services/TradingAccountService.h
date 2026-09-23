@@ -22,6 +22,7 @@ public:
     QString submitOrder(OrderRequest request) override;
     void cancelOrder(const QString &orderId);
     void updateMarketPrice(const Tick &tick);
+    bool initializeHistoricalClock(const QDateTime &sourceStart);
     void reset(double initialCapital = 1000000.0);
     void restoreTradingState(const TradingState &state);
     RiskLimits riskLimits() const;
@@ -66,6 +67,7 @@ private:
     QHash<QString, double> m_symbolRealizedPnl;
     QHash<QString, Reservation> m_reservations;
     AccountSnapshot m_snapshot;
+    QDateTime m_historicalClockStart;
     double m_commissionRate = 0.0003;
     double m_slippageRate = 0.0002;
     PreTradeRiskService m_riskService;

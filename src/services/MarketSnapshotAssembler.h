@@ -25,6 +25,9 @@ private:
     QDateTime m_timestamp;
     QHash<QString, Instrument> m_universe;
     QHash<QString, CrossSectionalQuote> m_quotes;
+    QHash<QString, quint64> m_quoteGenerations;
+    quint64 m_generation = 0;
+    int m_receivedCount = 0;
 };
 
 } // namespace pp

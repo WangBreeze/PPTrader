@@ -86,6 +86,11 @@ void CustomBacktestStrategy::onTick(const Tick &tick)
     Q_UNUSED(tick)
 }
 
+CandleExecutionContext CustomBacktestStrategy::candleExecutionContext() const
+{
+    return m_candleExecutionContext;
+}
+
 void CustomBacktestStrategy::onCandle(const Candle &candle)
 {
     m_indicators.append(candle);
@@ -98,7 +103,11 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
 
     static const QTimeZone shanghaiTimeZone("Asia/Shanghai");
     const QDate tradingDate = candle.startTime.toTimeZone(shanghaiTimeZone).date();
-    auto emitSignal = [&](SignalSide side, const QString &reason, double price) {
+    auto emitSignal = [&](SignalSide side, const QString &reason, double price,
+                          bool nextOpen = false) {
+        m_candleExecutionContext = {
+            nextOpen ? CandleExecutionBasis::NextOpen : CandleExecutionBasis::Close,
+            nextOpen ? m_pendingEntryDecisionTime : candle.startTime};
         TradeSignal signal;
         signal.instrument = candle.instrument;
         signal.timestamp = candle.startTime;
@@ -118,13 +127,14 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
         m_holdingBars = 0;
         m_pendingExitReason.clear();
         emitSignal(SignalSide::Buy,
-                   QStringLiteral("进入条件成立（下一根开盘价成交）"), candle.open);
+                   QStringLiteral("进入条件成立（下一根开盘价成交）"), candle.open, true);
     }
 
     if (!m_hasPosition) {
         if (!entry.value_or(false)) return;
         if (m_plan.signalPriceMode == CustomSignalPriceMode::NextOpen) {
             m_pendingEntry = true;
+            m_pendingEntryDecisionTime = candle.startTime;
             return;
         }
         m_hasPosition = true;
@@ -186,6 +196,8 @@ void CustomBacktestStrategy::reset()
     m_previousRight.fill(std::nullopt);
     m_hasPosition = false;
     m_pendingEntry = false;
+    m_pendingEntryDecisionTime = {};
+    m_candleExecutionContext = {};
     m_entryReferencePrice = 0.0;
     m_entryTradingDate = {};
     m_holdingBars = 0;

@@ -6,6 +6,55 @@
 
 namespace pp {
 
+RawTickBacktestDataVersionBuilder::RawTickBacktestDataVersionBuilder(
+    const QString &symbol)
+    : m_symbol(symbol), m_hash(QCryptographicHash::Sha256)
+{
+    m_hash.addData(m_symbol.toUtf8());
+    m_hash.addData("\nraw_ticks_v1\n");
+}
+
+bool RawTickBacktestDataVersionBuilder::append(const RawTradeTick &tick)
+{
+    const bool ordered = !m_previousTimestamp.isValid()
+        || tick.timestamp > m_previousTimestamp
+        || (tick.timestamp == m_previousTimestamp
+            && tick.sourceLine >= m_previousSourceLine);
+    if (m_finished || tick.instrument.symbol != m_symbol
+        || !tick.timestamp.isValid() || tick.price <= 0.0
+        || tick.volumeShares < 0.0 || !ordered) {
+        m_valid = false;
+        return false;
+    }
+    m_hash.addData(QByteArray::number(
+        tick.timestamp.toUTC().toMSecsSinceEpoch()));
+    m_hash.addData(",");
+    m_hash.addData(QByteArray::number(tick.sourceLine));
+    m_hash.addData(",");
+    m_hash.addData(QByteArray::number(tick.price, 'g', 17));
+    m_hash.addData(",");
+    m_hash.addData(QByteArray::number(tick.volumeShares, 'g', 17));
+    m_hash.addData(",");
+    m_hash.addData(QByteArray::number(tick.amount, 'g', 17));
+    m_hash.addData(",");
+    m_hash.addData(QByteArray::number(static_cast<int>(tick.direction)));
+    m_hash.addData("\n");
+    m_previousTimestamp = tick.timestamp;
+    m_previousSourceLine = tick.sourceLine;
+    ++m_count;
+    return true;
+}
+
+QString RawTickBacktestDataVersionBuilder::finish()
+{
+    if (!m_valid || m_finished) return {};
+    m_finished = true;
+    return QStringLiteral("sha256:%1").arg(
+        QString::fromLatin1(m_hash.result().toHex()));
+}
+
+int RawTickBacktestDataVersionBuilder::count() const { return m_count; }
+
 QString computeBacktestDataVersion(const QVector<Candle> &candles,
                                    const QString &symbol,
                                    int periodSeconds)
@@ -39,6 +88,28 @@ QString computeBacktestDataVersion(const QVector<Candle> &candles,
         hash.addData("\n");
     }
     return QStringLiteral("sha256:%1").arg(QString::fromLatin1(hash.result().toHex()));
+}
+
+QString computeBacktestDataVersion(const QVector<RawTradeTick> &ticks,
+                                   const QString &symbol)
+{
+    QVector<RawTradeTick> canonical = ticks;
+    canonical.erase(std::remove_if(canonical.begin(), canonical.end(),
+        [&](const RawTradeTick &tick) {
+            return tick.instrument.symbol != symbol || !tick.timestamp.isValid()
+                || tick.price <= 0.0 || tick.volumeShares < 0.0;
+        }), canonical.end());
+    std::sort(canonical.begin(), canonical.end(),
+              [](const RawTradeTick &left, const RawTradeTick &right) {
+        if (left.timestamp != right.timestamp) return left.timestamp < right.timestamp;
+        return left.sourceLine < right.sourceLine;
+    });
+
+    RawTickBacktestDataVersionBuilder builder(symbol);
+    for (const RawTradeTick &tick : canonical) {
+        if (!builder.append(tick)) return {};
+    }
+    return builder.finish();
 }
 
 QString computeBacktestDatasetVersion(const BacktestDatasetIdentity &identity)

@@ -62,10 +62,15 @@ bool LocalCandleSeriesQueryService::refreshRawTickCandleCacheDay(
 }
 
 LocalCandleSeriesResult LocalCandleSeriesQueryService::query(
-    const LocalCandleSeriesQuery &request) const
+    const LocalCandleSeriesQuery &request, const std::atomic_bool *cancelled) const
 {
     LocalCandleSeriesResult result;
     result.query = request;
+    const auto isCancelled = [cancelled]() { return cancelled && cancelled->load(); };
+    if (isCancelled()) {
+        result.error = QStringLiteral("本地查询已取消");
+        return result;
+    }
     if (!m_store) {
         result.error = QStringLiteral("本地分钟序列数据库不可用");
         return result;
@@ -87,16 +92,25 @@ LocalCandleSeriesResult LocalCandleSeriesQueryService::query(
     const QVector<QDate> rawDates = m_store->rawTradeTradingDates(request.instrument);
     result.rawTickBacked = !rawDates.isEmpty();
     for (const QDate &date : rawDates) {
+        if (isCancelled()) {
+            result.error = QStringLiteral("本地查询已取消");
+            return result;
+        }
         if (m_store->rawTickCandleCacheFresh(
                 request.instrument, date, request.periodSeconds)) continue;
         RawTickCandleAggregator aggregator(request.instrument, request.periodSeconds);
         if (!m_store->forEachRawTradeTick(
                 request.instrument, date,
-                [&aggregator](const RawTradeTick &tick) {
+                [&aggregator, &isCancelled](const RawTradeTick &tick) {
+                    if (isCancelled()) return false;
                     aggregator.append(tick);
                     return true;
                 })) {
             result.error = QStringLiteral("流式读取原始逐笔数据失败");
+            return result;
+        }
+        if (isCancelled()) {
+            result.error = QStringLiteral("本地查询已取消");
             return result;
         }
         const QVector<Candle> generated = aggregator.finish();

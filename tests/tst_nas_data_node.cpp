@@ -226,6 +226,8 @@ private slots:
     void nasChangesSummaryParsed();
     void multiDayQueueFailureResumeAndCancellation();
     void persistedQueueRecoveryAndCacheRetention();
+    void persistedReadyWorkResumesWithoutRepeatingSuccess();
+    void cancelledDownloadGenerationRejectsLateResponse();
 };
 
 void NasDataNodeTest::endpointPolicy()
@@ -740,6 +742,73 @@ void NasDataNodeTest::persistedQueueRecoveryAndCacheRetention()
     QVERIFY(QFile::exists(youngFile));
     QVERIFY(QFile::exists(unrelated));
     QVERIFY(!cache.pruneOlderThan(0, &summary, &error, now));
+}
+
+void NasDataNodeTest::persistedReadyWorkResumesWithoutRepeatingSuccess()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto entry = [](const QString &symbol) {
+        NasCatalogEntry value;
+        value.symbol = symbol;
+        value.tradingDate = QDate(2026, 8, 7);
+        value.format = QStringLiteral("tick_csv");
+        value.size = 100;
+        value.sha256 = QString(64, QLatin1Char('a'));
+        value.version = QStringLiteral("sha256:") + value.sha256;
+        value.downloadPath = QStringLiteral("/v1/ticks/%1/20260807").arg(symbol);
+        return value;
+    };
+
+    const QString completedSymbol = QStringLiteral("000001");
+    const QString readySymbol = QStringLiteral("600519");
+    NasTickSyncQueue original;
+    QVERIFY(original.prepareManifest(
+        {entry(completedSymbol), entry(readySymbol)},
+        {completedSymbol, readySymbol}));
+    QVERIFY(original.start());
+    const int completedIndex = original.takeNextReady();
+    QCOMPARE(original.items().at(completedIndex).entry.symbol, completedSymbol);
+    QVERIFY(original.markImporting(completedIndex));
+    QVERIFY(original.markSucceeded(completedIndex, 4000, 239));
+    QCOMPARE(original.items().at(1).status, NasSyncItemStatus::Ready);
+
+    NasSyncStateStore stateStore;
+    stateStore.setFilePath(directory.filePath(QStringLiteral("nas-sync-state.json")));
+    QString error;
+    QVERIFY2(stateStore.save(
+                 {{completedSymbol, readySymbol}, original.items()}, &error),
+             qPrintable(error));
+    NasPersistedSyncState persisted;
+    QVERIFY2(stateStore.load(&persisted, &error), qPrintable(error));
+
+    NasTickSyncQueue restored;
+    QVERIFY(restored.restore(persisted.items));
+    QVERIFY(restored.canResume());
+    QVERIFY(restored.resume());
+    const QVector<int> resumed = restored.takeReadyBatch(2);
+    QCOMPARE(resumed.size(), 1);
+    QCOMPARE(restored.items().at(resumed.first()).entry.symbol, readySymbol);
+    QCOMPARE(restored.summary().succeeded, 1);
+}
+
+void NasDataNodeTest::cancelledDownloadGenerationRejectsLateResponse()
+{
+    NasDownloadRequestGate gate;
+    QVERIFY(!gate.begin(0, 0));
+    QVERIFY(!gate.begin(10, -1));
+    QVERIFY(gate.begin(11, 3));
+    QVERIFY(!gate.begin(11, 4));
+    QCOMPARE(gate.indexFor(11), std::optional<int>(3));
+    QCOMPARE(gate.activeRequestIds(), QList<quint64>{11});
+
+    gate.cancelAll();
+    QVERIFY(!gate.finish(11).has_value());
+
+    QVERIFY(gate.begin(12, 0));
+    QVERIFY(!gate.finish(11).has_value());
+    QCOMPARE(gate.finish(12), std::optional<int>(0));
+    QVERIFY(!gate.finish(12).has_value());
 }
 
 QTEST_GUILESS_MAIN(NasDataNodeTest)

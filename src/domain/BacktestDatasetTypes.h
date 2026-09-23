@@ -17,6 +17,7 @@ struct RawTickDayFingerprint {
     QString rawContentSha256;
     int barCount = 0;
     int cacheVersion = 0;
+    bool cacheFresh = false;
 };
 
 // 一个可回测数据集的不可变身份：原始日期集合 + 每交易日 Tick 指纹 + 聚合算法版本 + 周期。

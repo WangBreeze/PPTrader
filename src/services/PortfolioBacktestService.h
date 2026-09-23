@@ -26,6 +26,7 @@ public:
     bool request(quint64 requestId, const PortfolioDefinition &definition,
                  int barCount, const QVector<Instrument> &knownInstruments);
     void cancel();
+    bool isReady() const;
     bool isRunning() const;
     bool cancelRequested() const;
 
@@ -37,6 +38,7 @@ private:
     QThread m_thread;
     QObject *m_worker = nullptr;
     std::unique_ptr<SqliteLocalDataStore> m_workerStore;
+    bool m_ready = false;
     bool m_running = false;
     std::atomic_bool m_cancelRequested = false;
 };

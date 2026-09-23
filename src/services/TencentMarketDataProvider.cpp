@@ -1,5 +1,6 @@
 #include "services/TencentMarketDataProvider.h"
 
+#include "domain/RealtimeProviderTypes.h"
 #include "services/TencentQuoteParser.h"
 
 #include <QNetworkReply>
@@ -13,9 +14,11 @@ namespace pp {
 
 TencentMarketDataProvider::TencentMarketDataProvider(QObject *parent)
     : MarketDataProvider(parent)
+    , m_network(new QNetworkAccessManager(this))
+    , m_pollTimer(new QTimer(this))
 {
-    m_pollTimer.setSingleShot(true);
-    connect(&m_pollTimer, &QTimer::timeout, this,
+    m_pollTimer->setSingleShot(true);
+    connect(m_pollTimer, &QTimer::timeout, this,
             &TencentMarketDataProvider::beginSnapshot);
 }
 
@@ -45,7 +48,8 @@ void TencentMarketDataProvider::start(const QVector<Instrument> &instruments)
     bool validInterval = false;
     const int intervalSeconds = qEnvironmentVariableIntValue(
         "PPTRADER_TENCENT_INTERVAL_SECONDS", &validInterval);
-    m_pollIntervalMilliseconds = std::max(60, validInterval ? intervalSeconds : 60) * 1000;
+    m_pollIntervalMilliseconds = normalizedRealtimePollingIntervalSeconds(
+        validInterval ? intervalSeconds : 60) * 1000;
     bool validMaximum = false;
     m_maximumBatches = qEnvironmentVariableIntValue(
         "PPTRADER_TENCENT_MAX_BATCHES", &validMaximum);
@@ -61,7 +65,7 @@ void TencentMarketDataProvider::start(const QVector<Instrument> &instruments)
 void TencentMarketDataProvider::stop()
 {
     m_running = false;
-    m_pollTimer.stop();
+    m_pollTimer->stop();
     if (m_activeReply) {
         m_activeReply->abort();
         m_activeReply->deleteLater();
@@ -80,6 +84,7 @@ void TencentMarketDataProvider::beginSnapshot()
     m_offset = 0;
     m_errors.clear();
     m_startedAt = QDateTime::currentDateTimeUtc();
+    m_batchTimer.restart();
     m_latestQuoteTime = {};
     m_batchId = QStringLiteral("tencent-%1")
         .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -111,7 +116,7 @@ void TencentMarketDataProvider::requestNextChunk()
     request.setTransferTimeout(10000);
     request.setRawHeader("User-Agent", "PPTrader/0.1 realtime-provider");
     request.setRawHeader("Referer", "https://gu.qq.com/");
-    QNetworkReply *reply = m_network.get(request);
+    QNetworkReply *reply = m_network->get(request);
     m_activeReply = reply;
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, requestedCount]() { handleReply(reply, requestedCount); });
@@ -150,9 +155,11 @@ void TencentMarketDataProvider::completeSnapshot()
     if (!m_running || m_batchId.isEmpty()) return;
     const QDateTime fetchedAt = QDateTime::currentDateTimeUtc();
     MarketSnapshot snapshot = m_snapshotAssembler.completeBatch(fetchedAt);
+    snapshot.collectionDurationMilliseconds = m_batchTimer.isValid()
+        ? std::max<qint64>(0, m_batchTimer.elapsed())
+        : std::max<qint64>(0, m_startedAt.msecsTo(fetchedAt));
     if (m_latestQuoteTime.isValid()) {
         snapshot.timestamp = m_latestQuoteTime;
-        snapshot.completedAt = m_latestQuoteTime;
     }
     m_batchId.clear();
     const bool freshSnapshot = !m_latestQuoteTime.isValid()
@@ -181,7 +188,7 @@ void TencentMarketDataProvider::completeSnapshot()
                      QStringLiteral("腾讯行情已完成受控批次数"));
         return;
     }
-    m_pollTimer.start(m_pollIntervalMilliseconds);
+    m_pollTimer->start(m_pollIntervalMilliseconds);
 }
 
 void TencentMarketDataProvider::publishState(

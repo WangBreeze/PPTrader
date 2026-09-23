@@ -8,6 +8,7 @@ Item {
     required property var theme
     required property var controller
     property bool showWorkspaceActions: false
+    property bool allowArbitraryPeriod: !showWorkspaceActions
     signal backtestWorkspaceRequested()
 
     function syncIndex() {
@@ -104,6 +105,48 @@ Item {
             }
         }
 
+        RowLayout {
+            Layout.fillWidth: true
+            visible: root.allowArbitraryPeriod
+            spacing: 8
+            Text {
+                text: "任意周期（秒）"
+                color: root.theme.textMuted
+                font.family: root.theme.fontFamily; font.pixelSize: 9
+            }
+            TextField {
+                id: arbitraryPeriodField
+                Layout.fillWidth: true
+                Layout.preferredHeight: 32
+                text: root.controller.selectedBacktestPeriodSeconds > 0
+                      ? String(root.controller.selectedBacktestPeriodSeconds) : "60"
+                validator: IntValidator { bottom: 1; top: 86400 }
+                color: root.theme.textPrimary
+                font.family: root.theme.fontFamily; font.pixelSize: 10
+                Accessible.name: "历史 Tick 回测任意 K 线周期秒数"
+                background: Rectangle {
+                    radius: 5; color: root.theme.bgInput
+                    border.color: arbitraryPeriodField.activeFocus
+                                  ? root.theme.cyan : root.theme.border
+                }
+            }
+            PpButton {
+                theme: root.theme
+                text: "生成并选择"
+                visualWidth: 96; visualHeight: 30
+                primary: true
+                available: root.controller.selectedBacktestSymbol.length > 0
+                           && arbitraryPeriodField.acceptableInput
+                           && !root.controller.localCandleSeriesLoading
+                toolTip: available
+                    ? "只从 SQLite 原始 Tick 异步生成该周期缓存并选中，不访问网络"
+                    : "请先选择本地 Tick 品种并输入 1–86400 秒"
+                onClicked: root.controller.prepareLocalBacktestPeriod(
+                    root.controller.selectedBacktestSymbol,
+                    Number(arbitraryPeriodField.text))
+            }
+        }
+
         Text {
             Layout.fillWidth: true
             text: root.controller.selectedBacktestDataAvailable
@@ -187,7 +230,7 @@ Item {
                 theme: root.theme
                 text: "回测多窗口"
                 available: false
-                toolTip: "回测多窗口接口尚未接入"
+                toolTip: "本阶段已完成实时多窗口；回测多窗口需绑定严格本地 Tick 与归档身份，尚未接入"
             }
         }
         Item { Layout.fillHeight: true }
@@ -195,7 +238,14 @@ Item {
 
     Connections {
         target: root.controller
-        function onBacktestInstrumentChanged() { root.syncIndex() }
+        function onBacktestInstrumentChanged() {
+            root.syncIndex()
+            if (!arbitraryPeriodField.activeFocus
+                    && root.controller.selectedBacktestPeriodSeconds > 0) {
+                arbitraryPeriodField.text = String(
+                    root.controller.selectedBacktestPeriodSeconds)
+            }
+        }
         function onLocalBacktestDataCatalogChanged() { root.syncIndex() }
     }
 }

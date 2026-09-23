@@ -2,6 +2,8 @@
 
 #include <QLocale>
 
+#include <algorithm>
+
 namespace pp {
 
 SignalListModel::SignalListModel(QObject *parent)
@@ -66,6 +68,17 @@ void SignalListModel::addSignal(const TradeSignal &signal)
         m_signals.erase(m_signals.begin() + m_maxRows, m_signals.end());
         endRemoveRows();
     }
+}
+
+void SignalListModel::loadSignals(const QVector<TradeSignal> &values)
+{
+    beginResetModel();
+    m_signals.clear();
+    const int signalCount = static_cast<int>(values.size());
+    const int firstIndex = std::max(0, signalCount - m_maxRows);
+    for (int index = signalCount - 1; index >= firstIndex; --index)
+        m_signals.append(values.at(index));
+    endResetModel();
 }
 
 void SignalListModel::clear()

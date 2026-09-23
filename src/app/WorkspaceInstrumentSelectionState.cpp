@@ -2,6 +2,25 @@
 
 #include <algorithm>
 
+namespace {
+
+QString normalizedDate(const QString &value)
+{
+    return value.trimmed();
+}
+
+QDate parseDate(const QString &value)
+{
+    return value.isEmpty() ? QDate{} : QDate::fromString(value, Qt::ISODate);
+}
+
+QDateTime dateTimeForDate(const QDate &date)
+{
+    return date.isValid() ? QDateTime(date, QTime(0, 0), Qt::UTC) : QDateTime{};
+}
+
+} // namespace
+
 namespace pp {
 
 void WorkspaceInstrumentSelectionState::setResearchInstrument(const Instrument &instrument)
@@ -113,6 +132,68 @@ const LocalHistoryDataset *WorkspaceInstrumentSelectionState::selectedBacktestDa
 const QVector<LocalHistoryDataset> &WorkspaceInstrumentSelectionState::localHistoryCatalog() const
 {
     return m_localHistoryCatalog;
+}
+
+bool WorkspaceInstrumentSelectionState::setBacktestSampleDateRange(
+    const QString &from, const QString &to, QString *error)
+{
+    const QString normalizedFrom = normalizedDate(from);
+    const QString normalizedTo = normalizedDate(to);
+    const QDate fromDate = parseDate(normalizedFrom);
+    const QDate toDate = parseDate(normalizedTo);
+    if ((!normalizedFrom.isEmpty() && !fromDate.isValid())
+        || (!normalizedTo.isEmpty() && !toDate.isValid())) {
+        if (error) *error = QStringLiteral("样本窗日期必须使用 yyyy-MM-dd 且为有效日期");
+        return false;
+    }
+    if (fromDate.isValid() && toDate.isValid() && fromDate > toDate) {
+        if (error) *error = QStringLiteral("样本窗起始日期不能晚于结束日期");
+        return false;
+    }
+
+    m_backtestSampleFromDate = normalizedFrom;
+    m_backtestSampleToDate = normalizedTo;
+    m_backtestSampleFrom = dateTimeForDate(fromDate);
+    m_backtestSampleTo = dateTimeForDate(toDate);
+    if (error) error->clear();
+    return true;
+}
+
+void WorkspaceInstrumentSelectionState::setBacktestSampleWindow(
+    const QDateTime &from, const QDateTime &to)
+{
+    m_backtestSampleFrom = from;
+    m_backtestSampleTo = to;
+    m_backtestSampleFromDate = from.isValid() ? from.date().toString(Qt::ISODate) : QString{};
+    m_backtestSampleToDate = to.isValid() ? to.date().toString(Qt::ISODate) : QString{};
+}
+
+void WorkspaceInstrumentSelectionState::clearBacktestSampleWindow()
+{
+    m_backtestSampleFromDate.clear();
+    m_backtestSampleToDate.clear();
+    m_backtestSampleFrom = {};
+    m_backtestSampleTo = {};
+}
+
+const QString &WorkspaceInstrumentSelectionState::backtestSampleFromDate() const
+{
+    return m_backtestSampleFromDate;
+}
+
+const QString &WorkspaceInstrumentSelectionState::backtestSampleToDate() const
+{
+    return m_backtestSampleToDate;
+}
+
+const QDateTime &WorkspaceInstrumentSelectionState::backtestSampleFrom() const
+{
+    return m_backtestSampleFrom;
+}
+
+const QDateTime &WorkspaceInstrumentSelectionState::backtestSampleTo() const
+{
+    return m_backtestSampleTo;
 }
 
 } // namespace pp

@@ -6,6 +6,7 @@
 #include <QThread>
 
 #include <memory>
+#include <atomic>
 
 namespace pp {
 
@@ -45,6 +46,8 @@ private:
     QObject *m_worker = nullptr;
     std::unique_ptr<SqliteLocalDataStore> m_workerStore;
     bool m_running = false;
+    std::shared_ptr<std::atomic_bool> m_cancelled =
+        std::make_shared<std::atomic_bool>(true);
 };
 
 } // namespace pp

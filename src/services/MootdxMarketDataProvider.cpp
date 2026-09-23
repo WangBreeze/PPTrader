@@ -1,11 +1,16 @@
 #include "services/MootdxMarketDataProvider.h"
 
+#include "domain/RealtimeProviderTypes.h"
+#include "services/ManagedProcessTree.h"
+#include "services/MootdxCompactSnapshotParser.h"
+
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryFile>
 
@@ -90,6 +95,9 @@ void MootdxMarketDataProvider::warmUpPython()
 void MootdxMarketDataProvider::start(const QVector<Instrument> &instruments)
 {
     m_stopping = false;
+    m_stdoutBuffer.clear();
+    m_lastProcessDiagnostic.clear();
+    m_lastProcessStderr.clear();
     m_lastReceivedCount = 0;
     m_lastBatchId.clear();
     m_lastUpdatedAt = {};
@@ -101,12 +109,16 @@ void MootdxMarketDataProvider::start(const QVector<Instrument> &instruments)
     }
 
     m_instrumentBySymbol.clear();
+    m_instrumentByCode.clear();
     m_snapshotAssembler.setUniverse(instruments);
     QStringList symbols;
     for (const auto &inst : instruments) {
         if (inst.market == Market::AShare) {
             symbols.append(inst.symbol);
             m_instrumentBySymbol[inst.symbol] = inst;
+            bool codeOk = false;
+            const int symbolCode = inst.symbol.toInt(&codeOk);
+            if (codeOk) m_instrumentByCode.insert(symbolCode, inst);
         }
     }
 
@@ -162,12 +174,17 @@ void MootdxMarketDataProvider::start(const QVector<Instrument> &instruments)
             "未找到可用 Python，请安装 requirements.txt 或设置 PPTRADER_PYTHON"));
         return;
     }
+    bool validInterval = false;
+    const int requestedInterval = qEnvironmentVariableIntValue(
+        "PPTRADER_TDX_INTERVAL_SECONDS", &validInterval);
+    const int intervalSeconds = normalizedRealtimePollingIntervalSeconds(
+        validInterval ? requestedInterval : 60);
     QStringList args = {
         bridgePath,
         QStringLiteral("--symbols-file"),
         m_symbolsFilePath,
         QStringLiteral("--interval"),
-        QStringLiteral("3"),
+        QString::number(intervalSeconds),
     };
     const QString configuredServer = m_serverOverride.isEmpty()
         ? qEnvironmentVariable("PPTRADER_TDX_SERVER").trimmed()
@@ -190,12 +207,7 @@ void MootdxMarketDataProvider::start(const QVector<Instrument> &instruments)
 void MootdxMarketDataProvider::stop()
 {
     m_stopping = true;
-    if (m_process->state() != QProcess::NotRunning) {
-        m_process->terminate();
-        if (!m_process->waitForFinished(3000)) {
-            m_process->kill();
-        }
-    }
+    ManagedProcessTree::stop(m_process);
     m_activeBatchId.clear();
     m_activeBatchError.clear();
     if (!m_symbolsFilePath.isEmpty()) {
@@ -208,11 +220,22 @@ void MootdxMarketDataProvider::stop()
 
 void MootdxMarketDataProvider::onReadyRead()
 {
-    while (m_process->canReadLine()) {
-        const QByteArray line = m_process->readLine().trimmed();
-        if (!line.isEmpty()) {
-            parseLine(line);
-        }
+    drainStandardOutput(false);
+}
+
+void MootdxMarketDataProvider::drainStandardOutput(bool finalDrain)
+{
+    m_stdoutBuffer.append(m_process->readAllStandardOutput());
+    qsizetype newline = -1;
+    while ((newline = m_stdoutBuffer.indexOf('\n')) >= 0) {
+        const QByteArray line = m_stdoutBuffer.left(newline).trimmed();
+        m_stdoutBuffer.remove(0, newline + 1);
+        if (!line.isEmpty()) parseLine(line);
+    }
+    if (finalDrain) {
+        const QByteArray line = m_stdoutBuffer.trimmed();
+        m_stdoutBuffer.clear();
+        if (!line.isEmpty()) parseLine(line);
     }
 }
 
@@ -220,12 +243,46 @@ void MootdxMarketDataProvider::onReadyReadStderr()
 {
     const QByteArray data = m_process->readAllStandardError();
     if (!data.isEmpty()) {
-        emit providerError(QString::fromUtf8(data).trimmed());
+        m_lastProcessStderr = QString::fromUtf8(data).trimmed();
+        emit providerError(m_lastProcessStderr);
     }
 }
 
 void MootdxMarketDataProvider::parseLine(const QByteArray &line)
 {
+    if (line.startsWith("S\t")) {
+        if (!MootdxCompactSnapshotParser::parse(line, &m_compactChunkBuffer)) {
+            m_activeBatchError = m_compactChunkBuffer.error;
+            emit providerError(QStringLiteral("A股行情紧凑块无效：%1")
+                                   .arg(m_compactChunkBuffer.error));
+            return;
+        }
+        if (m_activeBatchId.isEmpty()
+            || m_compactChunkBuffer.batchId != m_activeBatchId) {
+            emit providerError(QStringLiteral("A股行情紧凑块批次标识不匹配"));
+            return;
+        }
+        for (const MootdxCompactQuoteRow &row : m_compactChunkBuffer.quotes) {
+            const auto instrument = m_instrumentByCode.constFind(row.symbolCode);
+            if (instrument == m_instrumentByCode.cend()) continue;
+            Tick tick;
+            tick.instrument = *instrument;
+            tick.timestamp = m_compactChunkBuffer.timestamp;
+            tick.batchId = m_compactChunkBuffer.batchId;
+            tick.price = row.price;
+            tick.volume = row.volume;
+            tick.bid = row.bid;
+            tick.ask = row.ask;
+            tick.open = row.open;
+            tick.high = row.high;
+            tick.low = row.low;
+            tick.previousClose = row.previousClose;
+            tick.amount = row.amount;
+            m_snapshotAssembler.addTick(tick);
+        }
+        return;
+    }
+
     QJsonParseError error;
     const QJsonDocument doc = QJsonDocument::fromJson(line, &error);
     if (error.error != QJsonParseError::NoError) {
@@ -275,9 +332,30 @@ void MootdxMarketDataProvider::parseLine(const QByteArray &line)
         }
         return;
     }
+    if (event == QStringLiteral("snapshot_chunk")) {
+        const QString batchId = obj.value(QStringLiteral("batch_id")).toString();
+        if (m_activeBatchId.isEmpty() || batchId != m_activeBatchId) {
+            emit providerError(QStringLiteral("A股行情批次数据标识不匹配"));
+            return;
+        }
+        const QDateTime chunkTimestamp = QDateTime::fromString(
+            obj.value(QStringLiteral("timestamp")).toString(), Qt::ISODateWithMs);
+        const QJsonArray quotes = obj.value(QStringLiteral("quotes")).toArray();
+        for (const QJsonValue &value : quotes) {
+            if (!value.isObject()) continue;
+            Tick tick = jsonToTick(value.toObject());
+            tick.batchId = batchId;
+            if (chunkTimestamp.isValid()) tick.timestamp = chunkTimestamp;
+            if (!tick.instrument.symbol.isEmpty() && tick.price > 0.0) {
+                m_snapshotAssembler.addTick(tick);
+            }
+        }
+        return;
+    }
 
     if (obj.contains(QStringLiteral("error"))) {
         const QString errorMessage = obj.value(QStringLiteral("error")).toString();
+        m_lastProcessDiagnostic = errorMessage;
         m_activeBatchError = m_activeBatchError.isEmpty()
             ? errorMessage : m_activeBatchError + QStringLiteral("；") + errorMessage;
         publishState(m_activeBatchId.isEmpty() ? ProviderHealthState::Error
@@ -348,6 +426,10 @@ void MootdxMarketDataProvider::onProcessError(QProcess::ProcessError error)
 
 void MootdxMarketDataProvider::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    // finished 可能紧跟最后一行 stdout/stderr 到达。退出状态覆盖 Provider
+    // 状态前先排空缓冲区，保留桥接器给出的真实根因。
+    drainStandardOutput(true);
+    onReadyReadStderr();
     if (!m_stopping) completeActiveSnapshot(QDateTime::currentDateTimeUtc());
     if (m_stopping) return;
     if (exitStatus == QProcess::CrashExit) {
@@ -355,9 +437,17 @@ void MootdxMarketDataProvider::onProcessFinished(int exitCode, QProcess::ExitSta
                      QStringLiteral("行情桥接进程异常退出"));
         emit providerError(QStringLiteral("A股行情进程崩溃"));
     } else if (exitCode != 0) {
+        const QString detail = !m_lastProcessDiagnostic.isEmpty()
+            ? m_lastProcessDiagnostic
+            : !m_lastProcessStderr.isEmpty()
+                ? m_lastProcessStderr
+                : QStringLiteral("桥接器未返回诊断信息");
+        const QString error = QStringLiteral("退出代码：%1；%2")
+                                  .arg(exitCode)
+                                  .arg(detail);
         publishState(ProviderHealthState::Error, QStringLiteral("A 股行情进程退出"),
-                     QStringLiteral("退出代码：%1").arg(exitCode));
-        emit providerError(QStringLiteral("A股行情进程退出, 代码: %1").arg(exitCode));
+                     error);
+        emit providerError(QStringLiteral("A股行情进程退出：%1").arg(error));
     } else {
         publishState(ProviderHealthState::Stopped, QStringLiteral("A 股行情进程已结束"), {},
                      m_lastReceivedCount, m_lastBatchId, m_lastUpdatedAt);

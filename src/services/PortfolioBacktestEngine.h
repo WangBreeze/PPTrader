@@ -1,5 +1,6 @@
 #pragma once
 
+#include "domain/AShareCalendarTypes.h"
 #include "domain/PortfolioTypes.h"
 
 #include <QHash>
@@ -15,7 +16,9 @@ class PortfolioBacktestEngine final {
 public:
     static PortfolioResult run(const PortfolioDefinition &definition,
                                const QHash<QString, QVector<Candle>> &series,
-                               QString *error = nullptr);
+                               QString *error = nullptr,
+                               const AShareCalendarSnapshot &calendar = {},
+                               const AShareIndustrySnapshot &industry = {});
 };
 
 } // namespace pp

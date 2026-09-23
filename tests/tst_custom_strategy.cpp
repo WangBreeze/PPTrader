@@ -13,6 +13,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <limits>
+
 namespace pp {
 
 class CustomStrategyTest final : public QObject {
@@ -20,6 +22,7 @@ class CustomStrategyTest final : public QObject {
 
 private slots:
     void validatesRestrictedSchemaAndRejectsUnsafeInputs();
+    void exposesIndicatorParameterSchemaForWizard();
     void persistsImmutableVersionsAndExposesModelRoles();
     void calculatesIndicatorsWithExplicitWarmupAndMissingValues();
     void compilesEveryWhitelistedIndicator();
@@ -30,11 +33,26 @@ private slots:
     void buildsPreviewSeriesAndSignals();
     void previewUsesOnlyLocalTickDerivedCandles();
     void compilesCrossConditionsAndResetsDeterministically();
+    void executesNestedOrNotConditions();
     void validatesCompilesAndExecutesPositionRiskRules();
     void enforcesWorkspaceRunAndResultIdentity();
     void v3SupportsUniverseCrossIndicatorsAndSelection();
     void v3RejectsInvalidCrossSyntax();
     void fixedAmountPositionAndMaxPercentCompile();
+    void wmaUsesRecentLinearWeightsAndRejectsInvalidPeriods();
+    void biasTracksRelativeDistanceFromAverage();
+    void cciUsesTypicalPriceMeanAbsoluteDeviation();
+    void williamsRangeUsesNegativeScaleAndRewarmsAfterBadHighLow();
+    void donchianIncludesCurrentBarAndKeepsOutputsIndependent();
+    void obvAccumulatesSignedVolumeWithoutBridgingMissingBars();
+    void mfiUsesTypicalMoneyFlowAndNeedsPeriodComparisons();
+    void kdjUsesRecursiveSmoothingAndDistinctParameterIdentities();
+    void expandedIndicatorOptionsRequireIntegerParameterReferences_data();
+    void expandedIndicatorOptionsRequireIntegerParameterReferences();
+    void expandedIndicatorsNeverPublishOverflowedCalculations_data();
+    void expandedIndicatorsNeverPublishOverflowedCalculations();
+    void expandedCatalogueDefaultsCompileInV2V3ButNotV1_data();
+    void expandedCatalogueDefaultsCompileInV2V3ButNotV1();
 };
 
 static QJsonObject indicator(const QString &name, const QJsonValue &period)
@@ -94,6 +112,621 @@ static QJsonObject validDocument()
                 {QStringLiteral("right"), indicator(QStringLiteral("SMA"), parameterReference(QStringLiteral("slowPeriod")))}}}};
 }
 
+static QJsonObject singleIndicatorDocument(const QJsonObject &operand)
+{
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("schemaVersion"), 2);
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("gt")},
+        {QStringLiteral("left"), operand},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), -1000000.0}}}});
+    document.insert(QStringLiteral("exit"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("lt")},
+        {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+        {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}});
+    return document;
+}
+
+static Candle indicatorBar(double close, double high = 0.0, double low = 0.0,
+                           double volume = 100.0)
+{
+    Candle candle;
+    candle.instrument = {QStringLiteral("600519"), QStringLiteral("指标测试"),
+                         Market::AShare, QStringLiteral("SSE")};
+    candle.startTime = QDateTime(QDate(2026, 9, 1), QTime(7, 0), Qt::UTC);
+    candle.periodSeconds = 86400;
+    candle.open = candle.close = close;
+    candle.high = high > 0.0 ? high : close;
+    candle.low = low > 0.0 ? low : close;
+    candle.volume = volume;
+    return candle;
+}
+
+void CustomStrategyTest::wmaUsesRecentLinearWeightsAndRejectsInvalidPeriods()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    const QJsonObject operand = indicator(QStringLiteral("WMA"), 3);
+    QVERIFY2(validator.validate(singleIndicatorDocument(operand), &definition, &error),
+             qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(indicatorBar(1.0));
+    runtime.append(indicatorBar(2.0));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(3.0));
+    QVERIFY(runtime.value(0));
+    QVERIFY(std::abs(*runtime.value(0) - 2.333333333333333) < 1e-12);
+    runtime.append(indicatorBar(4.0));
+    QVERIFY(std::abs(*runtime.value(0) - 3.333333333333333) < 1e-12);
+    runtime.append(indicatorBar(std::numeric_limits<double>::quiet_NaN()));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(7.0));
+    runtime.append(indicatorBar(7.0));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(7.0));
+    QCOMPARE(*runtime.value(0), 7.0);
+    runtime.reset();
+    QCOMPARE(runtime.barCount(), 0);
+    QVERIFY(!runtime.value(0));
+    const auto preview = CustomStrategyPreviewService::buildPreview(
+        definition, {}, {indicatorBar(1.0), indicatorBar(2.0), indicatorBar(3.0)}, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("WMA3"));
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.first() - 2.333333333333333) < 1e-12);
+    for (double bad : {1.0, 501.0, 2.5}) {
+        QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("WMA"), bad)),
+                                    nullptr, &error));
+    }
+    QJsonObject legacy = singleIndicatorDocument(operand);
+    legacy.insert(QStringLiteral("schemaVersion"), 1);
+    QVERIFY(!validator.validate(legacy, nullptr, &error));
+}
+
+void CustomStrategyTest::biasTracksRelativeDistanceFromAverage()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(singleIndicatorDocument(indicator(QStringLiteral("BIAS"), 3)),
+                                &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(indicatorBar(8.0));
+    runtime.append(indicatorBar(10.0));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(12.0));
+    QVERIFY(runtime.value(0));
+    QVERIFY(std::abs(*runtime.value(0) - 20.0) < 1e-12);
+    runtime.append(indicatorBar(8.0));
+    QVERIFY(std::abs(*runtime.value(0) + 20.0) < 1e-12);
+    runtime.append(indicatorBar(0.0));
+    QVERIFY(!runtime.value(0));
+    runtime.reset();
+    for (int index = 0; index < 3; ++index) runtime.append(indicatorBar(10.0));
+    QCOMPARE(*runtime.value(0), 0.0);
+    const auto preview = CustomStrategyPreviewService::buildPreview(
+        definition, {}, {indicatorBar(8.0), indicatorBar(10.0), indicatorBar(12.0)}, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("BIAS3"));
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.first() - 20.0) < 1e-12);
+    QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("BIAS"), 2.5)),
+                                nullptr, &error));
+}
+
+void CustomStrategyTest::cciUsesTypicalPriceMeanAbsoluteDeviation()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(singleIndicatorDocument(indicator(QStringLiteral("CCI"), 3)),
+                                &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    const QVector<Candle> bars {indicatorBar(2.0), indicatorBar(4.0),
+                               indicatorBar(6.0), indicatorBar(8.0)};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(bars[0]);
+    runtime.append(bars[1]);
+    QVERIFY(!runtime.value(0));
+    runtime.append(bars[2]);
+    QVERIFY(runtime.value(0));
+    QVERIFY(std::abs(*runtime.value(0) - 100.0) < 1e-10);
+    runtime.append(bars[3]);
+    QVERIFY(std::abs(*runtime.value(0) - 100.0) < 1e-10);
+    Candle malformed = indicatorBar(10.0);
+    malformed.high = 9.0;
+    runtime.append(malformed);
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(7.0));
+    runtime.append(indicatorBar(7.0));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(7.0));
+    QCOMPARE(*runtime.value(0), 0.0);
+    runtime.reset();
+    QVERIFY(!runtime.value(0));
+    // 收盘价都为 10，但典型价为 10、12、14，防止误用收盘均值。
+    runtime.append(indicatorBar(10.0, 11.0, 9.0));
+    runtime.append(indicatorBar(10.0, 17.0, 9.0));
+    runtime.append(indicatorBar(10.0, 23.0, 9.0));
+    QVERIFY(std::abs(*runtime.value(0) - 100.0) < 1e-10);
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("CCI3"));
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.first() - 100.0) < 1e-10);
+    QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("CCI"), 2.5)),
+                                nullptr, &error));
+}
+
+void CustomStrategyTest::williamsRangeUsesNegativeScaleAndRewarmsAfterBadHighLow()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(singleIndicatorDocument(indicator(QStringLiteral("WR"), 3)),
+                                &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    const QVector<Candle> bars {indicatorBar(2.0, 3.0, 1.0), indicatorBar(2.0, 3.0, 1.0),
+                               indicatorBar(3.0, 3.0, 1.0), indicatorBar(1.0, 3.0, 1.0)};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(bars[0]);
+    runtime.append(bars[1]);
+    QVERIFY(!runtime.value(0));
+    runtime.append(bars[2]);
+    QVERIFY(runtime.value(0));
+    QCOMPARE(*runtime.value(0), 0.0);
+    runtime.append(bars[3]);
+    QCOMPARE(*runtime.value(0), -100.0);
+    Candle malformed = indicatorBar(2.0, 3.0, 1.0);
+    malformed.low = 4.0;
+    runtime.append(malformed);
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(2.0));
+    runtime.append(indicatorBar(2.0));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(2.0));
+    QCOMPARE(*runtime.value(0), -50.0);
+    runtime.reset();
+    QCOMPARE(runtime.barCount(), 0);
+    QVERIFY(!runtime.value(0));
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("WR3"));
+    QCOMPARE(*preview.bars.last().seriesValues.first(), -100.0);
+    QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("WR"), 1)),
+                                nullptr, &error));
+}
+
+void CustomStrategyTest::donchianIncludesCurrentBarAndKeepsOutputsIndependent()
+{
+    const QStringList outputs {QStringLiteral("upper"), QStringLiteral("middle"), QStringLiteral("lower")};
+    QJsonArray series;
+    for (const QString &output : outputs) {
+        auto operand = indicatorWithAlias(QStringLiteral("DONCHIAN"), 3, output);
+        operand.insert(QStringLiteral("output"), output);
+        series.append(operand);
+    }
+    QJsonObject document = singleIndicatorDocument(QJsonObject{{QStringLiteral("series"), QStringLiteral("upper")}});
+    document.insert(QStringLiteral("series"), series);
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    QCOMPARE(plan->indicators.size(), 3);
+    const QVector<Candle> bars {indicatorBar(10, 12, 8), indicatorBar(12, 14, 10),
+                               indicatorBar(11, 13, 9), indicatorBar(9, 11, 7)};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(bars[0]);
+    runtime.append(bars[1]);
+    QVERIFY(!runtime.value(0));
+    runtime.append(bars[2]);
+    QVERIFY(runtime.value(0));
+    QCOMPARE(*runtime.value(0), 14.0);
+    QCOMPARE(*runtime.value(1), 11.0);
+    QCOMPARE(*runtime.value(2), 8.0);
+    runtime.append(bars[3]);
+    QCOMPARE(*runtime.value(0), 14.0);
+    QCOMPARE(*runtime.value(1), 10.5);
+    QCOMPARE(*runtime.value(2), 7.0);
+    Candle malformed = indicatorBar(10);
+    malformed.high = std::numeric_limits<double>::infinity();
+    runtime.append(malformed);
+    for (int index = 0; index < 3; ++index) QVERIFY(!runtime.value(index));
+    runtime.reset();
+    for (int index = 0; index < 3; ++index) runtime.append(indicatorBar(10));
+    for (int index = 0; index < 3; ++index) QCOMPARE(*runtime.value(index), 10.0);
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels, outputs);
+    QCOMPARE(*preview.bars.last().seriesValues.at(1), 10.5);
+    auto invalid = indicator(QStringLiteral("DONCHIAN"), 3);
+    invalid.insert(QStringLiteral("output"), QStringLiteral("previousUpper"));
+    QVERIFY(!validator.validate(singleIndicatorDocument(invalid), nullptr, &error));
+}
+
+void CustomStrategyTest::obvAccumulatesSignedVolumeWithoutBridgingMissingBars()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    const QJsonObject operand {{QStringLiteral("indicator"), QStringLiteral("OBV")}};
+    QVERIFY2(validator.validate(singleIndicatorDocument(operand), &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 1);
+    const QVector<Candle> bars {indicatorBar(1, 0, 0, 100), indicatorBar(2, 0, 0, 200),
+                               indicatorBar(1, 0, 0, 50), indicatorBar(1, 0, 0, 80),
+                               indicatorBar(2, 0, 0, 0)};
+    const QVector<double> expected {0, 200, 150, 150, 150};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    for (int index = 0; index < bars.size(); ++index) {
+        runtime.append(bars.at(index));
+        QVERIFY(runtime.value(0));
+        QCOMPARE(*runtime.value(0), expected.at(index));
+    }
+    runtime.append(indicatorBar(3, 0, 0, -1));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(4, 0, 0, 500));
+    QCOMPARE(*runtime.value(0), 150.0);
+    runtime.append(indicatorBar(3, 0, 0, 20));
+    QCOMPARE(*runtime.value(0), 130.0);
+    runtime.append(indicatorBar(std::numeric_limits<double>::quiet_NaN()));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(10));
+    QCOMPARE(*runtime.value(0), 130.0);
+    runtime.reset();
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(10));
+    QCOMPARE(*runtime.value(0), 0.0);
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("OBV"));
+    QCOMPARE(*preview.bars.last().seriesValues.first(), 150.0);
+    QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("OBV"), 3)),
+                                nullptr, &error));
+}
+
+void CustomStrategyTest::mfiUsesTypicalMoneyFlowAndNeedsPeriodComparisons()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(singleIndicatorDocument(indicator(QStringLiteral("MFI"), 3)),
+                                &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 4);
+    // 收盘均为 10；典型价 10、12、11、14，正流 2600、负流 1100。
+    const QVector<Candle> bars {indicatorBar(10, 11, 9), indicatorBar(10, 17, 9),
+                               indicatorBar(10, 14, 9), indicatorBar(10, 23, 9)};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    for (int row = 0; row < 3; ++row) runtime.append(bars.at(row));
+    QVERIFY(!runtime.value(0));
+    runtime.append(bars.last());
+    QVERIFY(runtime.value(0));
+    QVERIFY(std::abs(*runtime.value(0) - 70.27027027027027) < 1e-10);
+    runtime.append(indicatorBar(10, 0, 0, -1));
+    QVERIFY(!runtime.value(0));
+    runtime.reset();
+    for (double price : {1.0, 2.0, 3.0, 4.0}) runtime.append(indicatorBar(price));
+    QCOMPARE(*runtime.value(0), 100.0);
+    runtime.reset();
+    for (double price : {4.0, 3.0, 2.0, 1.0}) runtime.append(indicatorBar(price));
+    QCOMPARE(*runtime.value(0), 0.0);
+    runtime.reset();
+    for (int row = 0; row < 4; ++row) runtime.append(indicatorBar(10));
+    QCOMPARE(*runtime.value(0), 50.0);
+    runtime.reset();
+    for (double price : {1.0, 2.0, 3.0, 4.0}) runtime.append(indicatorBar(price, 0, 0, 0));
+    QCOMPARE(*runtime.value(0), 50.0);
+    Candle malformed = indicatorBar(10);
+    malformed.low = 11;
+    runtime.append(malformed);
+    QVERIFY(!runtime.value(0));
+    for (int row = 0; row < 3; ++row) runtime.append(indicatorBar(10));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(10));
+    QCOMPARE(*runtime.value(0), 50.0);
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("MFI3"));
+    QVERIFY(!preview.bars.at(2).seriesValues.first());
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.first() - 70.27027027027027) < 1e-10);
+    QVERIFY(!validator.validate(singleIndicatorDocument(indicator(QStringLiteral("MFI"), 501)),
+                                nullptr, &error));
+}
+
+void CustomStrategyTest::kdjUsesRecursiveSmoothingAndDistinctParameterIdentities()
+{
+    QJsonArray series;
+    for (const QString &output : {QStringLiteral("k"), QStringLiteral("d"), QStringLiteral("j")}) {
+        auto operand = indicatorWithAlias(QStringLiteral("KDJ"), 3, output);
+        operand.insert(QStringLiteral("kPeriod"), 3);
+        operand.insert(QStringLiteral("dPeriod"), 3);
+        operand.insert(QStringLiteral("output"), output);
+        series.append(operand);
+    }
+    auto fastK = series.first().toObject();
+    fastK.insert(QStringLiteral("alias"), QStringLiteral("fastK"));
+    fastK.insert(QStringLiteral("kPeriod"), 1);
+    series.append(fastK);
+    auto fastD = series.at(1).toObject();
+    fastD.insert(QStringLiteral("alias"), QStringLiteral("fastD"));
+    fastD.insert(QStringLiteral("dPeriod"), 1);
+    series.append(fastD);
+    QJsonObject document = singleIndicatorDocument(QJsonObject{{QStringLiteral("series"), QStringLiteral("k")}});
+    document.insert(QStringLiteral("series"), series);
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->indicators.size(), 5);
+    QCOMPARE(plan->minimumWarmupBars, 3);
+    const QVector<Candle> bars {indicatorBar(2, 3, 1), indicatorBar(2, 3, 1),
+                               indicatorBar(3, 3, 1), indicatorBar(1, 3, 1)};
+    CustomIndicatorRuntime runtime(plan->indicators);
+    runtime.append(bars[0]);
+    runtime.append(bars[1]);
+    QVERIFY(!runtime.value(0));
+    runtime.append(bars[2]);
+    QVERIFY(runtime.value(0));
+    const QVector<double> first {66.66666666666667, 55.55555555555556, 88.88888888888889,
+                                 100.0, 66.66666666666667};
+    for (int index = 0; index < 5; ++index) {
+        QVERIFY(std::abs(*runtime.value(index) - first.at(index)) < 1e-10);
+    }
+    runtime.append(bars[3]);
+    QVERIFY(std::abs(*runtime.value(0) - 44.44444444444444) < 1e-10);
+    QVERIFY(std::abs(*runtime.value(1) - 51.85185185185185) < 1e-10);
+    QVERIFY(std::abs(*runtime.value(2) - 29.62962962962963) < 1e-10);
+    for (int row = 0; row < 3; ++row) runtime.append(indicatorBar(2));
+    // 平坦窗口继续递归，而不是重新把 K/D 种子设为 50。
+    QVERIFY(std::abs(*runtime.value(0) - 48.353909465020576) < 1e-10);
+    QVERIFY(std::abs(*runtime.value(1) - 48.90260631001372) < 1e-10);
+    QVERIFY(std::abs(*runtime.value(2) - 47.25651577503429) < 1e-10);
+    runtime.append(indicatorBar(std::numeric_limits<double>::quiet_NaN()));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(2));
+    runtime.append(indicatorBar(2));
+    QVERIFY(!runtime.value(0));
+    runtime.append(indicatorBar(2));
+    for (int index = 0; index < 3; ++index) QCOMPARE(*runtime.value(index), 50.0);
+    runtime.reset();
+    for (int row = 0; row < 5; ++row) runtime.append(indicatorBar(3, 3, 1));
+    QVERIFY(*runtime.value(2) > 100.0); // J 不截断。
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), QStringLiteral("k"));
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.at(2) - 29.62962962962963) < 1e-10);
+    for (const QString &key : {QStringLiteral("kPeriod"), QStringLiteral("dPeriod")}) {
+        for (double bad : {0.0, 101.0, 2.5}) {
+            auto invalid = series.first().toObject();
+            invalid.insert(key, bad);
+            QVERIFY(!validator.validate(singleIndicatorDocument(invalid), nullptr, &error));
+        }
+    }
+    auto invalid = series.first().toObject();
+    invalid.insert(QStringLiteral("output"), QStringLiteral("rsv"));
+    QVERIFY(!validator.validate(singleIndicatorDocument(invalid), nullptr, &error));
+}
+
+void CustomStrategyTest::expandedIndicatorOptionsRequireIntegerParameterReferences_data()
+{
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<QString>("option");
+    for (const char *name : {"WMA", "BIAS", "CCI", "WR", "MFI", "DONCHIAN", "KDJ"}) {
+        QTest::newRow(name) << QString::fromLatin1(name) << QStringLiteral("period");
+    }
+    QTest::newRow("KDJ-kPeriod") << QStringLiteral("KDJ") << QStringLiteral("kPeriod");
+    QTest::newRow("KDJ-dPeriod") << QStringLiteral("KDJ") << QStringLiteral("dPeriod");
+}
+
+void CustomStrategyTest::expandedIndicatorOptionsRequireIntegerParameterReferences()
+{
+    QFETCH(QString, name);
+    QFETCH(QString, option);
+    QJsonObject operand = indicator(name, 3);
+    if (name == QStringLiteral("DONCHIAN")) operand.insert(QStringLiteral("output"), QStringLiteral("middle"));
+    if (name == QStringLiteral("KDJ")) {
+        operand.insert(QStringLiteral("kPeriod"), 3);
+        operand.insert(QStringLiteral("dPeriod"), 3);
+        operand.insert(QStringLiteral("output"), QStringLiteral("k"));
+    }
+    operand.insert(option, parameterReference(QStringLiteral("n")));
+    const int minimum = option == QStringLiteral("period") ? 2 : 1;
+    const int maximum = option == QStringLiteral("period") ? 500 : 100;
+    QJsonObject parameter {{QStringLiteral("key"), QStringLiteral("n")},
+                           {QStringLiteral("displayName"), QStringLiteral("指标周期")},
+                           {QStringLiteral("type"), QStringLiteral("real")},
+                           {QStringLiteral("defaultValue"), 3},
+                           {QStringLiteral("minimumValue"), minimum},
+                           {QStringLiteral("maximumValue"), maximum},
+                           {QStringLiteral("step"), 0.5}};
+    QJsonObject document = singleIndicatorDocument(operand);
+    document.insert(QStringLiteral("parameters"), QJsonArray{parameter});
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY(!validator.validate(document, nullptr, &error));
+    parameter.insert(QStringLiteral("type"), QStringLiteral("integer"));
+    parameter.insert(QStringLiteral("step"), 1);
+    document.insert(QStringLiteral("parameters"), QJsonArray{parameter});
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), 4}}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->normalizedParameters.value(QStringLiteral("n")).toInt(), 4);
+    if (option == QStringLiteral("period")) QCOMPARE(plan->indicators.first().period, 4);
+    else if (option == QStringLiteral("kPeriod")) QCOMPARE(plan->indicators.first().kPeriod, 4);
+    else QCOMPARE(plan->indicators.first().dPeriod, 4);
+    QVERIFY(!CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), 3.5}}, &error));
+    QVERIFY(CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), minimum}}, &error));
+    QVERIFY(CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), maximum}}, &error));
+    QVERIFY(!CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), minimum - 1}}, &error));
+    QVERIFY(!CustomStrategyCompiler().compile(definition, {{QStringLiteral("n"), maximum + 1}}, &error));
+    parameter.insert(QStringLiteral("maximumValue"), maximum + 1);
+    document.insert(QStringLiteral("parameters"), QJsonArray{parameter});
+    QVERIFY(!validator.validate(document, nullptr, &error));
+}
+
+void CustomStrategyTest::expandedIndicatorsNeverPublishOverflowedCalculations_data()
+{
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<QString>("scenario");
+    for (const char *name : {"WMA", "BIAS", "CCI", "WR", "DONCHIAN", "KDJ", "OBV"}) {
+        QTest::newRow(name) << QString::fromLatin1(name) << QStringLiteral("overflow");
+    }
+    QTest::newRow("MFI-product") << QStringLiteral("MFI") << QStringLiteral("product");
+    QTest::newRow("MFI-total") << QStringLiteral("MFI") << QStringLiteral("total");
+}
+
+void CustomStrategyTest::expandedIndicatorsNeverPublishOverflowedCalculations()
+{
+    QFETCH(QString, name);
+    QFETCH(QString, scenario);
+    QJsonObject operand = indicator(name, name == QStringLiteral("MFI") ? 2 : 3);
+    if (name == QStringLiteral("OBV")) operand.remove(QStringLiteral("period"));
+    if (name == QStringLiteral("DONCHIAN")) operand.insert(QStringLiteral("output"), QStringLiteral("middle"));
+    if (name == QStringLiteral("KDJ")) {
+        operand.insert(QStringLiteral("kPeriod"), 3);
+        operand.insert(QStringLiteral("dPeriod"), 3);
+        operand.insert(QStringLiteral("output"), QStringLiteral("j"));
+    }
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(CustomStrategyValidator().validate(singleIndicatorDocument(operand), &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    const double maximum = std::numeric_limits<double>::max();
+    QVector<Candle> bars;
+    if (name == QStringLiteral("MFI") && scenario == QStringLiteral("product")) {
+        bars = {indicatorBar(1, 0, 0, 0), indicatorBar(2, 0, 0, maximum), indicatorBar(3, 0, 0, maximum)};
+    } else if (name == QStringLiteral("MFI")) {
+        bars = {indicatorBar(2, 0, 0, 0), indicatorBar(3, 0, 0, maximum / 4),
+                indicatorBar(2, 0, 0, maximum / 4)};
+    } else if (name == QStringLiteral("OBV")) {
+        bars = {indicatorBar(1, 0, 0, 0), indicatorBar(2, 0, 0, maximum), indicatorBar(3, 0, 0, maximum)};
+    } else if (name == QStringLiteral("WMA") || name == QStringLiteral("BIAS") || name == QStringLiteral("CCI")) {
+        const double price = name == QStringLiteral("WMA") ? maximum / 4 : maximum;
+        bars = {indicatorBar(price), indicatorBar(price), indicatorBar(price)};
+    } else {
+        Candle malformed = indicatorBar(10);
+        malformed.high = std::numeric_limits<double>::infinity();
+        bars = {indicatorBar(10), indicatorBar(10), malformed};
+    }
+    CustomIndicatorRuntime runtime(plan->indicators);
+    for (const auto &bar : bars) runtime.append(bar);
+    QVERIFY(!runtime.value(0));
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!preview.bars.last().seriesValues.first());
+    if (name == QStringLiteral("OBV")) {
+        runtime.append(indicatorBar(4, 0, 0, 0));
+        QVERIFY(runtime.value(0));
+        QCOMPARE(*runtime.value(0), maximum);
+        runtime.append(indicatorBar(3, 0, 0, maximum));
+        QCOMPARE(*runtime.value(0), 0.0);
+    }
+    runtime.reset();
+    for (int row = 0; row < 4; ++row) runtime.append(indicatorBar(10));
+    QVERIFY(runtime.value(0));
+    QVERIFY(std::isfinite(*runtime.value(0)));
+}
+
+void CustomStrategyTest::expandedCatalogueDefaultsCompileInV2V3ButNotV1_data()
+{
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<int>("period");
+    QTest::addColumn<int>("warmup");
+    QTest::addColumn<double>("flatValue");
+    QTest::newRow("WMA") << QStringLiteral("WMA") << 14 << 14 << 10.0;
+    QTest::newRow("BIAS") << QStringLiteral("BIAS") << 14 << 14 << 0.0;
+    QTest::newRow("CCI") << QStringLiteral("CCI") << 20 << 20 << 0.0;
+    QTest::newRow("WR") << QStringLiteral("WR") << 14 << 14 << -50.0;
+    QTest::newRow("OBV") << QStringLiteral("OBV") << 0 << 1 << 0.0;
+    QTest::newRow("MFI") << QStringLiteral("MFI") << 14 << 15 << 50.0;
+    QTest::newRow("KDJ") << QStringLiteral("KDJ") << 9 << 9 << 50.0;
+    QTest::newRow("DONCHIAN") << QStringLiteral("DONCHIAN") << 20 << 20 << 10.0;
+}
+
+void CustomStrategyTest::expandedCatalogueDefaultsCompileInV2V3ButNotV1()
+{
+    QFETCH(QString, name);
+    QFETCH(int, period);
+    QFETCH(int, warmup);
+    QFETCH(double, flatValue);
+    CustomStrategyValidator validator;
+    const QVariantMap catalogue = validator.schemaDescriptor();
+    QCOMPARE(catalogue.value(QStringLiteral("indicators")).toStringList().size(), 18);
+    const auto schemas = catalogue.value(QStringLiteral("indicatorSchemas")).toList();
+    QCOMPARE(schemas.size(), 18);
+    QVariantMap schema;
+    for (const auto &item : schemas) {
+        if (item.toMap().value(QStringLiteral("name")).toString() == name) schema = item.toMap();
+    }
+    QVERIFY(!schema.isEmpty());
+    QJsonObject operand {{QStringLiteral("indicator"), name}};
+    for (const auto &item : schema.value(QStringLiteral("parameters")).toList()) {
+        const auto parameter = item.toMap();
+        operand.insert(parameter.value(QStringLiteral("key")).toString(),
+                       QJsonValue::fromVariant(parameter.value(QStringLiteral("defaultValue"))));
+    }
+    QCOMPARE(operand.value(QStringLiteral("period")).toInt(), period);
+    if (name == QStringLiteral("KDJ")) {
+        QCOMPARE(operand.value(QStringLiteral("kPeriod")).toInt(), 3);
+        QCOMPARE(operand.value(QStringLiteral("dPeriod")).toInt(), 3);
+        QCOMPARE(operand.value(QStringLiteral("output")).toString(), QStringLiteral("k"));
+    }
+    if (name == QStringLiteral("DONCHIAN")) {
+        QCOMPARE(operand.value(QStringLiteral("output")).toString(), QStringLiteral("middle"));
+        QVERIFY(schema.value(QStringLiteral("displayName")).toString().contains(QStringLiteral("含当前 Bar")));
+    }
+    if (name == QStringLiteral("WR")) {
+        QVERIFY(schema.value(QStringLiteral("displayName")).toString().contains(QStringLiteral("−100～0")));
+    }
+    CustomStrategyDefinition definition;
+    QString error;
+    QJsonObject document = singleIndicatorDocument(operand);
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, warmup);
+    QVector<Candle> bars(warmup, indicatorBar(10));
+    const auto preview = CustomStrategyPreviewService::buildPreview(definition, {}, bars, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(preview.seriesLabels.first(), name + (period > 0 ? QString::number(period) : QString{}));
+    QVERIFY(preview.bars.last().seriesValues.first());
+    QVERIFY(std::abs(*preview.bars.last().seriesValues.first() - flatValue) < 1e-10);
+    document.insert(QStringLiteral("schemaVersion"), 1);
+    QVERIFY(!validator.validate(document, nullptr, &error));
+    document.insert(QStringLiteral("schemaVersion"), 3);
+    document.insert(QStringLiteral("universe"), QJsonObject{
+        {QStringLiteral("mode"), QStringLiteral("explicit")},
+        {QStringLiteral("symbols"), QJsonArray{QStringLiteral("600519"), QStringLiteral("000001")}}});
+    document.insert(QStringLiteral("crossIndicators"), QJsonArray{QJsonObject{
+        {QStringLiteral("alias"), QStringLiteral("rank")},
+        {QStringLiteral("indicator"), QStringLiteral("RANK")}, {QStringLiteral("of"), operand}}});
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto crossPlan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(crossPlan.has_value(), qPrintable(error));
+    QCOMPARE(crossPlan->indicators.size(), 1);
+    QCOMPARE(crossPlan->crossIndicators.size(), 1);
+    QCOMPARE(crossPlan->crossIndicators.first().indicatorIndex, 0);
+}
+
 void CustomStrategyTest::validatesRestrictedSchemaAndRejectsUnsafeInputs()
 {
     CustomStrategyValidator validator;
@@ -137,6 +770,46 @@ void CustomStrategyTest::validatesRestrictedSchemaAndRejectsUnsafeInputs()
 
     QVERIFY(!validator.parseAndValidate(QStringLiteral("{not-json"), nullptr, &error));
     QVERIFY(error.contains(QStringLiteral("JSON 无效")));
+}
+
+void CustomStrategyTest::exposesIndicatorParameterSchemaForWizard()
+{
+    CustomStrategyValidator validator;
+    const QVariantList schemas = validator.schemaDescriptor()
+                                     .value(QStringLiteral("indicatorSchemas"))
+                                     .toList();
+    QCOMPARE(schemas.size(), 18);
+
+    auto findSchema = [&schemas](const QString &name) {
+        for (const QVariant &value : schemas) {
+            const QVariantMap schema = value.toMap();
+            if (schema.value(QStringLiteral("name")).toString() == name)
+                return schema;
+        }
+        return QVariantMap{};
+    };
+
+    const QVariantMap macd = findSchema(QStringLiteral("MACD"));
+    QCOMPARE(macd.value(QStringLiteral("displayName")).toString(),
+             QStringLiteral("MACD"));
+    const QVariantList macdParameters = macd.value(QStringLiteral("parameters")).toList();
+    QCOMPARE(macdParameters.size(), 4);
+    QCOMPARE(macdParameters.at(0).toMap().value(QStringLiteral("key")).toString(),
+             QStringLiteral("fastPeriod"));
+    QCOMPARE(macdParameters.at(0).toMap().value(QStringLiteral("defaultValue")).toInt(), 12);
+    QCOMPARE(macdParameters.at(1).toMap().value(QStringLiteral("key")).toString(),
+             QStringLiteral("slowPeriod"));
+    QCOMPARE(macd.value(QStringLiteral("relations")).toList().first().toMap()
+                 .value(QStringLiteral("op")).toString(), QStringLiteral("lt"));
+
+    const QVariantMap bollinger = findSchema(QStringLiteral("BOLLINGER"));
+    const QVariantList bollingerParameters = bollinger.value(QStringLiteral("parameters")).toList();
+    QCOMPARE(bollingerParameters.at(2).toMap().value(QStringLiteral("choices")).toStringList(),
+             QStringList({QStringLiteral("upper"), QStringLiteral("middle"),
+                          QStringLiteral("lower")}));
+
+    QCOMPARE(findSchema(QStringLiteral("VWAP")).value(QStringLiteral("parameters"))
+                 .toList().size(), 0);
 }
 
 void CustomStrategyTest::persistsImmutableVersionsAndExposesModelRoles()
@@ -412,6 +1085,61 @@ void CustomStrategyTest::compilesCrossConditionsAndResetsDeterministically()
         {{QStringLiteral("unknown"), 1}}, &error);
     QVERIFY(!invalidRuntimeParameter.has_value());
     QVERIFY(error.contains(QStringLiteral("不存在")));
+}
+
+void CustomStrategyTest::executesNestedOrNotConditions()
+{
+    const auto comparison = [](const QString &field, const QString &op, double value) {
+        return QJsonObject{
+            {QStringLiteral("op"), op},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), field}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), value}}}};
+    };
+
+    QJsonObject document = validDocument();
+    document.insert(QStringLiteral("parameters"), QJsonArray{});
+    const QJsonObject negatedVolume{
+        {QStringLiteral("op"), QStringLiteral("not")},
+        {QStringLiteral("condition"),
+         comparison(QStringLiteral("volume"), QStringLiteral("gt"), 500.0)}};
+    const QJsonArray entryConditions{
+        comparison(QStringLiteral("close"), QStringLiteral("gt"), 10.0),
+        negatedVolume};
+    document.insert(QStringLiteral("entry"), QJsonObject{
+        {QStringLiteral("op"), QStringLiteral("or")},
+        {QStringLiteral("conditions"), entryConditions}});
+    document.insert(QStringLiteral("exit"),
+                    comparison(QStringLiteral("close"), QStringLiteral("lt"), 0.0));
+
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    CustomStrategyCompiler compiler;
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+
+    CustomBacktestStrategy strategy(*plan);
+    qRegisterMetaType<TradeSignal>();
+    QSignalSpy signalSpy(&strategy, &Strategy::signalGenerated);
+    Instrument instrument;
+    instrument.symbol = QStringLiteral("600519");
+    instrument.market = Market::AShare;
+
+    const QVector<double> volumes{1000.0, 100.0};
+    for (int row = 0; row < volumes.size(); ++row) {
+        Candle candle;
+        candle.instrument = instrument;
+        candle.startTime = QDateTime(QDate(2026, 8, 19), QTime(7, 0), Qt::UTC).addDays(row);
+        candle.open = candle.high = candle.low = candle.close = 9.0;
+        candle.volume = volumes.at(row);
+        strategy.onCandle(candle);
+    }
+
+    QCOMPARE(signalSpy.count(), 1);
+    QCOMPARE(signalSpy.first().first().value<TradeSignal>().side, SignalSide::Buy);
+    QCOMPARE(signalSpy.first().first().value<TradeSignal>().timestamp,
+             QDateTime(QDate(2026, 8, 20), QTime(7, 0), Qt::UTC));
 }
 
 void CustomStrategyTest::compilesEveryWhitelistedIndicator()

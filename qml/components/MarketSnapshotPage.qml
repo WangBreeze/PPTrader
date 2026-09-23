@@ -6,6 +6,7 @@ Item {
     id: root
     required property var theme
     required property var controller
+    required property bool pageActive
     property int boardMask: 31
     readonly property bool loading: controller.snapshotLoading
     property bool autoRefresh: false
@@ -21,7 +22,7 @@ Item {
     Timer {
         interval: 5000
         repeat: true
-        running: root.autoRefresh
+        running: root.autoRefresh && root.pageActive
         onTriggered: root.refreshLatest()
     }
 
@@ -35,7 +36,7 @@ Item {
     }
     Text {
         x: 20; y: 44; width: 560; height: 22
-        text: "X：股票代码稳定序列  ·  Y：快照价格  ·  当前 "
+        text: "实时快照仅驻留内存  ·  历史 K 线请使用显式下载入口  ·  当前 "
               + controller.marketSnapshotModel.count + " 只"
         color: theme.textMuted
         font.family: theme.fontFamily; font.pixelSize: 11
@@ -66,6 +67,7 @@ Item {
             anchors.right: root.compact ? parent.right : summaryHost.left
             anchors.rightMargin: root.compact ? 0 : 16
             theme: root.theme; controller: root.controller
+            pageActive: root.pageActive
             boardMask: root.boardMask
             loading: root.loading
             onInstrumentActivated: function(symbol) {

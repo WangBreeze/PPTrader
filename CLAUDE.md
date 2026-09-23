@@ -50,9 +50,13 @@ PPTrader is a Qt 6 + QML + CMake quantitative trading workstation. All code live
 
 ## QML Coding Rules (Qt 6.4)
 
+Qt 6.8/6.11 目标与生命周期相关工作先遵守 [Qt 6.8+ 编码与退出验收规则](docs/qt68-coding-rules.md)。公共 preset 当前仍以 Qt 6.4.3 构建，Qt 6.11.2 适配只存在于独立构建目录。连接必须幂等并限定生命周期；保留正常无障碍；真实关闭须核对 PID、退出码和分阶段耗时，不以强制清理或功能检查通过宣称退出修复。Qt 6.11 直接使用 `QJsonArray` 时显式包含 `<QJsonArray>`，不要把缺少包含误判为 API 移除。
+
+6.4.3 Windows 构建现要求 [APP-001 受控依赖](cmake/qt-scrollbar-fix/README.md)。首次构建先生成匹配配置的修复库，缺库或哈希错误禁止关闭校验绕过。打包工具覆盖 Qt 后重新部署校验并运行滚动动作/真实退出回归；全局 SDK 保持只读，不跨版本混用二进制补丁。
+
 ### FINAL-property shadowing — read before writing QML
 
-In Qt 6, every property exported from C++ (a `Q_PROPERTY` such as `QQuickItem::visible` or `QQuickItem::width`) is **FINAL** in QML. Declaring a same-named property on a derived QML type — via `property`, `required property`, `property alias`, or `default property` — is an override of a FINAL property and fails at runtime QML load with `无法重写 FINAL 属性` ("Cannot override FINAL property"). This silently makes `QQmlApplicationEngine::rootObjects()` empty, so `src/main.cpp` returns `-1` with no error on stderr.
+本项目禁止遮蔽继承属性，尤其不能用 `property`、`required property`、`property alias` 或 `default property` 覆盖 FINAL 属性。历史案例会在 QML 加载时报 `无法重写 FINAL 属性`，使 `QQmlApplicationEngine::rootObjects()` 为空、`main` 返回 `-1`；不能仅靠 stderr 是否为空判断加载成功。`FINAL` 是独立属性标记，不能概括为每一个 C++ `Q_PROPERTY` 都必然 FINAL。参见 [Qt 6.8 属性系统](https://doc.qt.io/qt-6.8/properties.html)；以下禁重名清单是工程的更严格防错规则。
 
 Never use these names for custom or required properties (non-exhaustive):
 

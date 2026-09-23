@@ -36,6 +36,8 @@ FactorFrame AShareRelativeStrengthIndicator::calculate(const MarketSnapshot &sna
     for (const CrossSectionalQuote &quote : snapshot.quotes) {
         FactorValue value;
         value.instrument = quote.instrument;
+        value.sourcePrice = quote.price;
+        value.sourcePreviousClose = quote.previousClose;
         if (quote.instrument.market != Market::AShare) {
             value.invalidReason = QStringLiteral("指标仅支持 A 股");
         } else if (quote.suspended) {

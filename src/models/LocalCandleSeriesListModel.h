@@ -36,6 +36,7 @@ public:
     const QVector<LocalCandleSeriesPoint> &points() const;
 
     void setPoints(const QVector<LocalCandleSeriesPoint> &points);
+    bool prependPoints(const QVector<LocalCandleSeriesPoint> &points);
     Q_INVOKABLE QVariantMap get(int row) const;
     Q_INVOKABLE void clear();
 

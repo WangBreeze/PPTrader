@@ -11,7 +11,7 @@
 namespace pp {
 
 enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma,
-                                 Roc, Vwap, PpFlow };
+                                 Roc, Vwap, PpFlow, Wma, Bias, Cci, Wr, Donchian, Obv, Mfi, Kdj };
 enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator,
                                Cross };
 enum class CustomCrossIndicatorKind { Rank, ZScore, Percentile, Mean, Median, Peer };
@@ -30,6 +30,8 @@ struct CompiledCustomIndicator {
     double standardDeviations = 0.0;
     QString output;
     QString alias;
+    int kPeriod = 0;
+    int dPeriod = 0;
 
     int minimumBars() const;
     QString cacheKey() const;

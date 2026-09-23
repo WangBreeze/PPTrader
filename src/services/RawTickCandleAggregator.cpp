@@ -1,5 +1,7 @@
 #include "services/RawTickCandleAggregator.h"
 
+#include "services/HistoricalTickSessionRules.h"
+
 #include <QTimeZone>
 
 #include <algorithm>
@@ -26,25 +28,9 @@ std::optional<QDateTime> RawTickCandleAggregator::bucketStart(
     const QDateTime local = timestamp.toUTC().toTimeZone(shanghai);
     const QDate date = local.date();
     const QTime time = local.time();
-    if (periodSeconds >= 14400) {
-        if (time < QTime(9, 25) || time > QTime(15, 0)) return std::nullopt;
-        return QDateTime(date, QTime(9, 25), shanghai).toUTC();
-    }
-    if (time >= QTime(9, 25) && time < QTime(9, 30)) {
-        return QDateTime(date, QTime(9, 25), shanghai).toUTC();
-    }
-    struct Session { QTime start; QTime close; };
-    const Session sessions[] {{QTime(9, 30), QTime(11, 30)},
-                              {QTime(13, 0), QTime(15, 0)}};
-    for (const Session &session : sessions) {
-        if (time < session.start || time > session.close) continue;
-        const int duration = session.start.secsTo(session.close);
-        const int elapsed = time == session.close
-            ? std::max(0, duration - 1) : session.start.secsTo(time);
-        const QTime bucket = session.start.addSecs((elapsed / periodSeconds) * periodSeconds);
-        return QDateTime(date, bucket, shanghai).toUTC();
-    }
-    return std::nullopt;
+    const auto bucket = HistoricalTickSessionRules::bucketStart(time, periodSeconds);
+    if (!bucket.has_value()) return std::nullopt;
+    return QDateTime(date, *bucket, shanghai).toUTC();
 }
 
 bool RawTickCandleAggregator::append(const RawTradeTick &tick)

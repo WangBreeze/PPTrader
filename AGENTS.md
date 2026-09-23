@@ -24,7 +24,11 @@ Match the existing four-space indentation and brace style. Keep all C++ types in
 
 ## QML / Qt 6.4 Coding Rules
 
-C++-exported properties (`Q_PROPERTY`, e.g. `visible`, `width`, `color`) are FINAL in QML: declaring a same-named property — `property`, `required property`, `property alias`, or `default property` — fails at runtime QML load with `无法重写 FINAL 属性` and makes `src/main.cpp` return `-1` with no stderr. Never name a custom/required property after an `Item`/`anchors`/`Rectangle`/`Text` built-in (notably `visible`, `enabled`, `opacity`, `width`, `height`, `x`, `y`, `z`, `color`, `text`, `left`, `right`, `top`, `bottom`). In `ListModel` delegates, inject roles via `required property` with a non-conflicting role name (e.g. `seriesVisible`, `leftOperand`, `rightOperand`); avoid `model.roleName` access there, which raises `ReferenceError: model is not defined` under this project's Qt 6.4 + qmlcache pipeline. `qmllint` 6.4.3 does not catch this, so after any QML change launch the app and confirm the `PPTrader · 量化交易工作台` window loads. See `CLAUDE.md` for the full rule set and the 2026-08-15 `CustomStrategyWizard.qml` case.
+Qt 6.8/6.11 目标及跨版本生命周期改动必须先阅读 [Qt 6.8+ 编码与退出验收规则](docs/qt68-coding-rules.md)。当前公共 preset 仍是 Qt 6.4.3；Qt 6.11.2 仅在独立目录完成适配，禁止写成默认环境已升级。正常无障碍必须保留，重复激活/连接需幂等，正常关闭必须验证实际 PID 回收和退出码，不能以窗口消失、强杀或功能 JSON 通过替代。Qt 6.8.0/6.11.2 源码仍有同类重复连接风险，不得假定升级自动修复 APP-001。
+
+Qt 6.4.3/6.11.2 Windows 构建默认要求各自版本的 APP-001 受控滚动条修复库；首次或清理构建目录后先按 [依赖构建配方](cmake/qt-scrollbar-fix/README.md) 生成对应 Debug/Release 库。缺库、版本/配置/哈希不符应修正依赖，不得关闭 `PPTRADER_REQUIRE_QT_SCROLLBAR_FIX` 绕过。最终打包后重验实际部署库及 `accessible_scrollbar_lifecycle` / `application_exit`，严禁修改全局 SDK 或跨 Qt 补丁版本复制 DLL。Qt 6.11 仍有 `QJsonArray`；直接使用时显式包含 `<QJsonArray>`，不要误判为 API 被移除或依赖传递包含。
+
+Never shadow inherited QML properties, especially FINAL properties, with `property`, `required property`, `property alias`, or `default property`. This project has reproduced `无法重写 FINAL 属性` at runtime and an empty root object list (`src/main.cpp` returns `-1`); do not generalize that incident to every C++ `Q_PROPERTY`, because `FINAL` is a separate attribute. Never name a custom/required property after an `Item`/`anchors`/`Rectangle`/`Text` built-in (notably `visible`, `enabled`, `opacity`, `width`, `height`, `x`, `y`, `z`, `color`, `text`, `left`, `right`, `top`, `bottom`). In `ListModel` delegates, inject roles via `required property` with a non-conflicting role name (e.g. `seriesVisible`, `leftOperand`, `rightOperand`); avoid `model.roleName` access there, which raises `ReferenceError: model is not defined` under this project's Qt 6.4 + qmlcache pipeline. `qmllint` 6.4.3 did not catch the recorded case, so after any QML change launch the app and confirm the actual main window loads. See `CLAUDE.md` and `docs/qt68-coding-rules.md` for version-specific rules and the 2026-08-15 `CustomStrategyWizard.qml` case.
 
 ## Testing Guidelines
 
@@ -37,6 +41,12 @@ Git history is not available in this checkout, so no repository-specific message
 ## Data & Configuration Safety
 
 Do not commit generated databases, credentials, API tokens, or machine-specific Qt paths. Treat `data/pptrader.db` and downloaded market caches as local runtime data unless a fixture is intentionally documented.
+
+## 真实网络验收与沙箱权限
+
+任何依赖腾讯、TDX、远端历史 Provider 或其他外网端点的真实探针，启动前必须显式申请外网权限；禁止从 Codex 默认网络沙箱通过 `Start-Process` 启动长稳子进程。长稳前必须用完全相同的二进制、环境和 Provider 执行“1 个代码、1 个批次”预检，只有收到非零数据且无网络错误才可继续。首轮出现 `Permission denied`、`SocketAccessError` 或 0 条行情时立即停止，不得继续收集长时间无效样本。
+
+`QNetworkReply::errorString()` 的 `Permission denied` 不能直接解释为 HTTP 403、上游限流或 IP 封禁；先在获准联网环境执行相同最小请求做单变量对照。真实验收元数据必须记录网络运行环境、预检结果、启动方式和进程 ID，但不得记录凭据。后台自动化必须确保真实探针进程继承已批准的网络权限；若无法证明继承关系，暂停并请求用户授权。详见 `docs/permission-denied-diagnosis-2026-08-28.md`。
 
 ## 代码图谱 / codebase-memory MCP 注意事项
 
