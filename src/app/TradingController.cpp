@@ -652,6 +652,18 @@ TradingController::TradingController(QObject *parent)
         m_nasDataNodeEndpoint = m_nasDataNodeClient.endpoint().toString();
         m_nasDataNodeStatusText = QStringLiteral("NAS 数据节点已配置；尚未请求网络");
     }
+    // TickData 逐笔数据的导入根目录：优先用上次选择并持久化的目录；
+    // 未设置时，若 ~/.data 存在则直接作为默认根目录（本机 TickData 项目的数据根，
+    // 目录结构为 <root>/<yyyyMMdd>/<code>.csv，与 TickDataCsvImporter 期望一致）。
+    const QString savedImportRoot = QSettings().value(
+        QStringLiteral("tickdata/importRoot")).toString();
+    QString importRoot = savedImportRoot;
+    if (importRoot.isEmpty()) {
+        const QString defaultImportRoot =
+            QDir(QDir::homePath()).filePath(QStringLiteral(".data"));
+        if (QDir(defaultImportRoot).exists()) importRoot = defaultImportRoot;
+    }
+    if (!importRoot.isEmpty()) setTickDataImportRootDirectory(importRoot);
     const QString nasStateRoot = QStandardPaths::writableLocation(
         QStandardPaths::AppDataLocation);
     m_nasSyncStateStore.setFilePath(
@@ -6669,6 +6681,11 @@ bool TradingController::setTickDataImportRootDirectory(const QString &pathOrUrl)
         return false;
     }
     m_tickDataImportRootDirectory = QDir::toNativeSeparators(path);
+    // 持久化，使导入根目录在重启后仍然生效（否则每次启动都要重新选择）。
+    QSettings importSettings;
+    importSettings.setValue(QStringLiteral("tickdata/importRoot"),
+                            m_tickDataImportRootDirectory);
+    importSettings.sync();
     m_tickDataImportFilePath.clear();
     m_tickDataImportError.clear();
     m_tickDataImportStatusText = QStringLiteral("目录已选择；尚未读取任何 CSV 文件");
