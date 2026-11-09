@@ -25,17 +25,58 @@ PPTrader 是一个基于 Qt 6 + QML + CMake 的量化交易工作台工程骨架
 
 ## 构建
 
+默认目标是 **Qt 6.11.2**（Windows MSVC 2022 x64 / Linux Ninja），**最低版本 Qt 6.5**。项目自己解析
+Qt 安装前缀，不依赖全局 `PATH`、`LD_LIBRARY_PATH`、`QML_IMPORT_PATH`；`Qt 6.8.3` 以独立 preset
+作为可选工具链，同样不需要改全局环境变量。
+
+> Qt 6.4.3 支持已于 2026-09-24 退役：`CustomStrategyWizard` 需要的 `Settings` 自 Qt 6.5 起由
+> `QtCore` 提供，旧的 `Qt.labs.settings` 已弃用。历史日期文档中的 `cmake --preset vs2022-x64` /
+> `vs2022-debug` 等 6.4.3 命令已不再可用。
+
+Windows：
+
 ```powershell
-cmake -S . -B build -G "Ninja"
+cmake --preset vs2022-qt611
+cmake --build --preset vs2022-qt611-debug --parallel
+ctest --preset vs2022-qt611-debug
+cmake --build --preset vs2022-qt611-debug --target all_qmllint
+.\out\build\vs2022-qt611\Debug\PPTrader.exe
+```
+
+Linux：
+
+```sh
+cmake --preset linux-qt611-debug
+cmake --build --preset linux-qt611-debug --parallel
+ctest --preset linux-qt611-debug --output-on-failure
+cmake --build --preset linux-qt611-debug --target all_qmllint
+./out/build/linux-qt611-debug/bin/PPTrader
+```
+
+可用的 Qt 版本 preset：
+
+| 平台 | 默认（6.11.2） | 可选 6.8.3 |
+| --- | --- | --- |
+| Windows | `vs2022-qt611` | `vs2022-qt683` |
+| Linux | `linux-qt611-debug` / `-release` | `linux-qt683-debug` / `-release` |
+
+Qt 前缀解析顺序：`-DPPTRADER_QT_ROOT=<前缀>` → 调用方显式给出的 `CMAKE_PREFIX_PATH`/`Qt6_DIR`
+→ 按 `-DPPTRADER_QT_VERSION` 在平台约定位置查找（Windows `D:/ProgramData/Qt/<版本>/msvc2022_64` 等，
+Linux `$HOME/ProgramData/Qt/<版本>/gcc_64`、发行版 `/usr`）。解析到的 Qt 与请求版本**次版本号不一致时
+直接配置失败**，避免 QML 插件与运行库跨版本混装。详见 [Qt 多版本工具链](docs/qt-multiversion-toolchain-2026-09-24.md)。
+
+完全不用 preset 时按同样规则显式指定版本与前缀：
+
+```sh
+cmake -S . -B build -G "Ninja" -DPPTRADER_QT_VERSION=6.11.2 -DCMAKE_PREFIX_PATH=/usr
 cmake --build build
 ```
 
-如果 Qt 不在 CMake 默认搜索路径里，可以指定 `CMAKE_PREFIX_PATH`：
+非 Windows 可执行文件输出在构建目录的 `bin/` 子目录：QML 模块目录与可执行目标同名，Linux 上放在构建根目录会与 `qt_add_qml_module` 生成的同名目录冲突。
 
-```powershell
-cmake -S . -B build -G "Ninja" -DCMAKE_PREFIX_PATH="C:\Qt\6.4.3\msvc2019_64"
-cmake --build build
-```
+需要个人化前缀时用不入库的 `CMakeUserPresets.json` 覆盖 `PPTRADER_QT_ROOT`（参照 `AGENTS.md`）。
+
+Python 行情桥脚本（mootdx/baostock/tushare）需要一个 Python 3.12 左右的解释器；在仓库根目录建 `.venv` 后安装 `requirements.txt`。CMake 会按平台查找 `.venv/Scripts/python.exe`（Windows）或 `.venv/bin/python`（POSIX），存在才注册 `mootdx_bridge_protocol`。Linux 端适配细节与已知边界见 [Linux 适配报告](docs/linux-adaptation-2026-09-24.md)。
 
 ## 后续模块
 

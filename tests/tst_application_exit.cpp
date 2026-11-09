@@ -1,6 +1,8 @@
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLibraryInfo>
@@ -8,6 +10,12 @@
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QTest>
+
+// 构建系统通过该宏给出实际可执行文件路径（含平台后缀与输出目录）。
+// 保留回退分支，便于脱离 CMake 手工编译该测试。
+#ifndef PPTRADER_APP_EXECUTABLE
+#define PPTRADER_APP_EXECUTABLE ""
+#endif
 
 class ApplicationExitTest : public QObject {
     Q_OBJECT
@@ -28,12 +36,11 @@ private slots:
         QVERIFY(evidence.isValid());
         const QString report = evidence.filePath(QStringLiteral("wizard.json"));
         QProcess process;
-        process.setWorkingDirectory(QCoreApplication::applicationDirPath());
         process.setProcessChannelMode(QProcess::ForwardedChannels);
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.insert(QStringLiteral("PATH"),
             QLibraryInfo::path(QLibraryInfo::BinariesPath)
-                + QLatin1Char(';') + qEnvironmentVariable("PATH"));
+                + QDir::listSeparator() + qEnvironmentVariable("PATH"));
         environment.insert(QStringLiteral("QT_PLUGIN_PATH"),
             QLibraryInfo::path(QLibraryInfo::PluginsPath));
         environment.insert(QStringLiteral("PPTRADER_AUTOSTART_LIVE"), QStringLiteral("0"));
@@ -47,7 +54,21 @@ private slots:
             QStringLiteral("--wizard-contract-probe"), report,
             QStringLiteral("--exit-activation-count"), QString::number(activationCount)};
         if (cancelOffline) arguments.append(QStringLiteral("--exit-cancel-offline"));
-        process.start(QCoreApplication::applicationDirPath() + QStringLiteral("/PPTrader.exe"), arguments);
+        const QString applicationExecutable = []() -> QString {
+            const QString configured = QString::fromUtf8(PPTRADER_APP_EXECUTABLE);
+            if (!configured.isEmpty() && QFileInfo::exists(configured)) return configured;
+            const QString fallback = QCoreApplication::applicationDirPath()
+                + QStringLiteral("/PPTrader")
+#ifdef Q_OS_WIN
+                + QStringLiteral(".exe")
+#endif
+                ;
+            return fallback;
+        }();
+        // 以被测程序所在目录为工作目录，使 data/、scripts/ 等运行时相对路径
+        // 在 Windows 与 Linux（bin/ 布局）下都指向部署副本。
+        process.setWorkingDirectory(QFileInfo(applicationExecutable).absolutePath());
+        process.start(applicationExecutable, arguments);
         QVERIFY(process.waitForStarted());
         const qint64 childPid = process.processId();
         qInfo() << "started isolated PPTrader PID" << childPid;

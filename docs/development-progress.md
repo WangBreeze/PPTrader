@@ -1,6 +1,30 @@
 # PPTrader 开发进度
 
-最后更新：2026-09-22
+最后更新：2026-09-24
+
+## 2026-09-24：修复 Qt 6.11 焦点告警，迁移 Settings 并退役 Qt 6.4.3
+
+桌面实测暴露两条 `QQuickItem: Cannot set activeFocusOnTab to false once item is the active focus item.`。查 Qt 6.11.2 源码确认：项已是 `window()->activeFocusItem()` 时把 `activeFocusOnTab` 置 false 会被**拒绝并告警**，`focusPolicy` 走同一处检查，所以一个按钮翻一次打印两条且属性都不生效。根因是 5 处把该属性直接绑到可用性（`PpButton` 有 118 个动态 `available` 绑定）。改为 `可用性 || 该项.activeFocus`；**没有**用 `enabled: available` 代替，因为禁用 `Control` 会连带禁用子 `MouseArea`，使“禁用态仍可读 tooltip”失效。新增回归 `tests/tst_focus_availability_qml.cpp`，并已验证其有牙齿（改回旧绑定即复现同样两条告警并失败）。
+
+同时按用户决定迁移 `CustomStrategyWizard` 的 `Qt.labs.settings` → `QtCore.Settings`（实测 6.8.3/6.11.2 均可用），**最低版本提升到 Qt 6.5**，并退役 Qt 6.4.3：移除 `vs2022-qt643` 及历史别名 `vs2022-x64`/`vs2022-debug`/`vs2022-release`，历史日期文档中的这些命令不再可用。
+
+结果：两套 Qt 串行 CTest **56/56**、`all_qmllint` 通过、`--exit-probe` 退出码 0，且在 `QT_FORCE_STDERR_LOGGING=1` 下启动**零 QML/Qt 告警**（此前为 1 条弃用 + 交互时 2 条焦点告警）。**边界**：Windows 未验证；焦点告警的修复由回归测试锁定，但我无法在自动化里重放用户当时的确切点击序列。
+
+## 2026-09-24：默认工具链改为 Qt 6.11.2，建立 Windows/Linux 多版本矩阵
+
+项目默认工具链改为 **Qt 6.11.2**（Windows MSVC 2022 x64 / Linux Ninja），Qt 6.8.3 与遗留 Qt 6.4.3 降为项目内可选 preset。新增 `cmake/PpQtToolchain.cmake`：按 `PPTRADER_QT_ROOT` → 显式 `CMAKE_PREFIX_PATH`/`Qt6_DIR` → 平台约定位置解析前缀，并在**次版本不一致时直接配置失败**，杜绝 6.8.3 与 6.11.2 的运行库/QML 插件混装。本机全局环境（`~/.bashrc`）改为指向发行版 Qt 6.11.2，不再导出 6.8.3 的 `PATH`/`LD_LIBRARY_PATH`/`QML_IMPORT_PATH`——改动前正是残留的 `LD_LIBRARY_PATH` 让 6.11.2 的 `qmlimportscanner` 加载 6.8.3 的 `libQt6Core` 而配置失败。
+
+Linux 上两套工具链分别验收：Qt 6.11.2 与 Qt 6.8.3 各 **CTest 55/55**（串行、重复两次）、`all_qmllint` 通过、`--exit-probe` 退出码 0、真实 Hyprland 窗口标题正确、`Context2D` 字体告警 0。两套 Qt 的窗口截图逐像素比较 **AE≈62.8/1,914,026 像素、RMSE 0.0857%**，渲染一致。
+
+顺带修掉一个既有产品缺陷：`SqliteLocalDataStore` 有 7 处「取最新记录」查询用随机 id 做并列时间戳的兜底键，同一毫秒内导入两条记录时 `history.first()` 会随机变成旧记录（`tst_ashare_industry_import` 修复前 Qt 6.8.3 通过 5/8、Qt 6.11.2 通过 7/8，改为 `rowid` 后两套各 12/12）。另记录两条环境事实：发行版 Qt 的日志默认进 systemd journal 而非 stderr（Linux 告警类验收必须加 `QT_FORCE_STDERR_LOGGING=1`，否则“零告警”是假象）；两套构建目录的 CTest 并发运行会互相干扰，必须串行。**边界**：Windows 本轮未验证，APP-001 未在 Linux 验收，GUI 仍是沙箱内 llvmpipe 软件渲染。详见 [Qt 多版本工具链](qt-multiversion-toolchain-2026-09-24.md)。
+
+## 2026-09-24：首次 Linux / 本机（Arch + GCC 16 + Ninja + Qt 6.8.3）适配
+
+PPTrader 首次在非 Windows 环境完成构建与全量回归：Debug CTest **55/55**（15.6 秒）、`all_qmllint` 通过、`PPTrader --exit-probe` 退出码 0（该路径要求 `rootObjects()` 非空），真实 Hyprland/Wayland 会话窗口标题为 `PPTrader · 量化交易工作台`。`.venv` 装齐 mootdx/pandas/baostock/tushare，`mootdx_bridge_protocol` 已注册并通过。
+
+修补集中在可移植性，未关闭任何门禁：非 Windows 可执行文件输出改到构建目录 `bin/`（否则与 `qt_add_qml_module` 的同名模块目录冲突导致链接失败）；venv 解释器路径与退出测试子进程路径按平台解析；`StorageProfile` 的 UNC 判定移到 `cleanPath` 之前（本机实测 `cleanPath("//nas/...")` 会折叠成 `/nas/...`，原判定永不成立且会静默改写目标）；`tst_nas_data_node` 修正 `QFile::setFileTime` 必须在 `flush`/`close` 之后（close 落盘会覆盖刚设置的 mtime）与请求头顺序无关的鉴权断言；`QAccessible::isActive()` 门禁按平台分支（Qt 6.8 起 `setActive()` 只通知观察者，`isActive()` 反映平台插件状态，本机 Qt 无 `plugins/accessible/` 桥接，offscreen 与 wayland 均为 false）。
+
+另修复既有字体缺陷：Canvas 的 `ctx.font` 会把未加引号的族名按空格拆分，含空格族名必须加引号；`PPTheme` 改用 `Qt.fontFamilies()` 挑选可用族。本机 `Context2D` 告警 6 → 0，解析为 `Noto Sans CJK SC` 且中文探针缺字 0。**边界**：agent 沙箱 `/dev` 无 `/dev/dri`，本次 GUI 验证是 llvmpipe 软件渲染，APP-001、盘中与长稳均未覆盖。详见 [Linux 适配报告](linux-adaptation-2026-09-24.md)。
 
 ## 2026-09-22：二板／三板单资金仓纠正与 Qt 运行库弹窗修复
 

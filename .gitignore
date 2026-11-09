@@ -3,7 +3,11 @@ out/
 build/
 build-cmake/
 CMakeLists.txt.user
+# 个人 Qt 前缀等机器本地覆盖（覆盖 PPTRADER_QT_ROOT），不入库
+CMakeUserPresets.json
 data/pptrader.db*
+# A 股逐笔暂存区（接口原生格式，后续拷贝到 NAS 节点）；按任务要求不入库
+/data/nas-tick-staging/
 .env
 .env.*
 !.env.example

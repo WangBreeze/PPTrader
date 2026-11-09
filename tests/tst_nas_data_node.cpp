@@ -59,17 +59,22 @@ protected:
                 QString::fromLatin1(request.left(headerEnd)));
             if (lengthMatch.hasMatch()) contentLength = lengthMatch.captured(1).toInt();
             if (request.size() < headerEnd + 4 + contentLength) return;
-            authorized = authorized && request.contains(
-                "Authorization: " + expectedAuthorization + "\r\n");
             const QByteArray firstLine = request.left(request.indexOf("\r\n"));
             const QRegularExpression authExpression(
                 QStringLiteral("Authorization: ([^\r\n]+)"),
                 QRegularExpression::CaseInsensitiveOption);
             const QRegularExpressionMatch authMatch = authExpression.match(
                 QString::fromLatin1(request.left(headerEnd)));
+            // 按解析出的取值判定，而不是匹配 “Authorization: ...\r\n” 字面量：
+            // 后者要求 Authorization 恰好是最后一个请求头，而请求头顺序由
+            // QNetworkAccessManager 的版本与平台决定，跨平台并不可靠。
+            // 每个请求都重新解析，缺失时置空，因此不会沿用上一个请求的取值。
+            QByteArray requestAuthorization;
             if (authMatch.hasMatch()) {
-                lastAuthorization = authMatch.captured(1).toLatin1();
+                requestAuthorization = authMatch.captured(1).toLatin1();
             }
+            lastAuthorization = requestAuthorization;
+            authorized = authorized && requestAuthorization == expectedAuthorization;
             if (enforceAuthorization
                 && lastAuthorization != expectedAuthorization) {
                 socket->write(httpResponse(
@@ -719,8 +724,15 @@ void NasDataNodeTest::persistedQueueRecoveryAndCacheRetention()
                         const QDateTime &modified) {
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size()) return false;
-        const bool timeSet = file.setFileTime(modified, QFileDevice::FileModificationTime);
+        // 必须先 flush 并 close 再设置时间。QFile 的写入是带缓冲的，close() 会
+        // 在 setFileTime 之后落盘，落盘本身会刷新 mtime，把刚设置的时间覆盖掉；
+        // Qt 6.8 + Linux 上已复现 setFileTime 返回 true 但 mtime 仍是当前时间。
+        if (!file.flush()) { file.close(); return false; }
         file.close();
+        QFile stamp(path);
+        if (!stamp.open(QIODevice::ReadWrite)) return false;
+        const bool timeSet = stamp.setFileTime(modified, QFileDevice::FileModificationTime);
+        stamp.close();
         return timeSet;
     };
     const QString oldFile = QDir(dateRoot).filePath(QStringLiteral("600519.csv"));

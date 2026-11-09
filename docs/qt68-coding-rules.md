@@ -2,6 +2,12 @@
 
 更新：2026-09-08。适用目标为 Qt 6.8.x；这是工程约束，不是 Qt 升级记录或缺陷已修复声明。
 
+> **版本状态更新（2026-09-24）**：项目默认 preset 已改为 Qt 6.11.2，Qt 6.4.3 与 6.8.3 作为独立
+> preset 的可选工具链保留。下文“版本与证据边界”一节记录的是 2026-09-08 当时的构建事实，作为
+> 历史证据保留不改写；其中“不得只凭项目文件中的最低版本判定运行版本”“升级不等于缺陷已修复”
+> 等约束仍然有效。当前多版本工具链策略见
+> [Qt 多版本工具链](qt-multiversion-toolchain-2026-09-24.md)。
+
 ## 版本与证据边界
 
 - 当前 `CMakePresets.json`、`CMakeCache.txt` 和实际测试依赖仍是 **Qt 6.4.3 / MSVC / x64**。尚未构建或运行 Qt 6.8 版 PPTrader，不得把本轮结果标成 Qt 6.8 验收。
@@ -51,6 +57,7 @@
 - 大量动态数据及计算留在 C++/模型中。布局的直接子项使用 `Layout.*`，不同时用 anchors/固定宽高争夺同一尺寸；持久状态不依赖可能回收的 delegate。[Qt Quick 最佳实践](https://doc.qt.io/qt-6.8/qtquick-bestpractices.html)
 - 首屏 footer 可见性、长内容滚动、预览返回与草稿保留要通过实际最小窗口检查；只设 `width=1120` 不能证明真实窗口就是该尺寸。用户手动改布局和测试工具干扰须单独记录。
 - 核对具体控件属性的可写性，不照搬 `Item` 的赋值方式。2026-09-08 新模拟面板在 Qt 6.4.3 给 `Flow.implicitHeight` 赋值导致真实 Main 加载失败，单文件 lint 未拦截；删除该赋值并让 Flow 自算尺寸后转绿，已纳入 `paper_strategy_controller` 门禁。主题色必须取 `PPTheme` 实际字段（例如 `textMuted`，不是不存在的 `textSecondary`），并用截图检查可读性。
+- **不要把 `activeFocusOnTab` / `focusPolicy` 的绑定直接跟随可用性。** Qt 6.11 在项已是 `window()->activeFocusItem()` 时拒绝置为 false 并打印 `QQuickItem: Cannot set activeFocusOnTab to false once item is the active focus item.`；`focusPolicy` 走同一处检查，所以翻一次打印两条且赋值被丢弃，项会一直留在 Tab 链。写成常量、用 `enabled` 表达不可用（Qt 会自动把 disabled 项移出 Tab 链并清除其焦点），或写成“可用性 `||` 该项自身 `activeFocus`”等焦点离开后再退出。2026-09-24 在 `PpButton` 等 5 处修复；`PpButton` 不能改用 `enabled: available`，否则子 `MouseArea` 被禁用、禁用态 tooltip 失效。回归测试 `tests/tst_focus_availability_qml.cpp`（用 `QMessageHandler` 捕获告警，不受 journald 路由影响）。
 
 ## R6：每个生命周期改动的合入门禁
 
