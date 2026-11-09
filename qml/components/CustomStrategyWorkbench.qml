@@ -167,7 +167,8 @@ Item {
                 x: 10; y: 40; width: parent.width - 20; height: parent.height - 52
                 model: root.controller.customStrategyModel
                 clip: true; spacing: 6; boundsBehavior: Flickable.StopAtBounds
-                activeFocusOnTab: count > 0
+                // 同 PpButton：列表清空时不要直接翻掉已聚焦项的 activeFocusOnTab。
+                activeFocusOnTab: count > 0 || strategyList.activeFocus
                 Accessible.role: Accessible.List
                 Accessible.name: "已保存的自定义策略版本"
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }

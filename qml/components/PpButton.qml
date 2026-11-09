@@ -20,8 +20,15 @@ Control {
     implicitHeight: Math.max(36, visualHeight)
     // 禁用态只降低按钮本体透明度；悬停说明必须保持完全不透明、可读。
     opacity: 1.0
-    activeFocusOnTab: available
-    focusPolicy: available ? Qt.TabFocus : Qt.NoFocus
+    // 不要把 activeFocusOnTab / focusPolicy 在“已持有 active focus”的项上翻成 false：
+    // Qt 6.11 会拒绝该赋值并打印
+    //   QQuickItem: Cannot set activeFocusOnTab to false once item is the active focus item.
+    // focusPolicy 走同一处检查，所以一个按钮翻一次会打印两条。这里保留“不可用即不可
+    // Tab 聚焦”的语义，但在该项仍持有焦点时保持可聚焦，等焦点离开后再退出 Tab 链。
+    // 也不能改成 enabled: available：禁用 Control 会连带禁用子 MouseArea，使禁用按钮
+    // 的悬停说明失效，违背本组件“禁用态仍可读 tooltip”的要求。
+    activeFocusOnTab: available || root.activeFocus
+    focusPolicy: (available || root.activeFocus) ? Qt.TabFocus : Qt.NoFocus
 
     Accessible.role: Accessible.Button
     Accessible.name: text

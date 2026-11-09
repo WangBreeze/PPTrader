@@ -10,14 +10,28 @@ if(MSVC)
     add_compile_options(/FS)
 endif()
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Network Qml Quick Sql Widgets)
+# 非 Windows 平台把可执行文件放到 bin/。Windows 产物带 .exe 后缀，
+# 与 qt_add_qml_module 生成的同名模块目录（${CMAKE_CURRENT_BINARY_DIR}/PPTrader）
+# 不冲突；Linux 上两者同名，链接器会以 “cannot open output file PPTrader: 是一个目录”
+# 失败。同时这也是 GNUInstallDirs 下更常规的布局。Windows 布局保持不变，
+# 以免影响现有 VS2022 preset 与验收脚本。
+if(NOT WIN32 AND NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+# 由项目自行解析目标 Qt 版本与安装前缀（默认 Qt 6.11.2，可选 6.8.3），
+# 不依赖全局 PATH / LD_LIBRARY_PATH / QML_IMPORT_PATH。
+include(cmake/PpQtToolchain.cmake)
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick Sql Widgets)
+pptrader_verify_qt_version()
 include(GNUInstallDirs)
 include(CTest)
 
-qt_standard_project_setup(REQUIRES 6.4)
+qt_standard_project_setup(REQUIRES 6.5)
 
 # Qt 6.8+ requires an explicit policy for QML files kept below the module root.
-# PPTrader still supports Qt 6.4 and Main.qml intentionally imports its
+# PPTrader still supports Qt 6.5+ and Main.qml intentionally imports its
 # "components" source directory. QTP0004 NEW adds a redirecting qmldir to that
 # directory, which makes the explicit directory import ambiguous under 6.11.
 # Keep the cross-version layout stable until the QML module is flattened.
@@ -477,9 +491,15 @@ install(FILES data/astock_cache.json
 )
 
 if(BUILD_TESTING)
-    find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
-    set(PPTRADER_VENV_PYTHON
-        "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe")
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
+    # venv 解释器位置随平台变化：Windows 为 Scripts/python.exe，POSIX 为 bin/python。
+    if(WIN32)
+        set(PPTRADER_VENV_PYTHON
+            "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe")
+    else()
+        set(PPTRADER_VENV_PYTHON
+            "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")
+    endif()
     if(EXISTS "${PPTRADER_VENV_PYTHON}")
         add_test(NAME mootdx_bridge_protocol
             COMMAND "${PPTRADER_VENV_PYTHON}"
@@ -497,6 +517,10 @@ if(BUILD_TESTING)
     qt_add_executable(tst_application_exit tests/tst_application_exit.cpp)
     target_link_libraries(tst_application_exit PRIVATE Qt6::Core Qt6::Test)
     add_dependencies(tst_application_exit PPTrader)
+    # 子进程路径由构建系统给出，避免把 Windows 的 PPTrader.exe 名称与所在目录
+    # 写死在测试里（Linux 上产物名为 PPTrader 且位于 bin/）。
+    set_property(SOURCE tests/tst_application_exit.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS "PPTRADER_APP_EXECUTABLE=\"$<TARGET_FILE:PPTrader>\"")
     add_test(NAME application_exit COMMAND tst_application_exit)
     set_tests_properties(application_exit PROPERTIES TIMEOUT 270 RUN_SERIAL TRUE
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
@@ -1603,6 +1627,16 @@ if(BUILD_TESTING)
     target_link_libraries(tst_strategy_plugin_panel_qml PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
 
+    # 回归：Qt 6.11 不允许在项已持有 active focus 时把 activeFocusOnTab / focusPolicy
+    # 翻成不可聚焦，否则拒绝赋值并打印 QQuickItem 告警。
+    qt_add_executable(tst_focus_availability_qml
+        tests/tst_focus_availability_qml.cpp
+    )
+    target_compile_definitions(tst_focus_availability_qml PRIVATE
+        PPTRADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(tst_focus_availability_qml PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
+
     qt_add_executable(tst_backtest_archive_panel_qml
         tests/tst_backtest_archive_panel_qml.cpp
         src/models/BacktestArchiveListModel.cpp
@@ -2171,6 +2205,10 @@ if(BUILD_TESTING)
     add_test(NAME custom_strategy_wizard_qml COMMAND tst_custom_strategy_wizard_qml)
     add_test(NAME custom_strategy_execution COMMAND tst_custom_strategy_execution)
     add_test(NAME strategy_plugin_panel_qml COMMAND tst_strategy_plugin_panel_qml)
+    add_test(NAME focus_availability_qml COMMAND tst_focus_availability_qml)
+    # 该回归只需要焦点语义，不依赖真实桌面，固定用 offscreen 保证可在无显示环境运行。
+    set_tests_properties(focus_availability_qml PROPERTIES TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME backtest_archive_panel_qml COMMAND tst_backtest_archive_panel_qml)
     add_test(NAME parameter_grid_scanner COMMAND tst_parameter_grid_scanner)
     add_test(NAME log_service COMMAND tst_log_service)

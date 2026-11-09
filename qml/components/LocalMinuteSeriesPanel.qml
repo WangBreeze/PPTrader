@@ -40,7 +40,9 @@ Item {
                 model: root.minuteCatalog
                 textRole: "title"
                 enabled: count > 0 && !root.controller.localCandleSeriesLoading
-                activeFocusOnTab: enabled
+                // 同 PpButton：不要在已持有 active focus 时把该属性翻成 false，
+                // 否则 Qt 6.11 会拒绝赋值并打印 activeFocusOnTab 告警。
+                activeFocusOnTab: enabled || datasetBox.activeFocus
                 Accessible.name: "选择本地分钟数据集"
                 Accessible.description: "只列出 SQLite 已有的 1 分钟和 5 分钟数据，不读取原始 CSV，不访问网络"
                 contentItem: Text {

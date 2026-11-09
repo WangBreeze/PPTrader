@@ -58,7 +58,8 @@ Item {
             textRole: "title"
             valueRole: "symbol"
             enabled: count > 0
-            activeFocusOnTab: enabled
+            // 同 PpButton：不要在已持有 active focus 时把该属性翻成 false。
+            activeFocusOnTab: enabled || datasetCombo.activeFocus
             Accessible.name: "选择本地回测品种和周期"
             Accessible.description: enabled
                 ? "仅列出 SQLite 中由历史 Tick 聚合的数据集"

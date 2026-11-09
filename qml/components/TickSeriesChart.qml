@@ -12,7 +12,8 @@ Item {
     property var hoverPoint: ({})
     property real dragLastX: 0
     property bool dragging: false
-    activeFocusOnTab: visible
+    // 同 PpButton：图表隐藏时不要把已聚焦项的 activeFocusOnTab 直接翻成 false。
+    activeFocusOnTab: visible || root.activeFocus
     Accessible.name: "逐笔成交事件序列图"
     Accessible.description: "横轴为成交事件顺序，滚轮缩放，拖拽平移，双击复位；暂不提供逐点键盘选择"
 
