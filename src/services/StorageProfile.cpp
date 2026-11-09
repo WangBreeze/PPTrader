@@ -20,16 +20,23 @@ QString StorageProfile::defaultDatabasePath()
 bool StorageProfile::validateLocalDatabasePath(const QString &path, QString *error)
 {
     if (error) error->clear();
-    const QString clean = QDir::cleanPath(path.trimmed());
+    const QString trimmed = path.trimmed();
+    // 必须在归一化之前判定 UNC/网络共享前缀。QDir::cleanPath 会把 "//server/share"
+    // 折叠成 "/server/share"，同时丢掉网络共享语义并把目标静默改写成另一个本地
+    // 路径；因此按用户原始输入拒绝。Windows 上它是真正的 UNC 路径，POSIX 上该
+    // 写法同样不具备可解析的本地语义。
+    const QString rawNormalized = QDir::fromNativeSeparators(trimmed);
+    if (rawNormalized.startsWith(QStringLiteral("//"))) {
+        if (error) *error = QStringLiteral("SQLite 不支持直接打开 SMB/NFS/UNC 网络共享路径");
+        return false;
+    }
+    const QString clean = QDir::cleanPath(trimmed);
     if (clean.isEmpty() || !QDir::isAbsolutePath(clean)) {
         if (error) *error = QStringLiteral("数据库路径必须是本机绝对路径");
         return false;
     }
-    const QString normalized = QDir::fromNativeSeparators(clean);
-    if (normalized.startsWith(QStringLiteral("//"))) {
-        if (error) *error = QStringLiteral("SQLite 不支持直接打开 SMB/NFS/UNC 网络共享路径");
-        return false;
-    }
+    // 说明：POSIX 上 NFS/CIFS 挂载点表现为普通绝对路径（例如 /mnt/nas/...），
+    // 无法从字符串形态识别，本函数不做该判定，需在部署层约束。
     const QFileInfo info(clean);
     if (info.exists() && !info.isFile()) {
         if (error) *error = QStringLiteral("数据库目标必须是文件路径");

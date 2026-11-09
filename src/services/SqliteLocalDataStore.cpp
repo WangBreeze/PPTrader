@@ -2696,7 +2696,7 @@ SqliteLocalDataStore::loadAShareInstrumentDayImportRuns(int limit)
         "content_sha256, lines_read, record_count, first_date, last_date, "
         "new_record_count, unchanged_record_count, corrected_record_count, "
         "revision_reason, status, error from ashare_instrument_day_import_runs "
-        "order by imported_at_utc desc, run_id desc limit ?"));
+        "order by imported_at_utc desc, rowid desc limit ?"));
     query.addBindValue(limit);
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取 A 股停复牌导入审计历史"));
@@ -2938,7 +2938,7 @@ SqliteLocalDataStore::analyzeAShareIndustryDataset(
     previous.prepare(QStringLiteral(
         "select dataset_id from ashare_industry_datasets where classification=? "
         "and source=? and source_version=? "
-        "order by imported_at_utc desc, dataset_id desc limit 1"));
+        "order by imported_at_utc desc, rowid desc limit 1"));
     previous.addBindValue(dataset.classification);
     previous.addBindValue(dataset.source);
     previous.addBindValue(dataset.sourceVersion);
@@ -2960,11 +2960,15 @@ SqliteLocalDataStore::loadAShareIndustryDatasets(int limit)
 {
     QVector<AShareIndustryDataset> result;
     QSqlQuery query(m_database);
+    // 并列时间戳用 rowid 兜底，不能用随机 dataset_id：同一毫秒内导入的两份数据
+    // 时间戳完全相同，按 UUID 排序得到的是任意顺序，"最新一份"会随机变化。
+    // rowid 是插入顺序，才真正表达“越晚导入越靠前”。本文件其它 “order by
+    // <时间> desc, <随机 id> desc” 的查询同理由此一并改为 rowid。
     query.prepare(QStringLiteral(
         "select dataset_id, classification, source, source_version, "
         "content_sha256, imported_at_utc, record_count, file_name, lines_read, "
         "revision_reason, previous_dataset_id from ashare_industry_datasets "
-        "order by imported_at_utc desc, dataset_id desc limit ?"));
+        "order by imported_at_utc desc, rowid desc limit ?"));
     query.addBindValue(std::max(1, limit));
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取行业数据集审计历史"));
@@ -3479,7 +3483,7 @@ QVector<FactorCandidateEvaluation> SqliteLocalDataStore::loadFactorCandidateEval
         "archive_factor_version, research_method_version, evaluation_role, preregistered, "
         "archive_identity_sha256, linked_at_utc from factor_candidate_evaluations "
         "where candidate_id=? and candidate_version=? "
-        "order by linked_at_utc desc, evaluation_id desc limit ?"));
+        "order by linked_at_utc desc, rowid desc limit ?"));
     query.addBindValue(candidateId.trimmed());
     query.addBindValue(version);
     query.addBindValue(std::max(1, limit));
@@ -4283,7 +4287,7 @@ QVector<TickDataImportRunSummary> SqliteLocalDataStore::loadTickDataImportRuns(
     const QString normalizedStatus = statusFilter.trimmed();
     if (!normalizedSymbol.isEmpty()) sql += QStringLiteral(" and symbol = ?");
     if (!normalizedStatus.isEmpty()) sql += QStringLiteral(" and status = ?");
-    sql += QStringLiteral(" order by created_at_utc desc, run_id desc limit ?");
+    sql += QStringLiteral(" order by created_at_utc desc, rowid desc limit ?");
     query.prepare(sql);
     if (!normalizedSymbol.isEmpty()) query.addBindValue(normalizedSymbol);
     if (!normalizedStatus.isEmpty()) query.addBindValue(normalizedStatus);
@@ -5299,7 +5303,7 @@ SqliteLocalDataStore::loadPortfolioBacktestArchiveSummaries(int limit)
         "immutable_identity_json, initial_capital, "
         "final_equity, total_return_percent, max_drawdown_percent, sharpe_ratio, "
         "total_commission, total_trades from portfolio_backtest_results "
-        "order by completed_at_utc desc, result_id desc limit ?"));
+        "order by completed_at_utc desc, rowid desc limit ?"));
     query.addBindValue(std::max(1, limit));
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取组合回测归档列表"));
@@ -6107,7 +6111,7 @@ QVector<BacktestArchiveSummary> SqliteLocalDataStore::loadBacktestArchiveSummari
             "dataset_stale_day_count, dataset_calendar_source, dataset_calendar_coverage_known, "
             "summary_initial_capital, final_equity, total_return_percent, max_drawdown_percent, "
             "win_rate_percent, sharpe_ratio, total_commission, total_trades, winning_trades, losing_trades "
-            "from backtest_results order by completed_at_utc desc, result_id desc"))) {
+            "from backtest_results order by completed_at_utc desc, rowid desc"))) {
         emitSqlError(QStringLiteral("读取回测归档列表"));
         return result;
     }
