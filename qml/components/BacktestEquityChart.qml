@@ -61,7 +61,7 @@ Item {
             ctx.stroke()
 
             ctx.fillStyle = root.theme.textMuted
-            ctx.font = "10px " + root.theme.fontFamily
+            ctx.font = "10px " + root.theme.canvasFontFamily
             ctx.textAlign = "right"
             ctx.fillText(maximum.toFixed(0), left - 7, top + 4)
             ctx.fillText(minimum.toFixed(0), left - 7, top + plotHeight)

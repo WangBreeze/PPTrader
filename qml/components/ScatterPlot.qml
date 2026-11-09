@@ -79,7 +79,7 @@ Control {
                 ctx.lineTo(width, y)
                 ctx.stroke()
                 ctx.fillStyle = root.theme.textMuted
-                ctx.font = "9px 'Noto Sans SC'"
+                ctx.font = "9px " + root.theme.canvasFontFamily
                 ctx.fillText(String(ticks[gy]), 8, Math.max(11, y - 5))
             }
         }

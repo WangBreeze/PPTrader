@@ -80,7 +80,7 @@ Item {
             ctx.beginPath(); ctx.arc(xFor(price), middleY, 7, 0, Math.PI * 2); ctx.fill()
 
             ctx.fillStyle = root.theme.textMuted
-            ctx.font = "10px " + root.theme.fontFamily
+            ctx.font = "10px " + root.theme.canvasFontFamily
             ctx.textAlign = "left"
             ctx.fillText("低 " + low.toFixed(2), left, middleY + 36)
             ctx.textAlign = "right"
