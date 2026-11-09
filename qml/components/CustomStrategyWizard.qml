@@ -2,7 +2,9 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Qt.labs.settings
+// Settings 自 Qt 6.5 起由 QtCore 提供；Qt.labs.settings 已弃用，在 6.8+ 每次加载都会
+// 打印告警。项目最低版本随之为 Qt 6.5，Qt 6.4.3 支持已退役。
+import QtCore
 import "CustomStrategyWizardContract.js" as WizardContract
 
 Item {
