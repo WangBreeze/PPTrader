@@ -1,0 +1,186 @@
+{
+  "report": "docs/qt-multiversion-toolchain-2026-09-24.md",
+  "date": "2026-09-24",
+  "machine": "Arch Linux (rolling), kernel 7.2.4-arch1-2, GCC 16.2.1, CMake 4.4.3, Ninja 1.13.2",
+  "session": "Hyprland (Wayland)",
+  "policy": {
+    "defaultQt": "6.11.2",
+    "optionalQt": [
+      "6.8.3",
+      "6.4.3"
+    ],
+    "globalEnv": "QTDIR/QT_DIR/Qt6_DIR=/usr (distro Qt 6.11.2); 6.8.3 removed from PATH, LD_LIBRARY_PATH, QML_IMPORT_PATH, QML2_IMPORT_PATH in ~/.bashrc",
+    "resolver": "cmake/PpQtToolchain.cmake",
+    "guard": "major.minor mismatch between resolved Qt and PPTRADER_QT_VERSION is a FATAL_ERROR at configure time"
+  },
+  "toolchains": [
+    {
+      "id": "qt611",
+      "qtVersion": "6.11.2",
+      "qtOrigin": "distro package (Arch qt6-base/qt6-declarative), prefix /usr",
+      "buildDir": "out/build/linux-qt611-debug",
+      "binary": "out/build/linux-qt611-debug/bin/PPTrader",
+      "binaryBytes": 148159088,
+      "binarySha256": "2571B77308EFD5FC1E90C0957B994A77D14332BAE61140385ABAD5501E377036",
+      "linkedQtCore": "/usr/lib/libQt6Core.so.6",
+      "runpath": "empty",
+      "configureVersionCheck": "PPTrader Qt: confirmed Qt 6.11.2 (/usr/lib/cmake/Qt6)",
+      "ctest": {
+        "passed": 56,
+        "total": 56,
+        "note": "55 pre-existing + focus_availability_qml regression, sequential"
+      },
+      "qmllint": "pass",
+      "exitProbe": 0,
+      "guiWindowTitle": "PPTrader · 量化交易工作台",
+      "context2dFontWarnings": 0,
+      "qmlWarnings": 0,
+      "focusWarnings": 0
+    },
+    {
+      "id": "qt683",
+      "qtVersion": "6.8.3",
+      "qtOrigin": "Qt installer, prefix $HOME/ProgramData/Qt/6.8.3/gcc_64",
+      "buildDir": "out/build/linux-qt683-debug",
+      "binary": "out/build/linux-qt683-debug/bin/PPTrader",
+      "binaryBytes": 130891928,
+      "binarySha256": "83AACC46BF383990704E98D5433D116283FB78C97B467783BD20B6BD08591CD6",
+      "linkedQtCore": "/home/wanglc/ProgramData/Qt/6.8.3/gcc_64/lib/libQt6Core.so.6",
+      "runpath": "/home/wanglc/ProgramData/Qt/6.8.3/gcc_64/lib",
+      "configureVersionCheck": "PPTrader Qt: confirmed Qt 6.8.3 (…/6.8.3/gcc_64/lib/cmake/Qt6)",
+      "ctest": {
+        "passed": 56,
+        "total": 56,
+        "note": "55 pre-existing + focus_availability_qml regression, sequential"
+      },
+      "qmllint": "pass",
+      "exitProbe": 0,
+      "guiWindowTitle": "PPTrader · 量化交易工作台",
+      "context2dFontWarnings": 0,
+      "qmlWarnings": 0,
+      "focusWarnings": 0
+    }
+  ],
+  "guiRenderComparison": {
+    "images": [
+      "gui-qt611.png",
+      "gui-qt683.png"
+    ],
+    "dimensions": "1282x1493",
+    "sha256": {
+      "gui-qt611.png": "2c9d4d9c74020da1ffe85f71da9cb645835174b7c045f18e92bea2cbdd291730",
+      "gui-qt683.png": "18cb32b6865c4a611ff35478c7fff4ab919e180dc21feee188391eed276799cb"
+    },
+    "absoluteErrorPixels": 62.81,
+    "totalPixels": 1914026,
+    "absoluteErrorRatio": 3.28166e-05,
+    "rmseNormalized": 0.000856549,
+    "renderer": "llvmpipe (sandbox /dev has no /dev/dri); not representative of a normal desktop session",
+    "visualReview": "independent vision-model inspection of gui-qt611.png: complete dark workbench (top bar, 5 tabs, 4 cards, status bar), CJK legible with no tofu, no overlap/clipping/error text, candlestick chart actually drawn"
+  },
+  "defectsFixed": [
+    {
+      "id": "ordering-nondeterminism",
+      "file": "src/services/SqliteLocalDataStore.cpp",
+      "lines": [
+        2699,
+        2941,
+        2967,
+        3482,
+        4286,
+        5302,
+        6110
+      ],
+      "issue": "latest-record queries used a random id as the tiebreaker for equal timestamps, so history.first() was arbitrary when two rows shared a millisecond",
+      "fix": "tiebreaker changed from random id to rowid (insertion order); timestamp remains the primary sort key",
+      "evidence": {
+        "before": {
+          "qt683": "5/8 standalone runs passed",
+          "qt611": "7/8 standalone runs passed",
+          "log": "ctest-before-ordering-fix-qt611-flake.log"
+        },
+        "after": {
+          "qt683": "12/12 standalone runs passed",
+          "qt611": "12/12 standalone runs passed",
+          "logs": [
+            "ctest-after-ordering-fix-qt611.log",
+            "ctest-after-ordering-fix-qt683.log"
+          ]
+        }
+      }
+    },
+    {
+      "id": "active-focus-on-tab-flip",
+      "severity": "product/QML",
+      "files": [
+        "qml/components/PpButton.qml",
+        "qml/components/LocalMinuteSeriesPanel.qml",
+        "qml/components/LocalBacktestSelector.qml",
+        "qml/components/CustomStrategyWorkbench.qml",
+        "qml/components/TickSeriesChart.qml"
+      ],
+      "issue": "activeFocusOnTab/focusPolicy were bound directly to availability; Qt 6.11 warns and DISCARDS the assignment when the item is the active focus item, leaving it in the tab chain",
+      "qtSource": "qtdeclarative v6.11.2 src/quick/items/qquickitem.cpp setActiveFocusOnTab()",
+      "duplicateWarningCause": "focusPolicy goes through the same check, so one button flip emits two identical warnings",
+      "fix": "'availability || <item>.activeFocus' so the property is not flipped while focused; enabled: available was rejected because it would disable the child MouseArea and break disabled-button tooltips",
+      "regressionTest": "tests/tst_focus_availability_qml.cpp",
+      "regressionTestHasTeeth": "reverting PpButton to the old binding reproduces exactly two warnings and fails the test"
+    },
+    {
+      "id": "qt-labs-settings-deprecation",
+      "severity": "product/QML + build policy",
+      "files": [
+        "qml/components/CustomStrategyWizard.qml",
+        "CMakeLists.txt",
+        "CMakePresets.json"
+      ],
+      "issue": "Qt.labs.settings printed a deprecation warning on every load under 6.8+",
+      "fix": "import QtCore (Settings available since 6.5); minimum Qt raised to 6.5; Qt 6.4.3 retired with its presets"
+    }
+  ],
+  "environmentFindings": [
+    {
+      "id": "distro-qt-logs-to-journald",
+      "detail": "Distro Qt 6.11.2 sends Qt/QML diagnostics to the systemd journal, not stderr. Without QT_FORCE_STDERR_LOGGING=1 the observed 'zero warnings' on Linux is meaningless.",
+      "measurements": {
+        "qt611_default_qtLogLines": 0,
+        "qt611_forced_with_star_true": 163545,
+        "qt683_default": "Qt logging reaches stderr normally",
+        "qt683_with_star_true": 87056
+      },
+      "note": "all warning counts in this evidence were re-measured with QT_FORCE_STDERR_LOGGING=1"
+    },
+    {
+      "id": "concurrent-ctest-interference",
+      "detail": "Running the CTest suites of the two build trees concurrently produces failures in varying tests; sequential runs are stable. Not attributed to either Qt version; shared resource not identified."
+    },
+    {
+      "id": "ld-library-path-beats-runpath",
+      "detail": "Before the global environment fix, configuring against distro Qt 6.11.2 failed because the inherited LD_LIBRARY_PATH made the 6.11.2 qmlimportscanner load the 6.8.3 libQt6Core ('version Qt_6.11 not found')."
+    }
+  ],
+  "notVerified": [
+    "Windows: presets vs2022-qt611 / vs2022-qt683 were not built or run in this round",
+    "APP-001 controlled scrollbar runtime on Linux (option is Windows-only by design)",
+    "Qt 6.4.3 was not rebuilt in this round",
+    "GPU-accelerated rendering (sandbox hides /dev/dri, so llvmpipe was used)",
+    "Live market data, NAS, real accounts, intraday and long-run acceptance"
+  ],
+  "minimumQt": "6.5",
+  "retiredQt": {
+    "version": "6.4.3",
+    "date": "2026-09-24",
+    "reason": "Settings moved to QtCore in 6.5; Qt.labs.settings is deprecated and warned on 6.8+",
+    "presetsRemoved": [
+      "vs2022-qt643",
+      "vs2022-x64",
+      "vs2022-debug",
+      "vs2022-release"
+    ]
+  },
+  "testCount": 56,
+  "referenceScreenshots": {
+    "gui-qt611.png": "2c9d4d9c74020da1ffe85f71da9cb645835174b7c045f18e92bea2cbdd291730",
+    "gui-qt683.png": "18cb32b6865c4a611ff35478c7fff4ab919e180dc21feee188391eed276799cb"
+  }
+}

@@ -25,9 +25,11 @@ PPTrader 是一个基于 Qt 6 + QML + CMake 的量化交易工作台工程骨架
 
 ## 构建
 
-默认目标是 **Qt 6.11.2**（Windows MSVC 2022 x64 / Linux Ninja），**最低版本 Qt 6.5**。项目自己解析
-Qt 安装前缀，不依赖全局 `PATH`、`LD_LIBRARY_PATH`、`QML_IMPORT_PATH`；`Qt 6.8.3` 以独立 preset
-作为可选工具链，同样不需要改全局环境变量。
+默认目标是 **Qt 6.12.0**（Windows MSVC 2022 x64 / Linux Ninja），**最低版本 Qt 6.5**。项目只使用
+**自己安装的 Qt 副本** `~/ProgramData/Qt/6.12.0/`（Linux `gcc_64`、Windows `msvc2022_64`），
+不使用发行版 `/usr` 里的同名版本——Arch 会持续滚动到更新的次版本，项目只跟随自己验收过的版本；
+也不读取 `PATH`、`LD_LIBRARY_PATH`、`QML_IMPORT_PATH`、`Qt6_DIR` 之类环境变量。`Qt 6.11.2`、`Qt 6.8.3`
+以独立 preset 作为可选工具链保留，同样不需要改全局环境变量。
 
 > Qt 6.4.3 支持已于 2026-09-24 退役：`CustomStrategyWizard` 需要的 `Settings` 自 Qt 6.5 起由
 > `QtCore` 提供，旧的 `Qt.labs.settings` 已弃用。历史日期文档中的 `cmake --preset vs2022-x64` /
@@ -36,39 +38,41 @@ Qt 安装前缀，不依赖全局 `PATH`、`LD_LIBRARY_PATH`、`QML_IMPORT_PATH`
 Windows：
 
 ```powershell
-cmake --preset vs2022-qt611
-cmake --build --preset vs2022-qt611-debug --parallel
-ctest --preset vs2022-qt611-debug
-cmake --build --preset vs2022-qt611-debug --target all_qmllint
-.\out\build\vs2022-qt611\Debug\PPTrader.exe
+cmake --preset vs2022-qt612
+cmake --build --preset vs2022-qt612-debug --parallel
+ctest --preset vs2022-qt612-debug
+cmake --build --preset vs2022-qt612-debug --target all_qmllint
+.\out\build\vs2022-qt612\Debug\PPTrader.exe
 ```
 
 Linux：
 
 ```sh
-cmake --preset linux-qt611-debug
-cmake --build --preset linux-qt611-debug --parallel
-ctest --preset linux-qt611-debug --output-on-failure
-cmake --build --preset linux-qt611-debug --target all_qmllint
-./out/build/linux-qt611-debug/bin/PPTrader
+cmake --preset linux-qt612-debug
+cmake --build --preset linux-qt612-debug --parallel
+ctest --preset linux-qt612-debug --output-on-failure
+cmake --build --preset linux-qt612-debug --target all_qmllint
+./out/build/linux-qt612-debug/bin/PPTrader
 ```
 
 可用的 Qt 版本 preset：
 
-| 平台 | 默认（6.11.2） | 可选 6.8.3 |
-| --- | --- | --- |
-| Windows | `vs2022-qt611` | `vs2022-qt683` |
-| Linux | `linux-qt611-debug` / `-release` | `linux-qt683-debug` / `-release` |
+| 平台 | 默认（6.12.0） | 可选 6.11.2 | 可选 6.8.3 |
+| --- | --- | --- | --- |
+| Windows | `vs2022-qt612` | `vs2022-qt611` | `vs2022-qt683` |
+| Linux | `linux-qt612-debug` / `-release` | `linux-qt611-*` | `linux-qt683-debug` / `-release` |
 
-Qt 前缀解析顺序：`-DPPTRADER_QT_ROOT=<前缀>` → 调用方显式给出的 `CMAKE_PREFIX_PATH`/`Qt6_DIR`
-→ 按 `-DPPTRADER_QT_VERSION` 在平台约定位置查找（Windows `D:/ProgramData/Qt/<版本>/msvc2022_64` 等，
-Linux `$HOME/ProgramData/Qt/<版本>/gcc_64`、发行版 `/usr`）。解析到的 Qt 与请求版本**次版本号不一致时
-直接配置失败**，避免 QML 插件与运行库跨版本混装。详见 [Qt 多版本工具链](docs/qt-multiversion-toolchain-2026-09-24.md)。
+Qt 前缀解析顺序：`-DPPTRADER_QT_ROOT=<前缀>` → 按 `-DPPTRADER_QT_VERSION` 在**项目约定安装位置**
+查找（Linux `$HOME/ProgramData/Qt/<版本>/gcc_64`、Windows `D:/ProgramData/Qt/<版本>/msvc2022_64` 等）；
+两者都没有时直接配置失败，**不会**回退到系统 `/usr`（确需回退时显式加 `-DPPTRADER_QT_ALLOW_SYSTEM=ON`）。
+解析到的 Qt 与请求版本**次版本号不一致时同样直接配置失败**，避免 QML 插件与运行库跨版本混装。
+详见 [Qt 多版本工具链](docs/qt-multiversion-toolchain-2026-09-24.md)。
 
-完全不用 preset 时按同样规则显式指定版本与前缀：
+完全不用 preset 时按同样规则显式指定版本与前缀（版本与 `PPTRADER_QT_VERSION` 的次版本必须一致）：
 
 ```sh
-cmake -S . -B build -G "Ninja" -DPPTRADER_QT_VERSION=6.11.2 -DCMAKE_PREFIX_PATH=/usr
+cmake -S . -B build -G "Ninja" -DPPTRADER_QT_VERSION=6.12.0 \
+      -DPPTRADER_QT_ROOT=$HOME/ProgramData/Qt/6.12.0/gcc_64
 cmake --build build
 ```
 

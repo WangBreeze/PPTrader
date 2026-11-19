@@ -27,7 +27,7 @@
     },
     {
       "name": "vs2022-qt611",
-      "displayName": "Windows x64 + Qt 6.11.2（默认工具链）",
+      "displayName": "Windows x64 + Qt 6.11.2（可选）",
       "description": "PPTrader 默认目标：MSVC 2022 x64 + Qt 6.11.2。Qt 前缀由 cmake/PpQtToolchain.cmake 按版本解析（也可用 -DPPTRADER_QT_ROOT 指定）。Windows 上默认启用 APP-001 受控滚动条运行库校验。",
       "inherits": "vs2022-base",
       "cacheVariables": {
@@ -51,8 +51,8 @@
     },
     {
       "name": "linux-qt611-debug",
-      "displayName": "Linux x64 + Qt 6.11.2 Debug（默认工具链）",
-      "description": "PPTrader 默认目标：Ninja + 本机 Qt 6.11.2。Linux 上发行版 Qt 前缀为 /usr，由 cmake/PpQtToolchain.cmake 自动解析；也可用 -DPPTRADER_QT_ROOT 指定。",
+      "displayName": "Linux x64 + Qt 6.11.2 Debug（可选，需本机已装 6.11.2）",
+      "description": "可选档位。2026-11-09 起默认目标改为 Qt 6.12.0（见 linux-qt612-debug）；本机 6.11.2 安装失败，此档位仅供已装该版本的环境使用。",
       "inherits": "linux-base",
       "cacheVariables": {
         "PPTRADER_QT_VERSION": "6.11.2",
@@ -66,6 +66,35 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
+    },
+    {
+      "name": "vs2022-qt612",
+      "displayName": "Windows x64 + Qt 6.12.0（默认工具链）",
+      "description": "2026-11-09 起的默认目标。Qt 固定取在线安装器装到 D:/ProgramData/Qt/6.12.0/msvc2022_64 的副本，不使用系统 Qt、不读取 Qt 相关环境变量；各版本须各自构建目录，禁止跨次版本混装。",
+      "inherits": "vs2022-base",
+      "cacheVariables": {
+        "PPTRADER_QT_VERSION": "6.12.0"
+      }
+    },
+    {
+      "name": "linux-qt612-debug",
+      "displayName": "Linux x64 + Qt 6.12.0 Debug（默认工具链）",
+      "description": "2026-11-09 起的默认目标。Qt 固定取 ~/ProgramData/Qt/6.12.0/gcc_64（在线安装器副本），不使用发行版 /usr 的同名版本、不读取 Qt 相关环境变量；6.11.2 因安装失败不再作为基线，linux-qt611-* 仅供其它环境使用。",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "PPTRADER_QT_VERSION": "6.12.0",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-qt612-release",
+      "displayName": "Linux x64 + Qt 6.12.0 Release（默认工具链）",
+      "inherits": "linux-qt612-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "PPTRADER_QT_VERSION": "6.12.0"
+      },
+      "description": "与 linux-qt612-debug 相同前缀（~/ProgramData/Qt/6.12.0/gcc_64）的发布配置。"
     },
     {
       "name": "linux-qt683-debug",
@@ -133,6 +162,30 @@
       "name": "linux-qt683-release",
       "displayName": "Linux Qt 6.8.3 构建 RelWithDebInfo",
       "configurePreset": "linux-qt683-release",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "vs2022-qt612-debug",
+      "displayName": "Windows Qt 6.12.0 构建 Debug",
+      "configurePreset": "vs2022-qt612",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs2022-qt612-release",
+      "displayName": "Windows Qt 6.12.0 构建 Release",
+      "configurePreset": "vs2022-qt612",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-qt612-debug",
+      "displayName": "Linux Qt 6.12.0 构建 Debug",
+      "configurePreset": "linux-qt612-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux-qt612-release",
+      "displayName": "Linux Qt 6.12.0 构建 RelWithDebInfo",
+      "configurePreset": "linux-qt612-release",
       "configuration": "RelWithDebInfo"
     }
   ],
@@ -225,6 +278,54 @@
       "name": "linux-qt683-release",
       "displayName": "Linux Qt 6.8.3 测试 RelWithDebInfo",
       "configurePreset": "linux-qt683-release",
+      "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "vs2022-qt612-debug",
+      "displayName": "Windows Qt 6.12.0 测试 Debug",
+      "configurePreset": "vs2022-qt612",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "vs2022-qt612-release",
+      "displayName": "Windows Qt 6.12.0 测试 Release",
+      "configurePreset": "vs2022-qt612",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-qt612-debug",
+      "displayName": "Linux Qt 6.12.0 测试 Debug",
+      "configurePreset": "linux-qt612-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-qt612-release",
+      "displayName": "Linux Qt 6.12.0 测试 RelWithDebInfo",
+      "configurePreset": "linux-qt612-release",
       "configuration": "RelWithDebInfo",
       "output": {
         "outputOnFailure": true
