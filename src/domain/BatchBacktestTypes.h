@@ -62,6 +62,7 @@ struct BatchBacktestRequest {
     double slippageRate = 0.0;
     int lotSize = 100;
     int maximumActiveEngines = 20;
+    bool archiveProfitableResults = false; // 应用批次逐项保存净盈利结果；探针可关闭
     // 原始 Tick 固定参数的时序样本外验证。0 表示关闭；开启时至少为 2，
     // 并将最后 N 个实际观测到的上海交易日作为完全独立的验证窗。
     int holdoutTradingDays = 0;

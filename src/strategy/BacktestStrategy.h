@@ -53,6 +53,8 @@ public:
     virtual int strategyVersion() const { return 0; }
     virtual QVariantMap normalizedParameters() const { return {}; }
     virtual QVariantMap ruleSnapshot() const { return {}; }
+    // 外部注入的策略默认不能进入原始逐笔回测；实现必须声明自己的因果成交口径。
+    virtual bool supportsProvidedRawTicks() const { return false; }
     // 仅用于回测结果审计；不代替执行层的实际成交与持仓事实。
     virtual QVariantMap evaluationFacts() const { return {}; }
     // 共享资金组合可能拒绝信号；策略必须能撤销仅由该信号预置的持仓状态。

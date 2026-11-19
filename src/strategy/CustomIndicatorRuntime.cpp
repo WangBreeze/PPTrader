@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 namespace pp {
 
@@ -31,6 +32,12 @@ CustomIndicatorRuntime::CustomIndicatorRuntime(QVector<CompiledCustomIndicator> 
     : m_indicators(std::move(indicators))
     , m_states(m_indicators.size())
 {
+    for (const CompiledCustomIndicator &indicator : m_indicators) {
+        m_historyLimit = std::max({m_historyLimit, indicator.period + 2,
+                                   indicator.fastPeriod + 2,
+                                   indicator.slowPeriod + 2,
+                                   indicator.signalPeriod + 2});
+    }
 }
 
 void CustomIndicatorRuntime::reset()
@@ -43,6 +50,7 @@ void CustomIndicatorRuntime::reset()
     m_highs.clear();
     m_lows.clear();
     m_previousClose.reset();
+    m_observationCount = 0;
 }
 
 void CustomIndicatorRuntime::append(const Candle &candle)
@@ -70,6 +78,16 @@ void CustomIndicatorRuntime::append(const Candle &candle)
     else m_previousClose.reset();
 
     for (int index = 0; index < m_indicators.size(); ++index) updateIndicator(index, candle);
+    ++m_observationCount;
+    if (m_closes.size() > m_historyLimit * 2) {
+        const qsizetype removeCount = m_closes.size() - m_historyLimit;
+        m_closes.remove(0, removeCount);
+        m_volumes.remove(0, removeCount);
+        m_trueRanges.remove(0, removeCount);
+        m_typicalPrices.remove(0, removeCount);
+        m_highs.remove(0, removeCount);
+        m_lows.remove(0, removeCount);
+    }
 }
 
 std::optional<double> CustomIndicatorRuntime::value(int indicatorIndex) const
@@ -79,6 +97,11 @@ std::optional<double> CustomIndicatorRuntime::value(int indicatorIndex) const
 }
 
 int CustomIndicatorRuntime::barCount() const
+{
+    return m_observationCount;
+}
+
+int CustomIndicatorRuntime::residentObservationCount() const
 {
     return m_closes.size();
 }
@@ -230,6 +253,71 @@ void CustomIndicatorRuntime::updateIndicator(int index, const Candle &candle)
         else state.current = 3.0 * state.kValue - 2.0 * state.dValue;
         break;
     }
+    case CustomIndicatorKind::Stoch: {
+        if (!windowAverage(m_highs, indicator.period)
+            || !windowAverage(m_lows, indicator.period)) {
+            state.stochRawK.clear();
+            state.stochSmoothedK.clear();
+            break;
+        }
+        const double high = *std::max_element(m_highs.cend() - indicator.period, m_highs.cend());
+        const double low = *std::min_element(m_lows.cend() - indicator.period, m_lows.cend());
+        const double rawK = high > low ? (m_closes.last() - low) / (high - low) * 100.0 : 50.0;
+        state.stochRawK.append(rawK);
+        if (state.stochRawK.size() > indicator.kPeriod) state.stochRawK.removeFirst();
+        if (state.stochRawK.size() < indicator.kPeriod) break;
+        const double smoothK = std::accumulate(state.stochRawK.cbegin(),
+            state.stochRawK.cend(), 0.0) / indicator.kPeriod;
+        state.stochSmoothedK.append(smoothK);
+        if (state.stochSmoothedK.size() > indicator.dPeriod)
+            state.stochSmoothedK.removeFirst();
+        if (indicator.output == QStringLiteral("k")) state.current = smoothK;
+        else if (state.stochSmoothedK.size() == indicator.dPeriod)
+            state.current = std::accumulate(state.stochSmoothedK.cbegin(),
+                state.stochSmoothedK.cend(), 0.0) / indicator.dPeriod;
+        break;
+    }
+    case CustomIndicatorKind::Supertrend: {
+        const double tr = m_trueRanges.last();
+        if (!std::isfinite(tr) || !std::isfinite(m_highs.last())
+            || !std::isfinite(m_lows.last())) {
+            state.superTrCount = 0;
+            state.superTrSum = 0.0;
+            state.superAtr.reset();
+            break;
+        }
+        if (!state.superAtr) {
+            state.superTrSum += tr;
+            if (++state.superTrCount < indicator.period) break;
+            state.superAtr = state.superTrSum / indicator.period;
+        } else {
+            state.superAtr = (*state.superAtr * (indicator.period - 1) + tr)
+                / indicator.period;
+        }
+        const double midpoint = (m_highs.last() + m_lows.last()) / 2.0;
+        const double basicUpper = midpoint + indicator.standardDeviations * *state.superAtr;
+        const double basicLower = midpoint - indicator.standardDeviations * *state.superAtr;
+        if (state.superTrCount == indicator.period) {
+            state.superUpper = basicUpper;
+            state.superLower = basicLower;
+            state.superUp = false;
+            ++state.superTrCount;
+        } else {
+            const double previousClose = m_closes.at(m_closes.size() - 2);
+            const double upper = basicUpper < state.superUpper || previousClose > state.superUpper
+                ? basicUpper : state.superUpper;
+            const double lower = basicLower > state.superLower || previousClose < state.superLower
+                ? basicLower : state.superLower;
+            state.superUp = state.superUp
+                ? m_closes.last() >= lower : m_closes.last() > upper;
+            state.superUpper = upper;
+            state.superLower = lower;
+        }
+        state.current = indicator.output == QStringLiteral("direction")
+            ? (state.superUp ? 1.0 : -1.0)
+            : (state.superUp ? state.superLower : state.superUpper);
+        break;
+    }
     case CustomIndicatorKind::VolumeSma:
         state.current = windowAverage(m_volumes, indicator.period);
         break;
@@ -343,7 +431,9 @@ void CustomIndicatorRuntime::updateIndicator(int index, const Candle &candle)
         || indicator.kind == CustomIndicatorKind::Bias || indicator.kind == CustomIndicatorKind::Cci
         || indicator.kind == CustomIndicatorKind::Wr || indicator.kind == CustomIndicatorKind::Donchian
         || indicator.kind == CustomIndicatorKind::Obv || indicator.kind == CustomIndicatorKind::Mfi
-        || indicator.kind == CustomIndicatorKind::Kdj;
+        || indicator.kind == CustomIndicatorKind::Kdj
+        || indicator.kind == CustomIndicatorKind::Stoch
+        || indicator.kind == CustomIndicatorKind::Supertrend;
     if (expandedIndicator && state.current && !std::isfinite(*state.current)) state.current.reset();
 }
 

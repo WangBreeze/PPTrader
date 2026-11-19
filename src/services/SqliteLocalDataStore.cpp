@@ -9,9 +9,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QDebug>
+#include <QDataStream>
 #include <QCryptographicHash>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStorageInfo>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTimeZone>
@@ -21,13 +23,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <tuple>
 
 namespace pp {
 
 namespace {
 
-constexpr int kCurrentDatabaseSchemaVersion = 25;
+constexpr int kCurrentDatabaseSchemaVersion = 28;
 const QString kApplicationSchemaVersion = QStringLiteral("0.1.0");
 
 QString marketCode(Market market)
@@ -81,6 +84,27 @@ QString compactJson(const QVariantMap &value)
     return QString::fromUtf8(QJsonDocument::fromVariant(value).toJson(QJsonDocument::Compact));
 }
 
+QString candleSnapshotFingerprint(const QVector<Candle> &candles)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    for (const Candle &candle : candles) {
+        QByteArray bytes;
+        QDataStream stream(&bytes, QIODevice::WriteOnly);
+        stream.setVersion(QDataStream::Qt_6_0);
+        stream << candle.startTime.toUTC().toMSecsSinceEpoch()
+               << candle.periodSeconds << candle.open << candle.high
+               << candle.low << candle.close << candle.volume
+               << candle.buyVolume << candle.sellVolume << candle.neutralVolume
+               << candle.directionalVolumeKnown << candle.source
+               << candle.adjustment << candle.downloadedAt.isValid()
+               << (candle.downloadedAt.isValid()
+                   ? candle.downloadedAt.toUTC().toMSecsSinceEpoch() : qint64(0));
+        hash.addData(bytes);
+    }
+    return QStringLiteral("sha256:%1")
+        .arg(QString::fromLatin1(hash.result().toHex()));
+}
+
 QVariantMap variantMapFromJson(const QString &value)
 {
     const QJsonDocument document = QJsonDocument::fromJson(value.toUtf8());
@@ -97,6 +121,32 @@ bool isSha256(const QString &value)
               || (code >= 'A' && code <= 'F'))) return false;
     }
     return true;
+}
+
+bool validCustomDefinitionSnapshot(const BacktestConfig &config)
+{
+    if (!config.strategyId.startsWith(QStringLiteral("custom_"))) return true;
+    const QString definitionJson = config.ruleSnapshot.value(
+        QStringLiteral("definitionJson")).toString();
+    const QString definitionSha256 = config.ruleSnapshot.value(
+        QStringLiteral("definitionSha256")).toString();
+    // 旧归档尚无定义快照，仍可读取；新快照必须完整且与策略身份一致。
+    if (definitionJson.isEmpty() && definitionSha256.isEmpty()) return true;
+    if (definitionJson.isEmpty() || !isSha256(definitionSha256)) return false;
+    const QJsonDocument document = QJsonDocument::fromJson(definitionJson.toUtf8());
+    if (!document.isObject()
+        || document.object().value(QStringLiteral("strategyId")).toString()
+               != config.strategyId
+        || document.object().value(QStringLiteral("version")).toInt()
+               != config.strategyVersion
+        || QString::fromUtf8(document.toJson(QJsonDocument::Compact))
+               != definitionJson) {
+        return false;
+    }
+    const QString actualSha256 = QStringLiteral("sha256:")
+        + QString::fromLatin1(QCryptographicHash::hash(
+            definitionJson.toUtf8(), QCryptographicHash::Sha256).toHex());
+    return actualSha256 == definitionSha256;
 }
 
 bool isShanghaiShenzhenSymbol(const QString &symbol)
@@ -370,6 +420,85 @@ QString SqliteLocalDataStore::lastMigrationBackupPath() const
     return m_lastMigrationBackupPath;
 }
 
+SqliteCompactionResult SqliteLocalDataStore::compactDatabaseFile(
+    const QString &databasePath, const QString &expectedDatabaseUuid)
+{
+    SqliteCompactionResult result;
+    const QFileInfo file(databasePath);
+    if (!file.isFile() || expectedDatabaseUuid.isEmpty()) {
+        result.error = QStringLiteral("数据库文件或身份无效");
+        return result;
+    }
+    const qint64 databaseBytes = file.size();
+    const qint64 walBytes = QFileInfo(databasePath + QStringLiteral("-wal")).size();
+    result.beforeBytes = databaseBytes + std::max<qint64>(0, walBytes);
+    const QStorageInfo storage(file.absolutePath());
+    if (!storage.isValid() || !storage.isReady()
+        || databaseBytes > (std::numeric_limits<qint64>::max() - 67108864) / 2
+        || storage.bytesAvailable() < databaseBytes * 2 + 67108864) {
+        result.error = QStringLiteral("可用磁盘空间不足，整理需要约两倍数据库大小的临时空间");
+        return result;
+    }
+
+    const QString connectionName = QStringLiteral("archive_compaction_%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    result = [&]() {
+        SqliteCompactionResult operation = result;
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(databasePath);
+        if (!database.open()) {
+            operation.error = QStringLiteral("打开整理数据库失败：%1")
+                .arg(database.lastError().text());
+            return operation;
+        }
+        {
+            QSqlQuery identity(database);
+            if (!identity.exec(QStringLiteral(
+                    "select database_uuid from app_database_metadata where singleton_id=1"))
+                || !identity.next()
+                || identity.value(0).toString() != expectedDatabaseUuid) {
+                operation.error = QStringLiteral("数据库身份已变化，拒绝整理");
+                return operation;
+            }
+        }
+        QSqlQuery checkpoint(database);
+        if (!checkpoint.exec(QStringLiteral("pragma wal_checkpoint(TRUNCATE)"))
+            || !checkpoint.next() || checkpoint.value(0).toInt() != 0) {
+            operation.error = QStringLiteral("数据库仍被其他任务使用，无法整理");
+            return operation;
+        }
+        checkpoint.finish();
+        QSqlQuery vacuum(database);
+        if (!vacuum.exec(QStringLiteral("VACUUM"))) {
+            operation.error = QStringLiteral("整理数据库失败：%1")
+                .arg(vacuum.lastError().text());
+            return operation;
+        }
+        vacuum.finish();
+        QSqlQuery integrity(database);
+        if (!integrity.exec(QStringLiteral("pragma quick_check"))
+            || !integrity.next() || integrity.value(0).toString() != QStringLiteral("ok")) {
+            operation.error = QStringLiteral("整理后数据库完整性检查未通过");
+            return operation;
+        }
+        integrity.finish();
+        if (!checkpoint.exec(QStringLiteral("pragma wal_checkpoint(TRUNCATE)"))
+            || !checkpoint.next() || checkpoint.value(0).toInt() != 0) {
+            operation.error = QStringLiteral("整理后 WAL 文件回收失败");
+            return operation;
+        }
+        checkpoint.finish();
+        operation.afterBytes = QFileInfo(databasePath).size()
+            + std::max<qint64>(0, QFileInfo(
+                databasePath + QStringLiteral("-wal")).size());
+        operation.succeeded = true;
+        return operation;
+    }();
+    QSqlDatabase::removeDatabase(connectionName);
+    return result;
+}
+
 bool SqliteLocalDataStore::hasUserSchema() const
 {
     QSqlQuery query(m_database);
@@ -422,7 +551,10 @@ bool SqliteLocalDataStore::verifyRequiredTables(QString *error) const
         QStringLiteral("external_factor_research_archives"),
         QStringLiteral("raw_tick_parameter_sensitivity_results"),
         QStringLiteral("backtest_results"), QStringLiteral("backtest_candles"),
+        QStringLiteral("backtest_chart_signals"),
         QStringLiteral("backtest_raw_ticks"),
+        QStringLiteral("strategy_matrix_runs"),
+        QStringLiteral("strategy_matrix_tasks"),
         QStringLiteral("schema_migration_history"),
         QStringLiteral("app_database_metadata")
     };
@@ -859,6 +991,48 @@ bool SqliteLocalDataStore::migrateSchema()
             if (!history.exec()) {
                 m_database.rollback();
                 emitSqlError(QStringLiteral("记录全库 v25 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 26) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(26, 'strategy_matrix_runs', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-strategy-matrix-runs-v26"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v26 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 27) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(27, 'shared_matrix_candle_snapshot', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-shared-matrix-candles-v27"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v27 迁移历史"));
+                return false;
+            }
+        }
+        if (fromVersion < 28) {
+            history.prepare(QStringLiteral(
+                "insert into schema_migration_history(version, migration_name, applied_at_utc, "
+                "application_version, checksum) values(28, 'shared_matrix_raw_tick_snapshot', ?, ?, ?) "
+                "on conflict(version) do nothing"));
+            history.addBindValue(now);
+            history.addBindValue(kApplicationSchemaVersion);
+            history.addBindValue(QStringLiteral("pptrader-shared-matrix-raw-ticks-v28"));
+            if (!history.exec()) {
+                m_database.rollback();
+                emitSqlError(QStringLiteral("记录全库 v28 迁移历史"));
                 return false;
             }
         }
@@ -4638,6 +4812,292 @@ QVector<BatchBacktestRunItem> SqliteLocalDataStore::loadBatchBacktestRunItems(
     return result;
 }
 
+bool SqliteLocalDataStore::createStrategyMatrixRun(
+    const StrategyMatrixRunRecord &run,
+    const QVector<StrategyMatrixTaskRecord> &tasks)
+{
+    if (run.runId.isEmpty() || run.requestJson.isEmpty() || tasks.isEmpty()
+        || run.totalTasks != tasks.size() || !m_database.transaction()) return false;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into strategy_matrix_runs(run_id, created_at_utc, completed_at_utc, "
+        "request_json, status, error, total_tasks) values(?, ?, '', ?, ?, '', ?)"));
+    query.addBindValue(run.runId);
+    query.addBindValue(run.createdAt.toUTC().toString(Qt::ISODateWithMs));
+    query.addBindValue(run.requestJson);
+    query.addBindValue(run.status);
+    query.addBindValue(run.totalTasks);
+    if (!query.exec()) {
+        m_database.rollback();
+        emit writeFailed(QStringLiteral("创建矩阵回测批次失败：%1")
+                             .arg(query.lastError().text()));
+        return false;
+    }
+    for (const StrategyMatrixTaskRecord &task : tasks) {
+        if (task.runId != run.runId || !upsertStrategyMatrixTask(task)) {
+            m_database.rollback();
+            return false;
+        }
+    }
+    if (!m_database.commit()) {
+        emitSqlError(QStringLiteral("提交矩阵回测批次"));
+        return false;
+    }
+    return true;
+}
+
+bool SqliteLocalDataStore::upsertStrategyMatrixTask(
+    const StrategyMatrixTaskRecord &task)
+{
+    if (task.runId.isEmpty() || task.taskId.isEmpty()
+        || task.datasetVersion.isEmpty() || task.status.isEmpty()) return false;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "insert into strategy_matrix_tasks(run_id, task_id, strategy_id, "
+        "profile_label, strategy_version, parameter_fingerprint, symbol, "
+        "dataset_version, data_version, status, error, result_id, actual_bars, "
+        "elapsed_milliseconds, total_return_percent, max_drawdown_percent, "
+        "total_trades, total_commission, final_equity) "
+        "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "on conflict(task_id) do update set data_version=excluded.data_version, "
+        "status=excluded.status, error=excluded.error, result_id=excluded.result_id, "
+        "actual_bars=excluded.actual_bars, "
+        "elapsed_milliseconds=excluded.elapsed_milliseconds, "
+        "total_return_percent=excluded.total_return_percent, "
+        "max_drawdown_percent=excluded.max_drawdown_percent, "
+        "total_trades=excluded.total_trades, "
+        "total_commission=excluded.total_commission, "
+        "final_equity=excluded.final_equity "
+        "where strategy_matrix_tasks.run_id=excluded.run_id "
+        "and strategy_matrix_tasks.dataset_version=excluded.dataset_version"));
+    query.addBindValue(task.runId);
+    query.addBindValue(task.taskId);
+    query.addBindValue(task.strategyId);
+    query.addBindValue(task.profileLabel.isEmpty()
+        ? QStringLiteral("") : task.profileLabel);
+    query.addBindValue(task.strategyVersion);
+    query.addBindValue(task.parameterFingerprint);
+    query.addBindValue(task.symbol);
+    query.addBindValue(task.datasetVersion);
+    query.addBindValue(task.dataVersion.isEmpty()
+        ? QStringLiteral("") : task.dataVersion);
+    query.addBindValue(task.status);
+    query.addBindValue(task.error.isEmpty() ? QStringLiteral("") : task.error);
+    query.addBindValue(task.resultId.isEmpty()
+        ? QStringLiteral("") : task.resultId);
+    query.addBindValue(task.actualBars);
+    query.addBindValue(task.elapsedMilliseconds);
+    query.addBindValue(task.totalReturnPercent);
+    query.addBindValue(task.maxDrawdownPercent);
+    query.addBindValue(task.totalTrades);
+    query.addBindValue(task.totalCommission);
+    query.addBindValue(task.finalEquity);
+    if (!query.exec()) {
+        emit writeFailed(QStringLiteral("写入矩阵回测任务失败：%1")
+                             .arg(query.lastError().text()));
+        return false;
+    }
+    QSqlQuery changes(m_database);
+    if (!changes.exec(QStringLiteral("select changes()")) || !changes.next()
+        || changes.value(0).toInt() != 1) {
+        emit writeFailed(QStringLiteral("矩阵任务冻结身份不匹配，拒绝覆盖"));
+        return false;
+    }
+    return true;
+}
+
+bool SqliteLocalDataStore::updateStrategyMatrixRunStatus(
+    const QString &runId, const QString &status, const QString &error)
+{
+    if (runId.isEmpty() || status.isEmpty()) return false;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "update strategy_matrix_runs set status=?, error=?, "
+        "completed_at_utc=case when ? in ('completed', 'cancelled', 'failed') "
+        "then ? else '' end where run_id=?"));
+    query.addBindValue(status);
+    query.addBindValue(error.isEmpty() ? QStringLiteral("") : error);
+    query.addBindValue(status);
+    query.addBindValue(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    query.addBindValue(runId);
+    if (!query.exec() || query.numRowsAffected() != 1) {
+        emitSqlError(QStringLiteral("更新矩阵回测批次"));
+        return false;
+    }
+    return true;
+}
+
+QVector<StrategyMatrixRunRecord> SqliteLocalDataStore::loadStrategyMatrixRuns(
+    int limit)
+{
+    QVector<StrategyMatrixRunRecord> runs;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select run_id, created_at_utc, completed_at_utc, request_json, status, "
+        "error, total_tasks from strategy_matrix_runs "
+        "order by created_at_utc desc, run_id desc limit ?"));
+    query.addBindValue(limit > 0 ? limit : -1);
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取矩阵回测批次"));
+        return runs;
+    }
+    while (query.next()) {
+        StrategyMatrixRunRecord run;
+        run.runId = query.value(0).toString();
+        run.createdAt = QDateTime::fromString(query.value(1).toString(), Qt::ISODateWithMs);
+        run.completedAt = QDateTime::fromString(query.value(2).toString(), Qt::ISODateWithMs);
+        run.requestJson = query.value(3).toString();
+        run.status = query.value(4).toString();
+        run.error = query.value(5).toString();
+        run.totalTasks = query.value(6).toInt();
+        runs.append(run);
+    }
+    return runs;
+}
+
+std::optional<StrategyMatrixRunRecord> SqliteLocalDataStore::loadStrategyMatrixRun(
+    const QString &runId)
+{
+    if (runId.isEmpty()) return std::nullopt;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select created_at_utc, completed_at_utc, request_json, status, "
+        "error, total_tasks from strategy_matrix_runs where run_id=?"));
+    query.addBindValue(runId);
+    if (!query.exec() || !query.next()) return std::nullopt;
+    StrategyMatrixRunRecord run;
+    run.runId = runId;
+    run.createdAt = QDateTime::fromString(query.value(0).toString(), Qt::ISODateWithMs);
+    run.completedAt = QDateTime::fromString(query.value(1).toString(), Qt::ISODateWithMs);
+    run.requestJson = query.value(2).toString();
+    run.status = query.value(3).toString();
+    run.error = query.value(4).toString();
+    run.totalTasks = query.value(5).toInt();
+    return run;
+}
+
+QVector<StrategyMatrixTaskRecord> SqliteLocalDataStore::loadStrategyMatrixTasks(
+    const QString &runId)
+{
+    QVector<StrategyMatrixTaskRecord> tasks;
+    if (runId.isEmpty()) return tasks;
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select task_id, strategy_id, profile_label, strategy_version, "
+        "parameter_fingerprint, symbol, dataset_version, data_version, status, "
+        "error, result_id, actual_bars, elapsed_milliseconds, "
+        "total_return_percent, max_drawdown_percent, total_trades, "
+        "total_commission, final_equity from strategy_matrix_tasks "
+        "where run_id=? order by symbol, strategy_id, task_id"));
+    query.addBindValue(runId);
+    if (!query.exec()) {
+        emitSqlError(QStringLiteral("读取矩阵回测任务"));
+        return tasks;
+    }
+    while (query.next()) {
+        StrategyMatrixTaskRecord task;
+        task.runId = runId;
+        task.taskId = query.value(0).toString();
+        task.strategyId = query.value(1).toString();
+        task.profileLabel = query.value(2).toString();
+        task.strategyVersion = query.value(3).toInt();
+        task.parameterFingerprint = query.value(4).toString();
+        task.symbol = query.value(5).toString();
+        task.datasetVersion = query.value(6).toString();
+        task.dataVersion = query.value(7).toString();
+        task.status = query.value(8).toString();
+        task.error = query.value(9).toString();
+        task.resultId = query.value(10).toString();
+        task.actualBars = query.value(11).toInt();
+        task.elapsedMilliseconds = query.value(12).toLongLong();
+        task.totalReturnPercent = query.value(13).toDouble();
+        task.maxDrawdownPercent = query.value(14).toDouble();
+        task.totalTrades = query.value(15).toInt();
+        task.totalCommission = query.value(16).toDouble();
+        task.finalEquity = query.value(17).toDouble();
+        tasks.append(task);
+    }
+    return tasks;
+}
+
+bool SqliteLocalDataStore::reconcileStrategyMatrixTaskArchive(
+    StrategyMatrixTaskRecord *task)
+{
+    if (!task || task->taskId.isEmpty() || task->datasetVersion.isEmpty())
+        return false;
+    // 盈利筛选后，成功但不符合归档条件的任务只有持久化摘要，没有结果行。
+    // 这类已完成任务在恢复时应跳过；待完成任务仍继续查找可能已落盘的归档。
+    if (task->status == QStringLiteral("succeeded") && task->resultId.isEmpty()
+        && isSha256(task->dataVersion) && task->actualBars > 0) {
+        return true;
+    }
+    QSqlQuery query(m_database);
+    query.prepare(QStringLiteral(
+        "select result_id, data_version, actual_bars, total_return_percent, "
+        "max_drawdown_percent, total_trades, total_commission, final_equity "
+        "from backtest_results where task_id=? and dataset_version=? "
+        "and strategy_id=? and strategy_version=? and symbol=? "
+        "order by completed_at_utc desc limit 1"));
+    query.addBindValue(task->taskId);
+    query.addBindValue(task->datasetVersion);
+    query.addBindValue(task->strategyId);
+    query.addBindValue(task->strategyVersion);
+    query.addBindValue(task->symbol);
+    if (!query.exec() || !query.next()) return false;
+    task->resultId = query.value(0).toString();
+    task->dataVersion = query.value(1).toString();
+    task->actualBars = query.value(2).toInt();
+    task->totalReturnPercent = query.value(3).toDouble();
+    task->maxDrawdownPercent = query.value(4).toDouble();
+    task->totalTrades = query.value(5).toInt();
+    task->totalCommission = query.value(6).toDouble();
+    task->finalEquity = query.value(7).toDouble();
+    task->status = QStringLiteral("succeeded");
+    task->error.clear();
+    return true;
+}
+
+bool SqliteLocalDataStore::deleteStrategyMatrixRun(
+    const QString &runId, QString *error)
+{
+    if (error) error->clear();
+    if (m_readOnly || runId.trimmed().isEmpty() || !m_database.transaction()) {
+        if (error) *error = QStringLiteral("数据库不可写或批次 ID 无效");
+        return false;
+    }
+    QSqlQuery exists(m_database);
+    exists.prepare(QStringLiteral(
+        "select 1 from strategy_matrix_runs where run_id=?"));
+    exists.addBindValue(runId);
+    if (!exists.exec() || !exists.next()) {
+        m_database.rollback();
+        if (error) *error = QStringLiteral("矩阵批次不存在");
+        return false;
+    }
+    QSqlQuery archives(m_database);
+    archives.prepare(QStringLiteral(
+        "delete from backtest_results where task_id in "
+        "(select task_id from strategy_matrix_tasks where run_id=?)"));
+    archives.addBindValue(runId);
+    if (!archives.exec()) {
+        const QString message = archives.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    QSqlQuery run(m_database);
+    run.prepare(QStringLiteral("delete from strategy_matrix_runs where run_id=?"));
+    run.addBindValue(runId);
+    if (!run.exec() || run.numRowsAffected() != 1 || !m_database.commit()) {
+        const QString message = run.lastError().text();
+        m_database.rollback();
+        if (error) *error = message.isEmpty()
+            ? QStringLiteral("删除矩阵批次事务失败") : message;
+        return false;
+    }
+    return true;
+}
+
 namespace {
 
 QString positionsToJson(const QVector<PortfolioPosition> &positions)
@@ -5347,7 +5807,10 @@ SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
     query.prepare(QStringLiteral(
         "select portfolio_id, name, completed_at_utc, definition_json, "
         "dataset_versions_json, result_kind, immutable_identity_json, "
-        "dataset_identities_json from portfolio_backtest_results where result_id = ?"));
+        "dataset_identities_json, initial_capital, final_equity, "
+        "total_return_percent, max_drawdown_percent, sharpe_ratio, "
+        "total_commission, total_trades "
+        "from portfolio_backtest_results where result_id = ?"));
     query.addBindValue(resultId);
     if (!query.exec()) {
         emitSqlError(QStringLiteral("读取组合回测归档身份"));
@@ -5437,6 +5900,13 @@ SqliteLocalDataStore::loadPortfolioBacktestArchive(const QString &resultId)
             .toMap().value(QStringLiteral("summary")).toMap());
     record.result.datasetIdentities =
         datasetIdentitiesFromJson(query.value(7).toString());
+    record.result.summary.initialCapital = query.value(8).toDouble();
+    record.result.summary.finalEquity = query.value(9).toDouble();
+    record.result.summary.totalReturnPercent = query.value(10).toDouble();
+    record.result.summary.maxDrawdownPercent = query.value(11).toDouble();
+    record.result.summary.sharpeRatio = query.value(12).toDouble();
+    record.result.summary.totalCommission = query.value(13).toDouble();
+    record.result.summary.totalTrades = query.value(14).toInt();
     QString crossSectionalIdentityError;
     if (!validateCrossSectionalArchiveIdentity(
             record.result, &crossSectionalIdentityError)) {
@@ -5655,6 +6125,7 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
     const BacktestConfig &config = record.result.config;
     const bool rawMode = config.dataMode == BacktestDataMode::RawTicks;
     const bool deferredRawMode = rawMode && record.result.rawTickSnapshotDeferred;
+    const QString sharedRawTickResultId = record.sharedRawTickResultId.trimmed();
     const bool inputSnapshotComplete = rawMode
         ? (deferredRawMode
                ? allowDeferredRawSnapshot && record.result.rawTicks.isEmpty()
@@ -5679,7 +6150,8 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         || (!config.datasetIdentity.isEmpty()
             && !isSha256(config.datasetIdentity.datasetVersion))
         || (config.strategyId.startsWith(QStringLiteral("custom_"))
-            && (config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()))) {
+            && (config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()))
+        || !validCustomDefinitionSnapshot(config)) {
         const QString message = QStringLiteral("回测结果身份不完整，未写入归档");
         if (error) *error = message;
         emit writeFailed(message);
@@ -5784,6 +6256,31 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         } else if (rawMode) signalIndexByRawTick[rawIndex] = index;
         else signalIndexByCandle[*candleIndex] = index;
     }
+    const QString sharedCandleResultId = record.sharedCandleResultId.trimmed();
+    if ((rawMode && !sharedCandleResultId.isEmpty())
+        || (!rawMode && !sharedRawTickResultId.isEmpty())) {
+        if (error) *error = QStringLiteral("回测归档共享快照模式无效");
+        return false;
+    }
+    const QString candleContentSha256 = rawMode
+        ? QStringLiteral("") : candleSnapshotFingerprint(record.result.candles);
+    if (rawMode && sharedRawTickResultId.isEmpty()) {
+        // WAL 写入与后续检查点会短时并存；按每条 512 字节加 64 MiB
+        // 预留空间，防止在归档事务开始后才耗尽本地卷。
+        constexpr qint64 kReservePerRawTick = 512;
+        constexpr qint64 kMinimumFreeReserve = 64LL * 1024 * 1024;
+        const QStorageInfo volume(QFileInfo(m_databasePath).absolutePath());
+        const qint64 requiredFree = kMinimumFreeReserve
+            + qint64(config.actualBars) * kReservePerRawTick;
+        if (!volume.isValid() || volume.bytesAvailable() < requiredFree) {
+            const QString message = QStringLiteral(
+                "原始 Tick 归档空间不足：至少需要 %1 MiB 可用空间")
+                    .arg((requiredFree + 1024 * 1024 - 1) / (1024 * 1024));
+            if (error) *error = message;
+            emit writeFailed(message);
+            return false;
+        }
+    }
     if (!m_database.transaction()) {
         if (error) *error = QStringLiteral("开始回测结果归档事务失败：%1")
                                 .arg(m_database.lastError().text());
@@ -5805,6 +6302,58 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         return false;
     };
 
+    if (!sharedCandleResultId.isEmpty()) {
+        QSqlQuery owner(m_database);
+        owner.prepare(QStringLiteral(
+            "select task_id, symbol, period_seconds, actual_bars, from_utc, to_utc, "
+            "data_version, dataset_version, candle_content_sha256 "
+            "from backtest_results where result_id=? and candle_series_version=1 "
+            "and shared_candle_result_id is null"));
+        owner.addBindValue(sharedCandleResultId);
+        if (!owner.exec()) return fail(QStringLiteral("校验共享 K 线归档"), owner);
+        const QString runPrefix = config.taskId.section(QLatin1Char(':'), 0, 0);
+        if (sharedCandleResultId == record.resultId || !owner.next()
+            || !config.taskId.contains(QLatin1Char(':'))
+            || runPrefix.isEmpty()
+            || !owner.value(0).toString().contains(QLatin1Char(':'))
+            || owner.value(0).toString().section(QLatin1Char(':'), 0, 0) != runPrefix
+            || owner.value(1).toString() != config.instrument.symbol
+            || owner.value(2).toInt() != config.periodSeconds
+            || owner.value(3).toInt() != config.actualBars
+            || owner.value(4).toString() != config.from.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(5).toString() != config.to.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(6).toString() != config.dataVersion
+            || owner.value(7).toString() != config.datasetIdentity.datasetVersion
+            || owner.value(8).toString() != candleContentSha256) {
+            return reject(QStringLiteral("共享 K 线快照身份与本次回测不一致"));
+        }
+    }
+    if (!sharedRawTickResultId.isEmpty()) {
+        QSqlQuery owner(m_database);
+        owner.prepare(QStringLiteral(
+            "select task_id, symbol, actual_bars, from_utc, to_utc, data_version, "
+            "dataset_version, (select count(*) from backtest_raw_ticks "
+            "where result_id=backtest_results.result_id) "
+            "from backtest_results where result_id=? and data_mode='raw_ticks' "
+            "and raw_tick_series_version=1 and shared_raw_tick_result_id is null"));
+        owner.addBindValue(sharedRawTickResultId);
+        if (!owner.exec()) return fail(QStringLiteral("校验共享 Tick 归档"), owner);
+        const QString runPrefix = config.taskId.section(QLatin1Char(':'), 0, 0);
+        if (sharedRawTickResultId == record.resultId || !owner.next()
+            || !config.taskId.contains(QLatin1Char(':')) || runPrefix.isEmpty()
+            || !owner.value(0).toString().contains(QLatin1Char(':'))
+            || owner.value(0).toString().section(QLatin1Char(':'), 0, 0) != runPrefix
+            || owner.value(1).toString() != config.instrument.symbol
+            || owner.value(2).toInt() != config.actualBars
+            || owner.value(3).toString() != config.from.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(4).toString() != config.to.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(5).toString() != config.dataVersion
+            || owner.value(6).toString() != config.datasetIdentity.datasetVersion
+            || owner.value(7).toInt() != config.actualBars) {
+            return reject(QStringLiteral("共享 Tick 快照身份与本次回测不一致"));
+        }
+    }
+
     QSqlQuery resultQuery(m_database);
     resultQuery.prepare(QStringLiteral(
         "insert into backtest_results("
@@ -5820,9 +6369,10 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         "dataset_calendar_coverage_known, candle_series_version, data_mode, "
         "raw_tick_series_version, final_position_quantity, "
         "final_position_average_price, final_position_entry_commission, "
-        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc) "
+        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc, "
+        "shared_candle_result_id, candle_content_sha256, shared_raw_tick_result_id) "
         "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     const PerformanceSummary &summary = record.result.summary;
     const BacktestDatasetIdentity &dataset = config.datasetIdentity;
     const QVariantList values {
@@ -5845,8 +6395,10 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
             ? dataset.lastTradingDate.toString(Qt::ISODate) : QStringLiteral(""),
         dataset.gapDayCount, dataset.staleDayCount,
         dataset.calendarSource.isEmpty() ? QStringLiteral("") : dataset.calendarSource,
-        dataset.calendarCoverageKnown ? 1 : 0, rawMode ? 0 : 1,
-        backtestDataModeCode(config.dataMode), rawMode ? 1 : 0,
+        dataset.calendarCoverageKnown ? 1 : 0,
+        rawMode ? 0 : (sharedCandleResultId.isEmpty() ? 1 : 2),
+        backtestDataModeCode(config.dataMode),
+        rawMode ? (sharedRawTickResultId.isEmpty() ? 1 : 2) : 0,
         hasFinalPosition ? finalPosition.quantity : 0.0,
         hasFinalPosition ? finalPosition.averagePrice : 0.0,
         hasFinalPosition ? finalPosition.entryCommission : 0.0,
@@ -5861,7 +6413,10 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         config.sampleWindowKnown
             ? QVariant(config.sampleTo.isValid()
                 ? config.sampleTo.toUTC().toString(Qt::ISODateWithMs) : QStringLiteral(""))
-            : QVariant{}
+            : QVariant{},
+        sharedCandleResultId.isEmpty() ? QVariant{} : QVariant(sharedCandleResultId),
+        candleContentSha256,
+        sharedRawTickResultId.isEmpty() ? QVariant{} : QVariant(sharedRawTickResultId)
     };
     for (const QVariant &value : values) resultQuery.addBindValue(value);
     if (!resultQuery.exec()) return fail(QStringLiteral("写入回测结果身份"), resultQuery);
@@ -5873,7 +6428,8 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         "directional_volume_known, source, adjustment, downloaded_at_utc, has_signal, "
         "signal_side, signal_price, signal_volume, signal_reason) "
         "values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
-    for (int index = 0; index < record.result.candles.size(); ++index) {
+    for (int index = 0; sharedCandleResultId.isEmpty()
+                        && index < record.result.candles.size(); ++index) {
         const Candle &candle = record.result.candles.at(index);
         const int signalIndex = signalIndexByCandle.at(index);
         const bool hasSignal = signalIndex >= 0;
@@ -5897,6 +6453,26 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
             candleQuery.bindValue(column, candleValues.at(column));
         if (!candleQuery.exec())
             return fail(QStringLiteral("写入回测 K 线与信号快照"), candleQuery);
+    }
+
+    if (!sharedCandleResultId.isEmpty() || !sharedRawTickResultId.isEmpty()) {
+        QSqlQuery signalQuery(m_database);
+        signalQuery.prepare(QStringLiteral(
+            "insert into backtest_chart_signals(result_id, sequence_no, timestamp_utc, "
+            "signal_side, signal_price, signal_volume, signal_reason) "
+            "values(?, ?, ?, ?, ?, ?, ?)"));
+        for (int index = 0; index < record.result.chartSignals.size(); ++index) {
+            const TradeSignal &signal = record.result.chartSignals.at(index);
+            signalQuery.bindValue(0, record.resultId);
+            signalQuery.bindValue(1, index);
+            signalQuery.bindValue(2, signal.timestamp.toUTC().toString(Qt::ISODateWithMs));
+            signalQuery.bindValue(3, static_cast<int>(signal.side));
+            signalQuery.bindValue(4, signal.price);
+            signalQuery.bindValue(5, signal.volume);
+            signalQuery.bindValue(6, signal.reason);
+            if (!signalQuery.exec())
+                return fail(QStringLiteral("写入共享 K 线回测信号"), signalQuery);
+        }
     }
 
     QSqlQuery rawTickQuery(m_database);
@@ -5927,7 +6503,9 @@ bool SqliteLocalDataStore::saveBacktestArchiveImpl(
         }
         return rawTickQuery.exec();
     };
-    if (!deferredRawMode) {
+    if (!sharedRawTickResultId.isEmpty()) {
+        // 交易标记已单独保存；原始 Tick 只由首个盈利结果持有。
+    } else if (!deferredRawMode) {
         for (int index = 0; index < record.result.rawTicks.size(); ++index) {
             if (!insertRawTick(record.result.rawTicks.at(index), index,
                                signalIndexByRawTick.at(index))) {
@@ -6153,6 +6731,91 @@ QVector<BacktestArchiveSummary> SqliteLocalDataStore::loadBacktestArchiveSummari
     return result;
 }
 
+bool SqliteLocalDataStore::deleteBacktestArchive(
+    const QString &resultId, QString *error)
+{
+    if (error) error->clear();
+    if (m_readOnly || resultId.trimmed().isEmpty() || !m_database.transaction()) {
+        if (error) *error = QStringLiteral("数据库不可写或结果 ID 无效");
+        return false;
+    }
+    QSqlQuery lookup(m_database);
+    lookup.prepare(QStringLiteral(
+        "select task_id from backtest_results where result_id=?"));
+    lookup.addBindValue(resultId);
+    if (!lookup.exec() || !lookup.next()) {
+        m_database.rollback();
+        if (error) *error = QStringLiteral("归档结果不存在");
+        return false;
+    }
+    const QString taskId = lookup.value(0).toString();
+    QSqlQuery linked(m_database);
+    linked.prepare(QStringLiteral(
+        "select 1 from strategy_matrix_tasks "
+        "where task_id=? or result_id=? limit 1"));
+    linked.addBindValue(taskId);
+    linked.addBindValue(resultId);
+    if (!linked.exec()) {
+        const QString message = linked.lastError().text();
+        m_database.rollback();
+        if (error) *error = message;
+        return false;
+    }
+    if (linked.next()) {
+        m_database.rollback();
+        if (error) *error = QStringLiteral("矩阵结果需随整个批次删除");
+        return false;
+    }
+    QSqlQuery remove(m_database);
+    remove.prepare(QStringLiteral("delete from backtest_results where result_id=?"));
+    remove.addBindValue(resultId);
+    if (!remove.exec() || remove.numRowsAffected() != 1 || !m_database.commit()) {
+        const QString message = remove.lastError().text();
+        m_database.rollback();
+        if (error) *error = message.isEmpty()
+            ? QStringLiteral("删除归档事务失败") : message;
+        return false;
+    }
+    return true;
+}
+
+QVariantMap SqliteLocalDataStore::backtestArchiveStorageStats()
+{
+    if (!m_database.isOpen()) return {};
+    auto pragmaNumber = [this](const QString &statement) -> qint64 {
+        QSqlQuery query(m_database);
+        return query.exec(statement) && query.next()
+            ? query.value(0).toLongLong() : 0;
+    };
+    const qint64 pageSize = pragmaNumber(QStringLiteral("pragma page_size"));
+    const qint64 freePages = pragmaNumber(QStringLiteral("pragma freelist_count"));
+    const qint64 databaseBytes = QFileInfo(m_databasePath).size();
+    const qint64 walBytes = QFileInfo(m_databasePath + QStringLiteral("-wal")).size();
+    const qint64 archiveCount = pragmaNumber(QStringLiteral(
+        "select count(*) from backtest_results"));
+    QSqlQuery pages(m_database);
+    qint64 archiveBytes = -1;
+    if (pages.exec(QStringLiteral(
+            "select coalesce(sum(pgsize),0) from dbstat where name in "
+            "('backtest_results','backtest_candles','backtest_chart_signals','backtest_equity_points',"
+            "'backtest_trades','backtest_raw_ticks') or name in "
+            "(select name from sqlite_master where type='index' and tbl_name in "
+            "('backtest_results','backtest_candles','backtest_chart_signals','backtest_equity_points',"
+            "'backtest_trades','backtest_raw_ticks')) or "
+            "name glob 'sqlite_autoindex_backtest_results_*' or "
+            "name glob 'sqlite_autoindex_backtest_candles_*' or "
+            "name glob 'sqlite_autoindex_backtest_chart_signals_*' or "
+            "name glob 'sqlite_autoindex_backtest_equity_points_*' or "
+            "name glob 'sqlite_autoindex_backtest_trades_*' or "
+            "name glob 'sqlite_autoindex_backtest_raw_ticks_*'"))
+        && pages.next()) archiveBytes = pages.value(0).toLongLong();
+    return {{QStringLiteral("databaseBytes"), databaseBytes},
+            {QStringLiteral("walBytes"), std::max<qint64>(0, walBytes)},
+            {QStringLiteral("reusableBytes"), freePages * pageSize},
+            {QStringLiteral("archiveBytes"), archiveBytes},
+            {QStringLiteral("archiveCount"), archiveCount}};
+}
+
 std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     const QString &resultId, BacktestArchiveLoadMode mode)
 {
@@ -6166,7 +6829,8 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         "winning_trades, losing_trades, dataset_identity_json, candle_series_version, "
         "data_mode, raw_tick_series_version, final_position_quantity, "
         "final_position_average_price, final_position_entry_commission, "
-        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc "
+        "final_position_entry_time_utc, final_position_entry_reason, sample_from_utc, sample_to_utc, "
+        "shared_candle_result_id, candle_content_sha256, shared_raw_tick_result_id "
         "from backtest_results "
         "where result_id = ?"));
     query.addBindValue(resultId);
@@ -6185,6 +6849,10 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
     config.strategyVersion = query.value(3).toInt();
     config.strategyParameters = variantMapFromJson(query.value(4).toString());
     config.ruleSnapshot = variantMapFromJson(query.value(5).toString());
+    if (!validCustomDefinitionSnapshot(config)) {
+        emit writeFailed(QStringLiteral("自定义策略定义快照校验失败，拒绝恢复"));
+        return std::nullopt;
+    }
     config.dataVersion = query.value(6).toString();
     config.instrument = {query.value(7).toString(), query.value(8).toString(),
                          static_cast<Market>(query.value(9).toInt()), query.value(10).toString()};
@@ -6228,6 +6896,9 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         if (dataset.fromJson(datasetJson)) config.datasetIdentity = dataset;
     }
     const int candleSeriesVersion = query.value(32).toInt();
+    record.sharedCandleResultId = query.value(42).toString();
+    const QString candleContentSha256 = query.value(43).toString();
+    record.sharedRawTickResultId = query.value(44).toString();
     config.dataMode = query.value(33).toString() == QStringLiteral("raw_ticks")
         ? BacktestDataMode::RawTicks : BacktestDataMode::Candles;
     const int rawTickSeriesVersion = query.value(34).toInt();
@@ -6251,13 +6922,109 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         return std::nullopt;
     }
 
+    const bool sharedCandles = candleSeriesVersion == 2;
+    if (candleSeriesVersion < 0 || candleSeriesVersion > 2
+        || (sharedCandles != !record.sharedCandleResultId.isEmpty())
+        || (config.dataMode == BacktestDataMode::RawTicks && candleSeriesVersion != 0)) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的 K 线引用无效，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+    if (sharedCandles) {
+        QSqlQuery owner(m_database);
+        owner.prepare(QStringLiteral(
+            "select task_id, symbol, period_seconds, actual_bars, from_utc, to_utc, "
+            "data_version, dataset_version, candle_content_sha256 "
+            "from backtest_results where result_id=? and candle_series_version=1 "
+            "and shared_candle_result_id is null"));
+        owner.addBindValue(record.sharedCandleResultId);
+        if (!owner.exec()) {
+            emitSqlError(QStringLiteral("读取共享 K 线归档身份"));
+            return std::nullopt;
+        }
+        if (record.sharedCandleResultId == resultId || !owner.next()
+            || !config.taskId.contains(QLatin1Char(':'))
+            || !owner.value(0).toString().contains(QLatin1Char(':'))
+            || owner.value(0).toString().section(QLatin1Char(':'), 0, 0)
+                != config.taskId.section(QLatin1Char(':'), 0, 0)
+            || owner.value(1).toString() != config.instrument.symbol
+            || owner.value(2).toInt() != config.periodSeconds
+            || owner.value(3).toInt() != config.actualBars
+            || owner.value(4).toString() != config.from.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(5).toString() != config.to.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(6).toString() != config.dataVersion
+            || owner.value(7).toString() != config.datasetIdentity.datasetVersion
+            || owner.value(8).toString() != candleContentSha256
+            || !isSha256(candleContentSha256)) {
+            emit writeFailed(QStringLiteral("回测归档 %1 的共享 K 线身份不一致，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+        QSqlQuery ownCandles(m_database);
+        ownCandles.prepare(QStringLiteral(
+            "select 1 from backtest_candles where result_id=? limit 1"));
+        ownCandles.addBindValue(resultId);
+        if (!ownCandles.exec() || ownCandles.next()) {
+            emit writeFailed(QStringLiteral("回测归档 %1 存在重复 K 线快照，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+    }
+
+    const bool sharedRawTicks = rawTickSeriesVersion == 2;
+    if (rawTickSeriesVersion < 0 || rawTickSeriesVersion > 2
+        || (sharedRawTicks != !record.sharedRawTickResultId.isEmpty())
+        || (config.dataMode == BacktestDataMode::RawTicks
+            ? rawTickSeriesVersion == 0 : rawTickSeriesVersion != 0)) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的原始 Tick 引用无效，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+    if (sharedRawTicks) {
+        QSqlQuery owner(m_database);
+        owner.prepare(QStringLiteral(
+            "select task_id, symbol, actual_bars, from_utc, to_utc, data_version, "
+            "dataset_version from backtest_results where result_id=? "
+            "and data_mode='raw_ticks' and raw_tick_series_version=1 "
+            "and shared_raw_tick_result_id is null"));
+        owner.addBindValue(record.sharedRawTickResultId);
+        if (!owner.exec()) {
+            emitSqlError(QStringLiteral("读取共享 Tick 归档身份"));
+            return std::nullopt;
+        }
+        if (record.sharedRawTickResultId == resultId || !owner.next()
+            || !config.taskId.contains(QLatin1Char(':'))
+            || !owner.value(0).toString().contains(QLatin1Char(':'))
+            || owner.value(0).toString().section(QLatin1Char(':'), 0, 0)
+                != config.taskId.section(QLatin1Char(':'), 0, 0)
+            || owner.value(1).toString() != config.instrument.symbol
+            || owner.value(2).toInt() != config.actualBars
+            || owner.value(3).toString() != config.from.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(4).toString() != config.to.toUTC().toString(Qt::ISODateWithMs)
+            || owner.value(5).toString() != config.dataVersion
+            || owner.value(6).toString() != config.datasetIdentity.datasetVersion) {
+            emit writeFailed(QStringLiteral("回测归档 %1 的共享 Tick 身份不一致，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+        QSqlQuery ownTicks(m_database);
+        ownTicks.prepare(QStringLiteral(
+            "select 1 from backtest_raw_ticks where result_id=? limit 1"));
+        ownTicks.addBindValue(resultId);
+        if (!ownTicks.exec() || ownTicks.next()) {
+            emit writeFailed(QStringLiteral("回测归档 %1 存在重复 Tick 快照，拒绝恢复")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+    }
+
     QSqlQuery candleQuery(m_database);
     candleQuery.prepare(QStringLiteral(
         "select start_time_utc, period_seconds, open, high, low, close, volume, "
         "buy_volume, sell_volume, neutral_volume, directional_volume_known, source, adjustment, "
         "downloaded_at_utc, has_signal, signal_side, signal_price, signal_volume, signal_reason "
         "from backtest_candles where result_id = ? order by sequence_no asc"));
-    candleQuery.addBindValue(resultId);
+    candleQuery.addBindValue(sharedCandles ? record.sharedCandleResultId : resultId);
     if (!candleQuery.exec()) {
         emitSqlError(QStringLiteral("读取回测 K 线与信号快照"));
         return std::nullopt;
@@ -6282,7 +7049,7 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         candle.downloadedAt = QDateTime::fromString(candleQuery.value(13).toString(),
                                                     Qt::ISODateWithMs);
         record.result.candles.append(candle);
-        if (candleQuery.value(14).toBool()) {
+        if (!sharedCandles && candleQuery.value(14).toBool()) {
             TradeSignal signal;
             signal.instrument = config.instrument;
             signal.timestamp = candle.startTime;
@@ -6299,6 +7066,48 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
                              .arg(resultId));
         return std::nullopt;
     }
+    if (candleSeriesVersion > 0 && !candleContentSha256.isEmpty()
+        && candleSnapshotFingerprint(record.result.candles) != candleContentSha256) {
+        emit writeFailed(QStringLiteral("回测归档 %1 的 K 线快照内容已变化，拒绝恢复")
+                             .arg(resultId));
+        return std::nullopt;
+    }
+    if (sharedCandles) {
+        QSet<QDateTime> candleTimes;
+        for (const Candle &candle : record.result.candles) candleTimes.insert(candle.startTime);
+        QSet<QDateTime> signalTimes;
+        QSqlQuery signalQuery(m_database);
+        signalQuery.prepare(QStringLiteral(
+            "select sequence_no, timestamp_utc, signal_side, signal_price, "
+            "signal_volume, signal_reason from backtest_chart_signals "
+            "where result_id=? order by sequence_no asc"));
+        signalQuery.addBindValue(resultId);
+        if (!signalQuery.exec()) {
+            emitSqlError(QStringLiteral("读取共享 K 线回测信号"));
+            return std::nullopt;
+        }
+        while (signalQuery.next()) {
+            TradeSignal signal;
+            signal.instrument = config.instrument;
+            signal.timestamp = QDateTime::fromString(signalQuery.value(1).toString(),
+                                                     Qt::ISODateWithMs);
+            signal.side = static_cast<SignalSide>(signalQuery.value(2).toInt());
+            signal.price = signalQuery.value(3).toDouble();
+            signal.volume = signalQuery.value(4).toDouble();
+            signal.reason = signalQuery.value(5).toString();
+            if (signalQuery.value(0).toInt() != record.result.chartSignals.size()
+                || !signal.timestamp.isValid() || !candleTimes.contains(signal.timestamp)
+                || signalTimes.contains(signal.timestamp)
+                || !std::isfinite(signal.price) || signal.price <= 0.0
+                || !std::isfinite(signal.volume) || signal.volume < 0.0) {
+                emit writeFailed(QStringLiteral("回测归档 %1 的交易标记无效，拒绝恢复")
+                                     .arg(resultId));
+                return std::nullopt;
+            }
+            signalTimes.insert(signal.timestamp);
+            record.result.chartSignals.append(signal);
+        }
+    }
 
     if (rawTickSeriesVersion > 0) {
         QSqlQuery rawTickMetadataQuery(m_database);
@@ -6306,7 +7115,8 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
             "select count(*), min(sequence_no), max(sequence_no), "
             "sum(case when has_signal <> 0 then 1 else 0 end) "
             "from backtest_raw_ticks where result_id = ?"));
-        rawTickMetadataQuery.addBindValue(resultId);
+        rawTickMetadataQuery.addBindValue(
+            sharedRawTicks ? record.sharedRawTickResultId : resultId);
         if (!rawTickMetadataQuery.exec() || !rawTickMetadataQuery.next()) {
             emitSqlError(QStringLiteral("读取回测原始 Tick 快照元数据"));
             return std::nullopt;
@@ -6331,7 +7141,8 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
                 "select timestamp_utc, trading_date, source_line, price, volume_shares, amount, "
                 "direction, source from backtest_raw_ticks where result_id = ? "
                 "order by sequence_no asc"));
-            rawTickQuery.addBindValue(resultId);
+            rawTickQuery.addBindValue(
+                sharedRawTicks ? record.sharedRawTickResultId : resultId);
             if (!rawTickQuery.exec()) {
                 emitSqlError(QStringLiteral("读取完整回测原始 Tick 快照"));
                 return std::nullopt;
@@ -6363,10 +7174,14 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
         }
 
         QSqlQuery rawSignalQuery(m_database);
-        rawSignalQuery.prepare(QStringLiteral(
-            "select timestamp_utc, signal_side, signal_price, signal_volume, signal_reason "
-            "from backtest_raw_ticks where result_id = ? and has_signal <> 0 "
-            "order by sequence_no asc"));
+        rawSignalQuery.prepare(sharedRawTicks
+            ? QStringLiteral(
+                "select timestamp_utc, signal_side, signal_price, signal_volume, signal_reason "
+                "from backtest_chart_signals where result_id = ? order by sequence_no asc")
+            : QStringLiteral(
+                "select timestamp_utc, signal_side, signal_price, signal_volume, signal_reason "
+                "from backtest_raw_ticks where result_id = ? and has_signal <> 0 "
+                "order by sequence_no asc"));
         rawSignalQuery.addBindValue(resultId);
         if (!rawSignalQuery.exec()) {
             emitSqlError(QStringLiteral("读取回测原始 Tick 信号快照"));
@@ -6381,9 +7196,18 @@ std::optional<BacktestArchiveRecord> SqliteLocalDataStore::loadBacktestArchive(
             signal.price = rawSignalQuery.value(2).toDouble();
             signal.volume = rawSignalQuery.value(3).toDouble();
             signal.reason = rawSignalQuery.value(4).toString();
+            if (sharedRawTicks
+                && (!signal.timestamp.isValid() || signal.timestamp < config.from
+                    || signal.timestamp > config.to
+                    || !std::isfinite(signal.price) || signal.price <= 0.0
+                    || !std::isfinite(signal.volume) || signal.volume < 0.0)) {
+                emit writeFailed(QStringLiteral("回测归档 %1 的 Tick 交易标记无效，拒绝恢复")
+                                     .arg(resultId));
+                return std::nullopt;
+            }
             record.result.chartSignals.append(signal);
         }
-        if (record.result.chartSignals.size() != storedSignalCount) {
+        if (!sharedRawTicks && record.result.chartSignals.size() != storedSignalCount) {
             emit writeFailed(QStringLiteral(
                 "回测归档 %1 的原始 Tick 信号快照读取不完整，拒绝恢复")
                                  .arg(resultId));
@@ -6464,7 +7288,9 @@ SqliteLocalDataStore::loadBacktestRawTickPage(
     QSqlQuery identityQuery(m_database);
     identityQuery.prepare(QStringLiteral(
         "select symbol, name, market, venue, actual_bars, data_mode, "
-        "raw_tick_series_version from backtest_results where result_id = ?"));
+        "raw_tick_series_version, shared_raw_tick_result_id, task_id, "
+        "from_utc, to_utc, data_version, dataset_version "
+        "from backtest_results where result_id = ?"));
     identityQuery.addBindValue(resultId);
     if (!identityQuery.exec()) {
         emitSqlError(QStringLiteral("读取分页回测原始 Tick 身份"));
@@ -6472,8 +7298,38 @@ SqliteLocalDataStore::loadBacktestRawTickPage(
     }
     if (!identityQuery.next()
         || identityQuery.value(5).toString() != QStringLiteral("raw_ticks")
-        || identityQuery.value(6).toInt() <= 0) {
+        || identityQuery.value(6).toInt() <= 0
+        || identityQuery.value(6).toInt() > 2) {
         return std::nullopt;
+    }
+    QString tickOwnerResultId = resultId;
+    const QString sharedRawTickResultId = identityQuery.value(7).toString();
+    if ((identityQuery.value(6).toInt() == 2) != !sharedRawTickResultId.isEmpty())
+        return std::nullopt;
+    if (!sharedRawTickResultId.isEmpty()) {
+        QSqlQuery owner(m_database);
+        owner.prepare(QStringLiteral(
+            "select task_id, symbol, actual_bars, from_utc, to_utc, data_version, "
+            "dataset_version from backtest_results where result_id=? "
+            "and data_mode='raw_ticks' and raw_tick_series_version=1 "
+            "and shared_raw_tick_result_id is null"));
+        owner.addBindValue(sharedRawTickResultId);
+        const QString taskId = identityQuery.value(8).toString();
+        if (!owner.exec() || !owner.next() || sharedRawTickResultId == resultId
+            || !taskId.contains(QLatin1Char(':'))
+            || owner.value(0).toString().section(QLatin1Char(':'), 0, 0)
+                != taskId.section(QLatin1Char(':'), 0, 0)
+            || owner.value(1).toString() != identityQuery.value(0).toString()
+            || owner.value(2).toInt() != identityQuery.value(4).toInt()
+            || owner.value(3).toString() != identityQuery.value(9).toString()
+            || owner.value(4).toString() != identityQuery.value(10).toString()
+            || owner.value(5).toString() != identityQuery.value(11).toString()
+            || owner.value(6).toString() != identityQuery.value(12).toString()) {
+            emit writeFailed(QStringLiteral("回测归档 %1 的共享 Tick 身份不一致，拒绝分页")
+                                 .arg(resultId));
+            return std::nullopt;
+        }
+        tickOwnerResultId = sharedRawTickResultId;
     }
 
     BacktestRawTickPage page;
@@ -6499,7 +7355,7 @@ SqliteLocalDataStore::loadBacktestRawTickPage(
         "select timestamp_utc, trading_date, source_line, price, volume_shares, amount, "
         "direction, source from backtest_raw_ticks where result_id = ? "
         "order by sequence_no asc limit ? offset ?"));
-    pageQuery.addBindValue(resultId);
+    pageQuery.addBindValue(tickOwnerResultId);
     pageQuery.addBindValue(pageSize);
     pageQuery.addBindValue(offset);
     if (!pageQuery.exec()) {
@@ -7500,10 +8356,16 @@ bool SqliteLocalDataStore::ensureSchema()
             "final_position_entry_commission real not null default 0, "
             "final_position_entry_time_utc text not null default '', "
             "final_position_entry_reason text not null default '', "
-            "sample_from_utc text, sample_to_utc text)"),
+            "sample_from_utc text, sample_to_utc text, "
+            "shared_candle_result_id text references backtest_results(result_id) on delete cascade, "
+            "candle_content_sha256 text not null default '', "
+            "shared_raw_tick_result_id text references backtest_results(result_id) on delete cascade)"),
         QStringLiteral(
             "create index if not exists idx_backtest_results_completed "
             "on backtest_results(completed_at_utc desc, result_id desc)"),
+        QStringLiteral(
+            "create index if not exists idx_backtest_results_task_id "
+            "on backtest_results(task_id, completed_at_utc desc)"),
         QStringLiteral(
             "create table if not exists backtest_equity_points("
             "result_id text not null, sequence_no integer not null, timestamp_utc text not null, "
@@ -7531,6 +8393,13 @@ bool SqliteLocalDataStore::ensureSchema()
             "signal_side integer, signal_price real not null default 0, "
             "signal_volume real not null default 0, signal_reason text not null default '', "
             "primary key(result_id, sequence_no), unique(result_id, start_time_utc), "
+            "foreign key(result_id) references backtest_results(result_id) on delete cascade)"),
+        QStringLiteral(
+            "create table if not exists backtest_chart_signals("
+            "result_id text not null, sequence_no integer not null, "
+            "timestamp_utc text not null, signal_side integer not null, "
+            "signal_price real not null, signal_volume real not null, "
+            "signal_reason text not null, primary key(result_id, sequence_no), "
             "foreign key(result_id) references backtest_results(result_id) on delete cascade)"),
         QStringLiteral(
             "create table if not exists backtest_raw_ticks("
@@ -7601,6 +8470,33 @@ bool SqliteLocalDataStore::ensureSchema()
         QStringLiteral(
             "create index if not exists idx_batch_backtest_run_items_status "
             "on batch_backtest_run_items(run_id, status, symbol)"),
+        QStringLiteral(
+            "create table if not exists strategy_matrix_runs("
+            "run_id text primary key, created_at_utc text not null, "
+            "completed_at_utc text not null default '', request_json text not null, "
+            "status text not null, error text not null default '', "
+            "total_tasks integer not null check(total_tasks > 0))"),
+        QStringLiteral(
+            "create index if not exists idx_strategy_matrix_runs_created "
+            "on strategy_matrix_runs(created_at_utc desc, run_id desc)"),
+        QStringLiteral(
+            "create table if not exists strategy_matrix_tasks("
+            "run_id text not null, task_id text primary key, strategy_id text not null, "
+            "profile_label text not null default '', strategy_version integer not null, "
+            "parameter_fingerprint text not null, symbol text not null, "
+            "dataset_version text not null, data_version text not null default '', "
+            "status text not null, error text not null default '', "
+            "result_id text not null default '', actual_bars integer not null default 0, "
+            "elapsed_milliseconds integer not null default 0, "
+            "total_return_percent real not null default 0, "
+            "max_drawdown_percent real not null default 0, "
+            "total_trades integer not null default 0, "
+            "total_commission real not null default 0, "
+            "final_equity real not null default 0, "
+            "foreign key(run_id) references strategy_matrix_runs(run_id) on delete cascade)"),
+        QStringLiteral(
+            "create index if not exists idx_strategy_matrix_tasks_run_status "
+            "on strategy_matrix_tasks(run_id, status, symbol)"),
         QStringLiteral(
             "create table if not exists portfolio_backtest_results("
             "result_id text primary key, portfolio_id text not null, name text not null, "
@@ -7770,6 +8666,12 @@ bool SqliteLocalDataStore::ensureSchema()
                          QStringLiteral("text"))
         || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("sample_to_utc"),
                          QStringLiteral("text"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("shared_candle_result_id"),
+                         QStringLiteral("text references backtest_results(result_id) on delete cascade"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("candle_content_sha256"),
+                         QStringLiteral("text not null default ''"))
+        || !ensureColumn(QStringLiteral("backtest_results"), QStringLiteral("shared_raw_tick_result_id"),
+                         QStringLiteral("text references backtest_results(result_id) on delete cascade"))
         || !ensureColumn(QStringLiteral("batch_backtest_runs"),
                          QStringLiteral("data_mode"),
                          QStringLiteral("text not null default 'candles'"))

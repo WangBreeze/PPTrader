@@ -371,7 +371,10 @@ public:
         }
 
         m_store = std::make_unique<SqliteLocalDataStore>();
-        if (!m_store->initialize(databasePath)) {
+        const bool opened = m_request.archiveProfitableResults
+            ? m_store->initialize(databasePath)
+            : m_store->initializeReadOnly(databasePath);
+        if (!opened) {
             finish(false, QStringLiteral("批量回测 SQLite 连接失败"));
             return;
         }
@@ -1099,6 +1102,27 @@ private:
                         job->holdoutIdentity.datasetVersion;
                     item.trainingSummary = job->trainingSummary;
                     item.holdoutSummary = result.summary;
+                }
+                if (m_request.archiveProfitableResults
+                    && isProfitableBacktestForArchive(result)) {
+                    BacktestArchiveRecord archive;
+                    archive.resultId = QUuid::createUuid().toString(
+                        QUuid::WithoutBraces);
+                    archive.completedAt = QDateTime::currentDateTimeUtc();
+                    archive.result = result;
+                    QString archiveError;
+                    const bool saved = result.rawTickSnapshotDeferred
+                        ? m_store->saveDeferredRawTickBacktestArchive(
+                              archive, {}, &archiveError)
+                        : m_store->saveBacktestArchive(archive);
+                    if (saved) {
+                        item.archived = true;
+                        item.archivedResultId = archive.resultId;
+                    } else {
+                        item.error = archiveError.isEmpty()
+                            ? QStringLiteral("盈利回测归档失败")
+                            : QStringLiteral("盈利回测归档失败：%1").arg(archiveError);
+                    }
                 }
                 postCompleted(job->dataset.instrument.symbol, result);
                 completeEngine(engine, item, job);

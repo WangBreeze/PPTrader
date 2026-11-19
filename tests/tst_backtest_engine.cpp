@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace pp {
 
@@ -17,6 +18,7 @@ class BacktestEngineTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void profitOnlyArchiveGateUsesNetEndingEquity();
     void producesDeterministicTradesAndEquityCurve();
     void exposesStableStrategyCatalogAndParameterSchema();
     void runsRawTickBacktestOnlyWithCompatibleStrategy();
@@ -101,6 +103,33 @@ static QVector<Candle> waveCandles(int count)
         candles.append(candle);
     }
     return candles;
+}
+
+void BacktestEngineTest::profitOnlyArchiveGateUsesNetEndingEquity()
+{
+    PerformanceSummary summary;
+    summary.initialCapital = 1000000.0;
+    summary.finalEquity = 1000000.0;
+    summary.totalReturnPercent = 0.0;
+    QVERIFY(!isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
+
+    summary.finalEquity = 999999.99;
+    summary.totalReturnPercent = -0.000001;
+    QVERIFY(!isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
+
+    summary.finalEquity = 1000000.01;
+    summary.totalReturnPercent = 0.000001;
+    QVERIFY(!isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
+    summary.totalTrades = 1;
+    QVERIFY(isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
+    summary.totalTrades = 0;
+    QVERIFY(isProfitableBacktestForArchive(summary, BacktestDataMode::Candles));
+
+    summary.finalEquity = std::numeric_limits<double>::quiet_NaN();
+    QVERIFY(!isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
+    summary.finalEquity = 1000000.01;
+    summary.totalReturnPercent = std::numeric_limits<double>::infinity();
+    QVERIFY(!isProfitableBacktestForArchive(summary, BacktestDataMode::RawTicks));
 }
 
 void BacktestEngineTest::candleResultModelRetainsConfiguredBacktestLimit()
@@ -194,7 +223,7 @@ void BacktestEngineTest::exposesStableStrategyCatalogAndParameterSchema()
 {
     BacktestStrategyRegistry registry;
     const QVariantList catalog = registry.catalog();
-    QCOMPARE(catalog.size(), 10);
+    QCOMPARE(catalog.size(), 11);
     QCOMPARE(catalog.at(0).toMap().value(QStringLiteral("strategyId")).toString(),
              QStringLiteral("sma_crossover"));
     QCOMPARE(catalog.at(1).toMap().value(QStringLiteral("strategyId")).toString(),
@@ -215,6 +244,8 @@ void BacktestEngineTest::exposesStableStrategyCatalogAndParameterSchema()
              QStringLiteral("tick_second_board"));
     QCOMPARE(catalog.at(9).toMap().value(QStringLiteral("strategyId")).toString(),
              QStringLiteral("tick_third_board"));
+    QCOMPARE(catalog.at(10).toMap().value(QStringLiteral("strategyId")).toString(),
+             QStringLiteral("stoch_mean_reversion"));
     const QVariantList rawParameters = catalog.at(4).toMap()
                                            .value(QStringLiteral("parameters")).toList();
     QCOMPARE(rawParameters.size(), 4);
@@ -226,8 +257,10 @@ void BacktestEngineTest::exposesStableStrategyCatalogAndParameterSchema()
         QVERIFY(!descriptor.value(QStringLiteral("name")).toString().isEmpty());
         QVERIFY(descriptor.value(QStringLiteral("minimumWarmupBars")).toInt() > 0);
         QVERIFY(!descriptor.value(QStringLiteral("parameters")).toList().isEmpty());
-        QCOMPARE(descriptor.value(QStringLiteral("supportsCandles")).toBool(), index < 4);
-        QCOMPARE(descriptor.value(QStringLiteral("supportsRawTicks")).toBool(), index >= 4);
+        QCOMPARE(descriptor.value(QStringLiteral("supportsCandles")).toBool(),
+                 index < 4 || index == 10);
+        QCOMPARE(descriptor.value(QStringLiteral("supportsRawTicks")).toBool(),
+                 index >= 4 && index < 10);
     }
 
     QVERIFY(registry.supportsDataMode(QStringLiteral("sma_crossover"),
@@ -971,7 +1004,8 @@ void BacktestEngineTest::runsEveryRegisteredStrategy()
         QStringLiteral("sma_crossover"),
         QStringLiteral("rsi_mean_reversion"),
         QStringLiteral("macd_trend"),
-        QStringLiteral("bollinger_mean_reversion")
+        QStringLiteral("bollinger_mean_reversion"),
+        QStringLiteral("stoch_mean_reversion")
     };
     for (int index = 0; index < strategyIds.size(); ++index) {
         BacktestConfig config;

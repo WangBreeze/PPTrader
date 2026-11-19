@@ -12,6 +12,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimeZone>
 
 #include <limits>
 
@@ -47,13 +48,39 @@ private slots:
     void obvAccumulatesSignedVolumeWithoutBridgingMissingBars();
     void mfiUsesTypicalMoneyFlowAndNeedsPeriodComparisons();
     void kdjUsesRecursiveSmoothingAndDistinctParameterIdentities();
+    void tradingViewStochAndSupertrendUseOnlyCompletedBars();
     void expandedIndicatorOptionsRequireIntegerParameterReferences_data();
     void expandedIndicatorOptionsRequireIntegerParameterReferences();
     void expandedIndicatorsNeverPublishOverflowedCalculations_data();
     void expandedIndicatorsNeverPublishOverflowedCalculations();
     void expandedCatalogueDefaultsCompileInV2V3ButNotV1_data();
     void expandedCatalogueDefaultsCompileInV2V3ButNotV1();
+    void indicatorHistoryRemainsBoundedAcrossLongTickInput();
 };
+
+void CustomStrategyTest::indicatorHistoryRemainsBoundedAcrossLongTickInput()
+{
+    CompiledCustomIndicator sma;
+    sma.kind = CustomIndicatorKind::Sma;
+    sma.period = 20;
+    CustomIndicatorRuntime runtime({sma});
+    Candle observation;
+    observation.instrument = {QStringLiteral("600519"), QStringLiteral("长序列测试"),
+                              Market::AShare, QStringLiteral("SSE")};
+    observation.startTime = QDateTime(QDate(2026, 11, 9), QTime(1, 30),
+                                      QTimeZone("UTC"));
+    observation.volume = 100.0;
+    for (int index = 0; index < 10000; ++index) {
+        observation.close = observation.open = observation.high = observation.low
+            = 100.0 + (index % 10);
+        observation.startTime = observation.startTime.addMSecs(1);
+        runtime.append(observation);
+    }
+    QCOMPARE(runtime.barCount(), 10000);
+    QVERIFY(runtime.residentObservationCount() <= 44);
+    QVERIFY(runtime.value(0).has_value());
+    QCOMPARE(*runtime.value(0), 104.5);
+}
 
 static QJsonObject indicator(const QString &name, const QJsonValue &period)
 {
@@ -524,6 +551,70 @@ void CustomStrategyTest::kdjUsesRecursiveSmoothingAndDistinctParameterIdentities
     QVERIFY(!validator.validate(singleIndicatorDocument(invalid), nullptr, &error));
 }
 
+void CustomStrategyTest::tradingViewStochAndSupertrendUseOnlyCompletedBars()
+{
+    CustomStrategyValidator validator;
+    CustomStrategyDefinition definition;
+    QString error;
+    QJsonObject stoch = indicator(QStringLiteral("STOCH"), 3);
+    stoch.insert(QStringLiteral("kPeriod"), 2);
+    stoch.insert(QStringLiteral("dPeriod"), 2);
+    stoch.insert(QStringLiteral("output"), QStringLiteral("d"));
+    QVERIFY2(validator.validate(singleIndicatorDocument(stoch), &definition, &error),
+             qPrintable(error));
+    auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 5);
+    CustomIndicatorRuntime stochRuntime(plan->indicators);
+    for (int row = 0; row < 4; ++row) {
+        stochRuntime.append(indicatorBar(10 + row, 11 + row, 9 + row));
+        QVERIFY(!stochRuntime.value(0));
+    }
+    stochRuntime.append(indicatorBar(14, 15, 13));
+    QVERIFY(stochRuntime.value(0));
+    QVERIFY(std::isfinite(*stochRuntime.value(0)));
+    stoch.insert(QStringLiteral("output"), QStringLiteral("k"));
+    QVERIFY2(validator.validate(singleIndicatorDocument(stoch), &definition, &error),
+             qPrintable(error));
+    plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->minimumWarmupBars, 4);
+    QVERIFY(!validator.validate(singleIndicatorDocument(
+        QJsonObject{{QStringLiteral("indicator"), QStringLiteral("STOCH")},
+                    {QStringLiteral("period"), 3}, {QStringLiteral("kPeriod"), 0},
+                    {QStringLiteral("dPeriod"), 2},
+                    {QStringLiteral("output"), QStringLiteral("d")}}), nullptr, &error));
+
+    QJsonObject trend = indicator(QStringLiteral("SUPERTREND"), 3);
+    trend.insert(QStringLiteral("multiplier"), 2.0);
+    trend.insert(QStringLiteral("output"), QStringLiteral("direction"));
+    QVERIFY2(validator.validate(singleIndicatorDocument(trend), &definition, &error),
+             qPrintable(error));
+    plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    CustomIndicatorRuntime trendRuntime(plan->indicators);
+    for (int row = 0; row < 2; ++row) {
+        trendRuntime.append(indicatorBar(10, 11, 9));
+        QVERIFY(!trendRuntime.value(0));
+    }
+    trendRuntime.append(indicatorBar(10, 11, 9));
+    QCOMPARE(*trendRuntime.value(0), -1.0);
+    trendRuntime.append(indicatorBar(16, 17, 15));
+    QCOMPARE(*trendRuntime.value(0), 1.0);
+    trend.insert(QStringLiteral("output"), QStringLiteral("line"));
+    QVERIFY2(validator.validate(singleIndicatorDocument(trend), &definition, &error),
+             qPrintable(error));
+    plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    CustomIndicatorRuntime lineRuntime(plan->indicators);
+    for (int row = 0; row < 3; ++row) lineRuntime.append(indicatorBar(10, 11, 9));
+    QCOMPARE(*lineRuntime.value(0), 14.0);
+    lineRuntime.append(indicatorBar(16, 17, 15));
+    QVERIFY(*lineRuntime.value(0) < 16.0);
+    trend.insert(QStringLiteral("multiplier"), 0.0);
+    QVERIFY(!validator.validate(singleIndicatorDocument(trend), nullptr, &error));
+}
+
 void CustomStrategyTest::expandedIndicatorOptionsRequireIntegerParameterReferences_data()
 {
     QTest::addColumn<QString>("name");
@@ -670,9 +761,9 @@ void CustomStrategyTest::expandedCatalogueDefaultsCompileInV2V3ButNotV1()
     QFETCH(double, flatValue);
     CustomStrategyValidator validator;
     const QVariantMap catalogue = validator.schemaDescriptor();
-    QCOMPARE(catalogue.value(QStringLiteral("indicators")).toStringList().size(), 18);
+    QCOMPARE(catalogue.value(QStringLiteral("indicators")).toStringList().size(), 20);
     const auto schemas = catalogue.value(QStringLiteral("indicatorSchemas")).toList();
-    QCOMPARE(schemas.size(), 18);
+    QCOMPARE(schemas.size(), 20);
     QVariantMap schema;
     for (const auto &item : schemas) {
         if (item.toMap().value(QStringLiteral("name")).toString() == name) schema = item.toMap();
@@ -778,7 +869,7 @@ void CustomStrategyTest::exposesIndicatorParameterSchemaForWizard()
     const QVariantList schemas = validator.schemaDescriptor()
                                      .value(QStringLiteral("indicatorSchemas"))
                                      .toList();
-    QCOMPARE(schemas.size(), 18);
+    QCOMPARE(schemas.size(), 20);
 
     auto findSchema = [&schemas](const QString &name) {
         for (const QVariant &value : schemas) {

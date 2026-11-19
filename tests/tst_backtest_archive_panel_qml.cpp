@@ -17,6 +17,9 @@ class BacktestArchivePanelControllerStub final : public QObject {
     Q_PROPERTY(QAbstractItemModel *backtestArchiveRawTickModel
                READ backtestArchiveRawTickModel CONSTANT)
     Q_PROPERTY(int backtestArchiveCount READ backtestArchiveCount CONSTANT)
+    Q_PROPERTY(QVariantMap backtestArchiveStorage READ backtestArchiveStorage CONSTANT)
+    Q_PROPERTY(bool backtestArchiveCompactionRunning READ falseValue CONSTANT)
+    Q_PROPERTY(QString backtestArchiveCompactionError READ emptyString CONSTANT)
     Q_PROPERTY(QString selectedBacktestArchiveId READ selectedBacktestArchiveId
                NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(bool backtestArchiveLoading READ falseValue CONSTANT)
@@ -70,6 +73,13 @@ public:
     QAbstractItemModel *backtestArchiveModel() { return &m_archives; }
     QAbstractItemModel *backtestArchiveRawTickModel() { return &m_ticks; }
     int backtestArchiveCount() const { return m_archives.count(); }
+    QVariantMap backtestArchiveStorage() const
+    {
+        return {{QStringLiteral("archiveBytes"), 4096},
+                {QStringLiteral("databaseBytes"), 8192},
+                {QStringLiteral("walBytes"), 0},
+                {QStringLiteral("reusableBytes"), 4096}};
+    }
     QString selectedBacktestArchiveId() const { return m_selectedResultId; }
     bool falseValue() const { return false; }
     bool trueValue() const { return true; }
@@ -87,6 +97,16 @@ public:
     int totalCount() const { return 12; }
 
     Q_INVOKABLE bool loadBacktestArchive(const QString &) { return true; }
+    Q_INVOKABLE bool deleteBacktestArchive(const QString &resultId)
+    {
+        m_lastDeletedResultId = resultId;
+        return true;
+    }
+    Q_INVOKABLE bool compactBacktestArchiveStorage()
+    {
+        m_compactionRequested = true;
+        return true;
+    }
     Q_INVOKABLE void refreshBacktestArchiveList() {}
     Q_INVOKABLE qulonglong requestBacktestArchiveRawTickPage(
         const QString &resultId, int offset, int requestedPageSize)
@@ -102,9 +122,16 @@ public:
         m_selectedResultId = QStringLiteral("other-result");
         emit backtestArchiveStateChanged();
     }
+    void selectOriginalArchive()
+    {
+        m_selectedResultId = QStringLiteral("raw-result-1");
+        emit backtestArchiveStateChanged();
+    }
     QString lastRequestedResultId() const { return m_lastRequestedResultId; }
     int lastRequestedOffset() const { return m_lastRequestedOffset; }
     int lastRequestedPageSize() const { return m_lastRequestedPageSize; }
+    QString lastDeletedResultId() const { return m_lastDeletedResultId; }
+    bool compactionRequested() const { return m_compactionRequested; }
 
 signals:
     void backtestArchiveStateChanged();
@@ -117,6 +144,8 @@ private:
     QString m_lastRequestedResultId;
     int m_lastRequestedOffset = -1;
     int m_lastRequestedPageSize = 0;
+    QString m_lastDeletedResultId;
+    bool m_compactionRequested = false;
 };
 
 class BacktestArchivePanelQmlTest final : public QObject {
@@ -167,6 +196,36 @@ void BacktestArchivePanelQmlTest::rawTickBrowserRequestsFirstPageAndClosesForDif
     controller.selectDifferentArchive();
     QTRY_VERIFY_WITH_TIMEOUT(
         !panel->property("rawTickBrowserOpened").toBool(), 1000);
+
+    controller.selectOriginalArchive();
+    QVERIFY(QMetaObject::invokeMethod(panel.get(), "restoreSelection"));
+    QObject *deleteButton = panel->findChild<QObject *>(
+        QStringLiteral("deleteBacktestArchiveButton"));
+    QObject *confirmation = panel->findChild<QObject *>(
+        QStringLiteral("deleteBacktestArchiveConfirm"));
+    QObject *confirmButton = panel->findChild<QObject *>(
+        QStringLiteral("confirmDeleteBacktestArchiveButton"));
+    QVERIFY(deleteButton);
+    QVERIFY(confirmation);
+    QVERIFY(confirmButton);
+    QVERIFY(QMetaObject::invokeMethod(deleteButton, "clicked"));
+    QTRY_VERIFY_WITH_TIMEOUT(confirmation->property("opened").toBool(), 1000);
+    QVERIFY(QMetaObject::invokeMethod(confirmButton, "clicked"));
+    QCOMPARE(controller.lastDeletedResultId(), QStringLiteral("raw-result-1"));
+
+    QObject *compactButton = panel->findChild<QObject *>(
+        QStringLiteral("compactBacktestArchiveButton"));
+    QObject *compactConfirm = panel->findChild<QObject *>(
+        QStringLiteral("compactBacktestArchiveConfirm"));
+    QObject *startCompaction = panel->findChild<QObject *>(
+        QStringLiteral("confirmCompactBacktestArchiveButton"));
+    QVERIFY(compactButton);
+    QVERIFY(compactConfirm);
+    QVERIFY(startCompaction);
+    QVERIFY(QMetaObject::invokeMethod(compactButton, "clicked"));
+    QTRY_VERIFY_WITH_TIMEOUT(compactConfirm->property("opened").toBool(), 1000);
+    QVERIFY(QMetaObject::invokeMethod(startCompaction, "clicked"));
+    QVERIFY(controller.compactionRequested());
 }
 
 } // namespace pp

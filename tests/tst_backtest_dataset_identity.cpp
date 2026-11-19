@@ -110,7 +110,7 @@ void BacktestDatasetIdentityTest::emptyDatabaseHasNoIdentity()
     QVERIFY(directory.isValid());
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(directory.filePath(QStringLiteral("empty.db"))));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
     QVERIFY(store.loadBacktestDatasetIdentities().isEmpty());
     QVERIFY(!store.loadBacktestDatasetIdentity(instrument(), 60).has_value());
 }
@@ -556,7 +556,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(databasePath));
-        QCOMPARE(store.schemaVersion(), 25);
+        QCOMPARE(store.schemaVersion(), 28);
     }
 
     // 模拟旧 v2 库：降低 user_version 后重新打开，应自动备份并升级到当前版本。
@@ -573,7 +573,7 @@ void BacktestDatasetIdentityTest::v3MigrationAddsColumnsAndHistory()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
     QVERIFY(!store.lastMigrationBackupPath().isEmpty());
 
     {

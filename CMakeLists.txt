@@ -156,6 +156,8 @@ qt_add_executable(PPTrader
     src/services/BacktestDatasetService.h
     src/services/BatchBacktestService.cpp
     src/services/BatchBacktestService.h
+    src/services/StrategyMatrixBacktestService.cpp
+    src/services/StrategyMatrixBacktestService.h
     src/services/BatchBacktestResultRetention.h
     src/services/BacktestDataVersion.cpp
     src/services/BacktestDataVersion.h
@@ -303,6 +305,10 @@ qt_add_executable(PPTrader
     src/services/StrategyExecutionStore.h
     src/services/TickDataCsvImporter.cpp
     src/services/TickDataCsvImporter.h
+    src/services/TickDataLiveFeed.cpp
+    src/services/TickDataLiveFeed.h
+    src/services/TickDataLiveProvider.cpp
+    src/services/TickDataLiveProvider.h
     src/services/RawTickSourceQualityAdapter.cpp
     src/services/RawTickSourceQualityAdapter.h
     src/services/TickDataBatchPlanner.cpp
@@ -417,6 +423,8 @@ qt_add_qml_module(PPTrader
         qml/components/BacktestCandleChart.qml
         qml/components/BacktestArchivePanel.qml
         qml/components/BatchBacktestPanel.qml
+        qml/components/StrategyMatrixPanel.qml
+        qml/components/StrategyMatrixParameterDialog.qml
         qml/components/PortfolioBacktestPanel.qml
         qml/components/CrossSectionalBacktestPanel.qml
         qml/components/CrossSectionalBacktestContract.js
@@ -530,6 +538,7 @@ if(BUILD_TESTING)
         -P "${CMAKE_SOURCE_DIR}/tests/tst_qt_scrollbar_runtime.cmake")
     set_tests_properties(qt_scrollbar_runtime_guard PROPERTIES TIMEOUT 30)
     target_sources(PPTrader PRIVATE tests/TradingControllerWizardProbe.cpp src/app/WizardContractProbe.h)
+    target_sources(PPTrader PRIVATE tests/TradingControllerMatrixProbe.cpp src/app/StrategyMatrixContractProbe.h)
     target_sources(PPTrader PRIVATE tests/TradingControllerPaperProbe.cpp)
     target_sources(PPTrader PRIVATE tests/PaperFlowAcceptance.cpp)
     add_test(NAME paper_strategy_controller
@@ -687,6 +696,8 @@ if(BUILD_TESTING)
 
     qt_add_executable(tst_batch_backtest
         tests/tst_batch_backtest.cpp
+        src/services/StrategyMatrixBacktestService.cpp
+        src/services/StrategyMatrixBacktestService.h
         src/domain/PortfolioTypes.cpp
         src/domain/PortfolioTypes.h
         src/domain/BacktestDataQualityTypes.cpp
@@ -746,6 +757,14 @@ if(BUILD_TESTING)
         src/strategy/RsiMeanReversionStrategy.h
         src/strategy/SmaCrossoverStrategy.cpp
         src/strategy/SmaCrossoverStrategy.h
+        src/strategy/CustomBacktestStrategy.cpp
+        src/strategy/CustomBacktestStrategy.h
+        src/strategy/CustomIndicatorRuntime.cpp
+        src/strategy/CustomIndicatorRuntime.h
+        src/strategy/CustomStrategyCompiler.cpp
+        src/strategy/CustomStrategyCompiler.h
+        src/strategy/CustomStrategyValidator.cpp
+        src/strategy/CustomStrategyValidator.h
         src/strategy/Strategy.h
     )
     target_include_directories(tst_batch_backtest PRIVATE src)
@@ -963,6 +982,32 @@ if(BUILD_TESTING)
     )
     target_include_directories(pptrader_real_load_probe PRIVATE src)
     target_link_libraries(pptrader_real_load_probe PRIVATE Qt6::Core Qt6::Sql)
+
+    get_target_property(_universe_benchmark_sources pptrader_real_load_probe SOURCES)
+    list(REMOVE_ITEM _universe_benchmark_sources tools/real_load_backtest_probe.cpp)
+    qt_add_executable(pptrader_universe_benchmark
+        tools/universe_backtest_benchmark.cpp
+        ${_universe_benchmark_sources}
+        src/services/RawTickParameterSensitivityTypes.cpp
+    )
+    target_include_directories(pptrader_universe_benchmark PRIVATE src)
+    target_link_libraries(pptrader_universe_benchmark PRIVATE Qt6::Core Qt6::Sql)
+
+    qt_add_executable(pptrader_custom_raw_tick_backtest
+        tools/custom_raw_tick_backtest.cpp
+        ${_universe_benchmark_sources}
+        src/strategy/CustomBacktestStrategy.cpp
+        src/strategy/CustomBacktestStrategy.h
+        src/strategy/CustomIndicatorRuntime.cpp
+        src/strategy/CustomIndicatorRuntime.h
+        src/strategy/CustomStrategyCompiler.cpp
+        src/strategy/CustomStrategyCompiler.h
+        src/strategy/CustomStrategyValidator.cpp
+        src/strategy/CustomStrategyValidator.h
+        src/services/RawTickParameterSensitivityTypes.cpp
+    )
+    target_include_directories(pptrader_custom_raw_tick_backtest PRIVATE src)
+    target_link_libraries(pptrader_custom_raw_tick_backtest PRIVATE Qt6::Core Qt6::Sql)
 
     qt_add_executable(pptrader_raw_tick_sensitivity_probe
         tools/raw_tick_parameter_sensitivity_probe.cpp
@@ -1314,6 +1359,8 @@ if(BUILD_TESTING)
         tools/chart_frame_probe.cpp
         src/domain/LocalCandleSeriesTypes.h
         src/domain/MarketTypes.h
+        src/models/CandleListModel.cpp
+        src/models/CandleListModel.h
         src/models/LocalCandleSeriesListModel.cpp
         src/models/LocalCandleSeriesListModel.h
         src/visualization/FrameTimingStatistics.cpp
@@ -1329,6 +1376,25 @@ if(BUILD_TESTING)
     if(WIN32)
         target_link_libraries(pptrader_chart_frame_probe PRIVATE Psapi)
     endif()
+
+    qt_add_executable(pptrader_backtest_chart_replay_probe
+        tools/backtest_chart_replay_probe.cpp
+        src/domain/BacktestTypes.h
+        src/domain/MarketTypes.h
+        src/models/CandleListModel.cpp
+        src/models/CandleListModel.h
+        src/models/LocalCandleSeriesListModel.cpp
+        src/models/LocalCandleSeriesListModel.h
+        src/visualization/FrameTimingStatistics.cpp
+        src/visualization/FrameTimingStatistics.h
+        src/visualization/LocalCandlePlotData.cpp
+        src/visualization/LocalCandlePlotData.h
+        src/visualization/LocalCandleSeriesItem.cpp
+        src/visualization/LocalCandleSeriesItem.h
+    )
+    target_include_directories(pptrader_backtest_chart_replay_probe PRIVATE src)
+    target_link_libraries(pptrader_backtest_chart_replay_probe PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Sql)
 
     qt_add_executable(tst_backtest_dataset_identity
         tests/tst_backtest_dataset_identity.cpp
@@ -1648,6 +1714,14 @@ if(BUILD_TESTING)
     target_compile_definitions(tst_backtest_archive_panel_qml PRIVATE
         PPTRADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(tst_backtest_archive_panel_qml PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
+
+    qt_add_executable(tst_strategy_matrix_parameter_dialog_qml
+        tests/tst_strategy_matrix_parameter_dialog_qml.cpp)
+    target_include_directories(tst_strategy_matrix_parameter_dialog_qml PRIVATE src)
+    target_compile_definitions(tst_strategy_matrix_parameter_dialog_qml PRIVATE
+        PPTRADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(tst_strategy_matrix_parameter_dialog_qml PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
 
     qt_add_executable(tst_parameter_grid_scanner
@@ -2210,6 +2284,11 @@ if(BUILD_TESTING)
     set_tests_properties(focus_availability_qml PROPERTIES TIMEOUT 30
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME backtest_archive_panel_qml COMMAND tst_backtest_archive_panel_qml)
+    add_test(NAME strategy_matrix_parameter_dialog_qml
+        COMMAND tst_strategy_matrix_parameter_dialog_qml)
+    set_tests_properties(strategy_matrix_parameter_dialog_qml PROPERTIES TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "QT_QPA_PLATFORMTHEME=unset:;GTK_MODULES=unset:")
     add_test(NAME parameter_grid_scanner COMMAND tst_parameter_grid_scanner)
     add_test(NAME log_service COMMAND tst_log_service)
     add_test(NAME workspace_instrument_selection COMMAND tst_workspace_instrument_selection)

@@ -9,6 +9,8 @@
 
 #include <QFile>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QJsonArray>
 #include <QJSEngine>
 #include <QJsonDocument>
 #include <QSignalSpy>
@@ -53,7 +55,7 @@ BacktestConfig configFor(const CompiledCustomStrategy &plan, const QString &task
     config.strategyId = plan.strategyId;
     config.strategyVersion = plan.version;
     config.strategyParameters = plan.normalizedParameters;
-    config.ruleSnapshot = plan.rules.toVariantMap();
+    config.ruleSnapshot = plan.ruleSnapshot();
     config.instrument = fixtureInstrument();
     config.frequency = QStringLiteral("day");
     config.periodSeconds = 86400;
@@ -73,7 +75,267 @@ class CustomStrategyLifecycleTest final : public QObject {
 private slots:
     void wizardBiasStrategySurvivesRestartAndRunsWithIndependentAccounts();
     void wizardBiasWmaSurvivesRawTickImportRestartArchiveAndAccountReuse();
+    void realTickDerivedMinuteBarsRunFrozenCustomDefinition();
+    void customRawTicksExecuteOnNextObservationWithTPlusOne();
+    void realRawTicksRunFrozenCustomDefinition();
 };
+
+void CustomStrategyLifecycleTest::customRawTicksExecuteOnNextObservationWithTPlusOne()
+{
+    QJsonObject document {
+        {QStringLiteral("schemaVersion"), 2},
+        {QStringLiteral("strategyId"), QStringLiteral("custom_raw_tick_lifecycle")},
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("name"), QStringLiteral("逐笔自定义策略验收")},
+        {QStringLiteral("description"), QStringLiteral("只验证因果成交时点")},
+        {QStringLiteral("author"), QStringLiteral("Qt Test")},
+        {QStringLiteral("market"), QStringLiteral("A股")},
+        {QStringLiteral("executionScope"), QStringLiteral("backtest_only")},
+        {QStringLiteral("createdAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("updatedAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("parameters"), QJsonArray{}},
+        {QStringLiteral("entry"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("gt")},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 100.0}}}}},
+        {QStringLiteral("exit"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("lt")},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 100.0}}}}},
+        {QStringLiteral("signal"), QJsonObject{
+            {QStringLiteral("priceMode"), QStringLiteral("nextOpen")}}}
+    };
+    CustomStrategyValidator validator;
+    CustomStrategyCompiler compiler;
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(validator.validate(document, &definition, &error), qPrintable(error));
+    const auto plan = compiler.compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+
+    const QDate firstDay(2026, 11, 9);
+    const QTimeZone shanghai("Asia/Shanghai");
+    const QVector<double> prices {90.0, 105.0, 110.0, 95.0, 90.0, 85.0};
+    QVector<RawTradeTick> ticks;
+    for (int index = 0; index < prices.size(); ++index) {
+        RawTradeTick tick;
+        tick.instrument = fixtureInstrument();
+        tick.tradingDate = index == 5 ? firstDay.addDays(1) : firstDay;
+        tick.timestamp = QDateTime(tick.tradingDate, QTime(9, 30), shanghai)
+            .addSecs(index == 5 ? 0 : index);
+        tick.sourceLine = index + 1;
+        tick.price = prices.at(index);
+        tick.volumeShares = 100.0;
+        tick.amount = tick.price * tick.volumeShares;
+        ticks.append(tick);
+    }
+
+    auto makeConfig = [&plan]() {
+        BacktestConfig config = configFor(*plan, QStringLiteral("custom-raw-tick"));
+        config.dataMode = BacktestDataMode::RawTicks;
+        config.frequency = QStringLiteral("tick");
+        config.periodSeconds = 0;
+        CustomBacktestStrategy strategy(*plan, CustomBacktestInputMode::RawTicks);
+        config.ruleSnapshot = strategy.ruleSnapshot();
+        return config;
+    };
+    BacktestConfig config = makeConfig();
+    BacktestEngine vectorEngine;
+    QSignalSpy vectorFinished(&vectorEngine, &BacktestEngine::finished);
+    QVERIFY(vectorEngine.start(
+        config, ticks, std::make_unique<CustomBacktestStrategy>(
+            *plan, CustomBacktestInputMode::RawTicks)));
+    QTRY_COMPARE_WITH_TIMEOUT(vectorFinished.count(), 1, 5000);
+    const BacktestResult vectorResult = vectorEngine.result();
+    QCOMPARE(vectorResult.summary.totalTrades, 1);
+    QCOMPARE(vectorResult.trades.first().entryTime, ticks.at(2).timestamp);
+    QCOMPARE(vectorResult.trades.first().exitTime, ticks.at(5).timestamp);
+    QCOMPARE(vectorResult.trades.first().entryPrice, 110.0);
+    QCOMPARE(vectorResult.trades.first().exitPrice, 85.0);
+    QCOMPARE(vectorResult.trades.first().quantity, 900.0);
+    QCOMPARE(vectorResult.config.ruleSnapshot,
+             config.ruleSnapshot);
+    QCOMPARE(vectorResult.config.ruleSnapshot.value(
+                 QStringLiteral("rawTickExecutionBasis")).toString(),
+             QStringLiteral("next_observed_trade"));
+    QVERIFY(vectorResult.trades.first().entryReason.contains(
+        ticks.at(1).timestamp.toString(Qt::ISODateWithMs)));
+    QVERIFY(vectorResult.trades.first().exitReason.contains(
+        ticks.at(3).timestamp.toString(Qt::ISODateWithMs)));
+
+    BacktestConfig streamedConfig = makeConfig();
+    streamedConfig.taskId = QStringLiteral("custom-raw-tick-streamed");
+    streamedConfig.datasetIdentity.instrument = fixtureInstrument();
+    streamedConfig.datasetIdentity.periodSeconds = 0;
+    streamedConfig.datasetIdentity.days = {
+        {firstDay, 5, 5, QStringLiteral("sha256:") + QString(64, '1'), 0, 0, false},
+        {firstDay.addDays(1), 1, 6,
+         QStringLiteral("sha256:") + QString(64, '2'), 0, 0, false}
+    };
+    streamedConfig.datasetIdentity.datasetVersion =
+        QStringLiteral("sha256:") + QString(64, '3');
+    BacktestEngine streamedEngine;
+    QSignalSpy streamedFinished(&streamedEngine, &BacktestEngine::finished);
+    int offset = 0;
+    QVERIFY(streamedEngine.startStreamedRawTicks(
+        streamedConfig, ticks.size(),
+        [&ticks, &offset](QVector<RawTradeTick> *chunk, QString *) {
+            *chunk = ticks.mid(offset, 2);
+            offset += chunk->size();
+            return true;
+        }, std::make_unique<CustomBacktestStrategy>(
+            *plan, CustomBacktestInputMode::RawTicks)));
+    QTRY_COMPARE_WITH_TIMEOUT(streamedFinished.count(), 1, 5000);
+    const BacktestResult &streamed = streamedEngine.result();
+    QCOMPARE(streamed.summary.totalTrades, vectorResult.summary.totalTrades);
+    QCOMPARE(streamed.trades.first().entryTime, vectorResult.trades.first().entryTime);
+    QCOMPARE(streamed.trades.first().exitTime, vectorResult.trades.first().exitTime);
+    QCOMPARE(streamed.summary.finalEquity, vectorResult.summary.finalEquity);
+    QCOMPARE(streamed.config.dataVersion, vectorResult.config.dataVersion);
+    QVERIFY(streamed.rawTicks.isEmpty());
+    QVERIFY(streamed.rawTickSnapshotDeferred);
+
+    BacktestConfig badSnapshot = makeConfig();
+    badSnapshot.ruleSnapshot.remove(QStringLiteral("rawTickPolicyVersion"));
+    BacktestEngine rejected;
+    QSignalSpy errors(&rejected, &BacktestEngine::errorOccurred);
+    QVERIFY(!rejected.start(badSnapshot, ticks,
+                            std::make_unique<CustomBacktestStrategy>(
+                                *plan, CustomBacktestInputMode::RawTicks)));
+    QCOMPARE(errors.count(), 1);
+    document.insert(QStringLiteral("signal"), QJsonObject{
+        {QStringLiteral("priceMode"), QStringLiteral("triggerClose")}});
+    CustomStrategyDefinition optimisticDefinition;
+    QVERIFY2(validator.validate(document, &optimisticDefinition, &error), qPrintable(error));
+    const auto optimisticPlan = compiler.compile(optimisticDefinition, {}, &error);
+    QVERIFY2(optimisticPlan.has_value(), qPrintable(error));
+    BacktestConfig optimisticConfig = configFor(*optimisticPlan,
+                                                QStringLiteral("raw-optimistic-rejected"));
+    optimisticConfig.ruleSnapshot = CustomBacktestStrategy(
+        *optimisticPlan, CustomBacktestInputMode::RawTicks).ruleSnapshot();
+    QVERIFY(!rejected.start(optimisticConfig, ticks,
+                            std::make_unique<CustomBacktestStrategy>(
+                                *optimisticPlan, CustomBacktestInputMode::RawTicks)));
+    QCOMPARE(errors.count(), 2);
+}
+
+void CustomStrategyLifecycleTest::realRawTicksRunFrozenCustomDefinition()
+{
+    const QString databasePath = qEnvironmentVariable("PPTRADER_CUSTOM_REAL_DB");
+    if (databasePath.isEmpty())
+        QSKIP("Set PPTRADER_CUSTOM_REAL_DB to an isolated real Tick database");
+
+    const QJsonObject document {
+        {QStringLiteral("schemaVersion"), 2},
+        {QStringLiteral("strategyId"), QStringLiteral("custom_real_raw_tick_sma")},
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("name"), QStringLiteral("真实逐笔自定义均线链路")},
+        {QStringLiteral("description"), QStringLiteral("仅验证历史输入和 T+1")},
+        {QStringLiteral("author"), QStringLiteral("Qt Test")},
+        {QStringLiteral("market"), QStringLiteral("A股")},
+        {QStringLiteral("executionScope"), QStringLiteral("backtest_only")},
+        {QStringLiteral("createdAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("updatedAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("parameters"), QJsonArray{}},
+        {QStringLiteral("entry"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("gt")},
+            {QStringLiteral("left"), QJsonObject{
+                {QStringLiteral("indicator"), QStringLiteral("SMA")},
+                {QStringLiteral("period"), 5}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}}},
+        {QStringLiteral("exit"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("gt")},
+            {QStringLiteral("left"), QJsonObject{{QStringLiteral("field"), QStringLiteral("close")}}},
+            {QStringLiteral("right"), QJsonObject{{QStringLiteral("value"), 0.0}}}}},
+        {QStringLiteral("signal"), QJsonObject{
+            {QStringLiteral("priceMode"), QStringLiteral("nextOpen")}}}
+    };
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(CustomStrategyValidator().validate(document, &definition, &error),
+             qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+
+    SqliteLocalDataStore store;
+    QVERIFY(store.initializeReadOnly(databasePath));
+    const Instrument instrument {QStringLiteral("600519"), QStringLiteral("600519"),
+                                 Market::AShare, QStringLiteral("A股")};
+    const QVector<QDate> dates = store.rawTradeTradingDates(instrument);
+    const QDate firstDay(2026, 7, 20);
+    const QDate nextDay(2026, 7, 21);
+    QVERIFY(dates.contains(firstDay));
+    QVERIFY(dates.contains(nextDay));
+    QVector<RawTradeTick> ticks;
+    for (const QDate &date : {firstDay, nextDay}) {
+        QVERIFY(store.forEachRawTradeTick(instrument, date,
+            [&ticks](const RawTradeTick &tick) {
+                ticks.append(tick);
+                return true;
+            }));
+    }
+    QVERIFY(ticks.size() > 100);
+
+    BacktestConfig config;
+    config.taskId = QStringLiteral("custom-real-raw-600519-two-days");
+    config.strategyId = plan->strategyId;
+    config.strategyVersion = plan->version;
+    config.strategyParameters = plan->normalizedParameters;
+    config.ruleSnapshot = CustomBacktestStrategy(
+        *plan, CustomBacktestInputMode::RawTicks).ruleSnapshot();
+    config.instrument = instrument;
+    config.dataMode = BacktestDataMode::RawTicks;
+    config.frequency = QStringLiteral("tick");
+    config.periodSeconds = 0;
+    config.initialCapital = 1000000.0;
+    config.commissionRate = 0.0003;
+    config.slippageRate = 0.0002;
+    config.lotSize = 100;
+    BacktestEngine engine;
+    QSignalSpy finished(&engine, &BacktestEngine::finished);
+    QSignalSpy errors(&engine, &BacktestEngine::errorOccurred);
+    QVERIFY(engine.start(config, ticks,
+        std::make_unique<CustomBacktestStrategy>(
+            *plan, CustomBacktestInputMode::RawTicks)));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 20000);
+    QCOMPARE(errors.count(), 0);
+    const BacktestResult &result = engine.result();
+    QCOMPARE(result.config.actualBars, ticks.size());
+    QCOMPARE(result.config.ruleSnapshot, config.ruleSnapshot);
+    QVERIFY(result.config.dataVersion.startsWith(QStringLiteral("sha256:")));
+    QVERIFY(result.summary.totalTrades >= 1);
+    for (const BacktestTrade &trade : result.trades) {
+        QCOMPARE(trade.entryTime.toTimeZone(QTimeZone("Asia/Shanghai")).date(), firstDay);
+        QCOMPARE(trade.exitTime.toTimeZone(QTimeZone("Asia/Shanghai")).date(), nextDay);
+    }
+    QVERIFY(isProfitableBacktestForArchive(result));
+    QTemporaryDir archiveDirectory;
+    QVERIFY(archiveDirectory.isValid());
+    const QString requestedArchivePath =
+        qEnvironmentVariable("PPTRADER_CUSTOM_RAW_ARCHIVE_DB");
+    const QString archivePath = requestedArchivePath.isEmpty()
+        ? archiveDirectory.filePath(QStringLiteral("custom-real-raw-archive.db"))
+        : requestedArchivePath;
+    QVERIFY(!QFile::exists(archivePath));
+    SqliteLocalDataStore archiveStore;
+    QVERIFY(archiveStore.initialize(archivePath));
+    BacktestArchiveRecord archive;
+    archive.resultId = QStringLiteral("custom-real-raw-600519-two-days");
+    archive.completedAt = QDateTime::currentDateTimeUtc();
+    archive.result = result;
+    QVERIFY(archiveStore.saveBacktestArchive(archive));
+    const auto restored = archiveStore.loadBacktestArchive(archive.resultId);
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->result.config.ruleSnapshot, config.ruleSnapshot);
+    QCOMPARE(restored->result.config.dataVersion, result.config.dataVersion);
+    QCOMPARE(restored->result.trades.size(), result.trades.size());
+    qInfo().noquote() << "custom raw tick" << instrument.symbol
+                      << "observations" << ticks.size()
+                      << "closedTrades" << result.summary.totalTrades
+                      << "returnPercent" << result.summary.totalReturnPercent
+                      << "archive" << archivePath
+                      << "dataVersion" << result.config.dataVersion;
+}
 
 void CustomStrategyLifecycleTest::
     wizardBiasStrategySurvivesRestartAndRunsWithIndependentAccounts()
@@ -157,6 +419,19 @@ void CustomStrategyLifecycleTest::
              qPrintable(error));
     QCOMPARE(versionOne.version, 1);
     QCOMPARE(versionTwo.version, 2);
+    const QDateTime draftTime(QDate(2026, 9, 8), QTime(8, 0), QTimeZone("UTC"));
+    const QString draftJson = versionOne.newVersionDraftJson(3, draftTime);
+    CustomStrategyDefinition cloned;
+    QVERIFY2(validator.parseAndValidate(draftJson, &cloned, &error),
+             qPrintable(error));
+    QCOMPARE(cloned.version, 3);
+    QCOMPARE(cloned.strategyId, versionOne.strategyId);
+    QCOMPARE(cloned.document.value(QStringLiteral("entry")),
+             versionOne.document.value(QStringLiteral("entry")));
+    QCOMPARE(cloned.createdAt, draftTime);
+    QCOMPARE(versionOne.version, 1);
+    QVERIFY(versionOne.newVersionDraftJson(1, draftTime).isEmpty());
+    QVERIFY(versionOne.newVersionDraftJson(1000001, draftTime).isEmpty());
 
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -519,6 +794,13 @@ void CustomStrategyLifecycleTest::
         QCOMPARE(errors.count(), 0);
         const BacktestResult result = engine.result();
         QCOMPARE(result.config.strategyVersion, version);
+        const QVariantMap ruleSnapshot = result.config.ruleSnapshot;
+        QCOMPARE(ruleSnapshot.value(QStringLiteral("definitionJson")).toString(),
+                 restored.canonicalJson());
+        QCOMPARE(ruleSnapshot.value(QStringLiteral("definitionSha256")).toString(),
+                 QStringLiteral("sha256:") + QString::fromLatin1(
+                     QCryptographicHash::hash(restored.canonicalJson().toUtf8(),
+                                              QCryptographicHash::Sha256).toHex()));
         QCOMPARE(result.config.datasetIdentity.datasetVersion, identity.datasetVersion);
         QCOMPARE(result.summary.initialCapital, 100000.0);
         QCOMPARE(result.summary.totalCommission, 0.0);
@@ -551,6 +833,15 @@ void CustomStrategyLifecycleTest::
         {
             SqliteLocalDataStore store;
             QVERIFY(store.initialize(databasePath));
+            if (run == 0) {
+                BacktestArchiveRecord corrupted = archive;
+                corrupted.resultId = QStringLiteral("synthetic-invalid-definition-hash");
+                corrupted.result.config.ruleSnapshot.insert(
+                    QStringLiteral("definitionSha256"),
+                    QStringLiteral("sha256:") + QString(64, QLatin1Char('0')));
+                QVERIFY(!store.saveBacktestArchive(corrupted));
+                QVERIFY(!store.loadBacktestArchive(corrupted.resultId).has_value());
+            }
             QVERIFY(store.saveBacktestArchive(archive));
         }
         {
@@ -559,6 +850,7 @@ void CustomStrategyLifecycleTest::
             const auto loaded = reopened.loadBacktestArchive(archive.resultId);
             QVERIFY(loaded.has_value());
             QCOMPARE(loaded->result.config.strategyVersion, version);
+            QCOMPARE(loaded->result.config.ruleSnapshot, ruleSnapshot);
             QCOMPARE(loaded->result.config.dataVersion, result.config.dataVersion);
             QCOMPARE(loaded->result.config.datasetIdentity.datasetVersion, identity.datasetVersion);
             QCOMPARE(loaded->result.summary.finalEquity, activeVersion ? 98200.0 : 100000.0);
@@ -575,6 +867,111 @@ void CustomStrategyLifecycleTest::
                 }
             }
         }
+    }
+}
+
+void CustomStrategyLifecycleTest::realTickDerivedMinuteBarsRunFrozenCustomDefinition()
+{
+    const QString databasePath = qEnvironmentVariable("PPTRADER_CUSTOM_REAL_DB");
+    if (databasePath.isEmpty())
+        QSKIP("Set PPTRADER_CUSTOM_REAL_DB to an isolated real Tick database");
+
+    const QJsonObject fast {{QStringLiteral("indicator"), QStringLiteral("SMA")},
+                            {QStringLiteral("period"), 5}};
+    const QJsonObject slow {{QStringLiteral("indicator"), QStringLiteral("SMA")},
+                            {QStringLiteral("period"), 20}};
+    const QJsonObject document {
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("strategyId"), QStringLiteral("custom_real_tick_derived_sma")},
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("name"), QStringLiteral("真实逐笔派生分钟线均线测试")},
+        {QStringLiteral("description"), QStringLiteral("仅验证本地自定义策略流程")},
+        {QStringLiteral("author"), QStringLiteral("Qt Test")},
+        {QStringLiteral("market"), QStringLiteral("A股")},
+        {QStringLiteral("executionScope"), QStringLiteral("backtest_only")},
+        {QStringLiteral("createdAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("updatedAt"), QStringLiteral("2026-11-12T00:00:00.000Z")},
+        {QStringLiteral("parameters"), QJsonArray{}},
+        {QStringLiteral("entry"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("crossesAbove")},
+            {QStringLiteral("left"), fast}, {QStringLiteral("right"), slow}}},
+        {QStringLiteral("exit"), QJsonObject{
+            {QStringLiteral("op"), QStringLiteral("crossesBelow")},
+            {QStringLiteral("left"), fast}, {QStringLiteral("right"), slow}}}
+    };
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(CustomStrategyValidator().validate(document, &definition, &error),
+             qPrintable(error));
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+
+    SqliteLocalDataStore store;
+    QVERIFY(store.initializeReadOnly(databasePath));
+    const QTimeZone shanghai("Asia/Shanghai");
+    const QDateTime from(QDate(2026, 7, 20), QTime(0, 0), shanghai);
+    const QDateTime to(QDate(2026, 11, 10), QTime(0, 0), shanghai);
+    for (const QString &symbol : {QStringLiteral("600519"), QStringLiteral("000001")}) {
+        const Instrument instrument {symbol, symbol, Market::AShare, QStringLiteral("A股")};
+        const QVector<Candle> candles = store.loadCandlesFromSource(
+            instrument, 60, from.toUTC(), to.addMSecs(-1).toUTC(),
+            QStringLiteral("raw_tick_cache_v1"));
+        QVERIFY2(candles.size() > 1000, qPrintable(symbol));
+        BacktestConfig config;
+        config.taskId = QStringLiteral("custom-real-%1").arg(symbol);
+        config.strategyId = plan->strategyId;
+        config.strategyVersion = plan->version;
+        config.strategyParameters = plan->normalizedParameters;
+        config.ruleSnapshot = plan->ruleSnapshot();
+        config.instrument = instrument;
+        config.frequency = QStringLiteral("1m");
+        config.periodSeconds = 60;
+        config.requestedBars = candles.size();
+        config.sampleFrom = from.toUTC();
+        config.sampleTo = to.addMSecs(-1).toUTC();
+        BacktestEngine engine;
+        QSignalSpy finished(&engine, &BacktestEngine::finished);
+        QSignalSpy errors(&engine, &BacktestEngine::errorOccurred);
+        QVERIFY(engine.start(config, candles,
+            std::make_unique<CustomBacktestStrategy>(*plan)));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 20000);
+        QCOMPARE(errors.count(), 0);
+        const BacktestResult result = engine.result();
+        QCOMPARE(result.config.dataMode, BacktestDataMode::Candles);
+        QCOMPARE(result.config.actualBars, candles.size());
+        QCOMPARE(result.config.ruleSnapshot, plan->ruleSnapshot());
+        QVERIFY(result.config.dataVersion.startsWith(QStringLiteral("sha256:")));
+        if (symbol == QStringLiteral("600519")) {
+            QVERIFY(isProfitableBacktestForArchive(result));
+            QTemporaryDir archiveDirectory;
+            QVERIFY(archiveDirectory.isValid());
+            const QString requestedArchivePath =
+                qEnvironmentVariable("PPTRADER_CUSTOM_ARCHIVE_DB");
+            const QString archivePath = requestedArchivePath.isEmpty()
+                ? archiveDirectory.filePath(QStringLiteral("custom-real-archive.db"))
+                : requestedArchivePath;
+            QVERIFY(!QFile::exists(archivePath));
+            SqliteLocalDataStore archiveStore;
+            QVERIFY(archiveStore.initialize(archivePath));
+            BacktestArchiveRecord archive;
+            archive.resultId = QStringLiteral("custom-real-600519");
+            archive.completedAt = QDateTime::currentDateTimeUtc();
+            archive.result = result;
+            QVERIFY(archiveStore.saveBacktestArchive(archive));
+            const auto restored = archiveStore.loadBacktestArchive(archive.resultId);
+            QVERIFY(restored.has_value());
+            QCOMPARE(restored->result.config.ruleSnapshot, plan->ruleSnapshot());
+            QCOMPARE(restored->result.config.dataVersion, result.config.dataVersion);
+            QCOMPARE(restored->result.trades.size(), result.trades.size());
+            qInfo().noquote() << "archive" << archivePath
+                              << "definitionSha256" << plan->definitionSha256;
+        } else {
+            QVERIFY(!isProfitableBacktestForArchive(result));
+        }
+        qInfo().noquote() << symbol << "bars" << candles.size()
+                          << "trades" << result.trades.size()
+                          << "returnPercent" << result.summary.totalReturnPercent
+                          << "dataVersion" << result.config.dataVersion;
     }
 }
 

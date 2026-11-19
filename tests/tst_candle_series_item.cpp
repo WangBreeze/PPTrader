@@ -61,6 +61,8 @@ private slots:
     void aggregatesDenseViewportWithoutLosingExtremes();
     void genericBacktestRolesAndSignals();
     void archivedResultRestoresCandleAndSignalRoles();
+    void replayRevealsOnlyCompletedBarsAndFills();
+    void longReplayKeepsHistoryAndUpdatesIndicatorsIncrementally();
     void rendersVolumeIndicatorsAndAxesAsBoundedGeometry();
     void automaticRangeIncludesVisibleMovingAverageValues();
     void parameterizesIndicatorsAndRendersIndependentSubplots();
@@ -432,17 +434,117 @@ void CandleSeriesItemTest::archivedResultRestoresCandleAndSignalRoles()
     const CandlePoint first = pointAt(0, false);
     const CandlePoint second = pointAt(1, true);
     result.candles = {first.candle, second.candle};
-    result.chartSignals = {second.signal};
+    result.config.instrument = first.candle.instrument;
+    result.config.commissionRate = 0.0003;
+    result.chartSignals = {second.signal}; // 未成交的策略信号不得作为成交标记。
+    BacktestTrade trade;
+    trade.entryTime = first.candle.startTime;
+    trade.exitTime = second.candle.startTime;
+    trade.entryPrice = first.candle.close;
+    trade.exitPrice = second.candle.close;
+    trade.quantity = 100.0;
+    trade.commission = 6.0;
+    trade.entryReason = QStringLiteral("入场执行");
+    trade.exitReason = QStringLiteral("出场执行");
+    result.trades = {trade};
 
     CandleListModel model;
     model.loadBacktestResult(result);
     QCOMPARE(model.count(), 2);
-    QVERIFY(!model.get(0).value(QStringLiteral("hasSignal")).toBool());
+    QVERIFY(model.get(0).value(QStringLiteral("hasSignal")).toBool());
     QVERIFY(model.get(1).value(QStringLiteral("hasSignal")).toBool());
+    QCOMPARE(model.get(0).value(QStringLiteral("signalSide")).toString(),
+             QStringLiteral("买入"));
     QCOMPARE(model.get(1).value(QStringLiteral("signalSide")).toString(),
              QStringLiteral("卖出"));
-    QCOMPARE(model.get(1).value(QStringLiteral("signalReason")).toString(),
-             QStringLiteral("测试信号 1"));
+    QVERIFY(model.get(1).value(QStringLiteral("signalReason")).toString()
+                .contains(QStringLiteral("实际出场")));
+    QCOMPARE(model.get(1).value(QStringLiteral("signalPrice")).toDouble(),
+             trade.exitPrice);
+}
+
+void CandleSeriesItemTest::replayRevealsOnlyCompletedBarsAndFills()
+{
+    BacktestResult result;
+    const CandlePoint first = pointAt(0, false);
+    const CandlePoint second = pointAt(1, false);
+    const CandlePoint third = pointAt(2, false);
+    result.config.instrument = first.candle.instrument;
+    result.candles = {first.candle, second.candle, third.candle};
+    result.finalPosition.quantity = 100.0;
+    result.finalPosition.averagePrice = second.candle.close;
+    result.finalPosition.entryTime = second.candle.startTime;
+    result.finalPosition.entryReason = QStringLiteral("持仓入场");
+    CandleListModel complete;
+    complete.loadBacktestResult(result);
+    QCOMPARE(complete.count(), 3);
+    CandleListModel replay;
+    replay.loadPoints(complete.points().mid(0, 1));
+    QCOMPARE(replay.count(), 1);
+    QVERIFY(!replay.get(0).value(QStringLiteral("hasSignal")).toBool());
+    TestableCandleSeriesItem chart;
+    chart.setWidth(800);
+    chart.setHeight(400);
+    chart.setModel(&replay);
+    QCOMPARE(chart.pointCount(), 1);
+    QCOMPARE(chart.signalCount(), 0);
+    replay.addPoint(complete.points().at(1));
+    QCOMPARE(chart.pointCount(), 2);
+    QCOMPARE(chart.signalCount(), 1);
+    QVERIFY(replay.get(1).value(QStringLiteral("signalReason")).toString()
+                .contains(QStringLiteral("持仓中")));
+    replay.loadPoints(complete.points().mid(0, 1));
+    QCOMPARE(chart.pointCount(), 1);
+    QCOMPARE(chart.signalCount(), 0);
+}
+
+void CandleSeriesItemTest::longReplayKeepsHistoryAndUpdatesIndicatorsIncrementally()
+{
+    QVector<CandlePoint> points;
+    points.reserve(5201);
+    for (int index = 0; index < 5201; ++index)
+        points.append(pointAt(index, index == 25 || index == 5199));
+
+    CandleListModel complete;
+    complete.setMaximumRows(points.size());
+    complete.loadPoints(points);
+    QCOMPARE(complete.count(), 5201);
+    QCOMPARE(complete.get(25).value(QStringLiteral("signalSide")).toString(),
+             QStringLiteral("卖出"));
+
+    CandleListModel replay;
+    replay.setMaximumRows(points.size());
+    replay.loadPoints(points.mid(0, 5199));
+    TestableCandleSeriesItem chart;
+    chart.setWidth(900);
+    chart.setHeight(500);
+    chart.setShowMovingAverages(true);
+    chart.setShowBollingerBands(true);
+    chart.setShowRsi(true);
+    chart.setShowMacd(true);
+    chart.setModel(&replay);
+    const qulonglong fullRebuilds = chart.fullIndicatorRebuildCount();
+    chart.showLatest(120);
+    QCOMPARE(chart.visibleStart(), 5079);
+    QCOMPARE(chart.visibleCount(), 120);
+
+    replay.addPoint(points.at(5199));
+    replay.addPoint(points.at(5200));
+    QCOMPARE(replay.count(), 5201);
+    QCOMPARE(chart.pointCount(), 5201);
+    QCOMPARE(chart.signalCount(), 2);
+    QCOMPARE(chart.fullIndicatorRebuildCount(), fullRebuilds);
+    QCOMPARE(chart.incrementalIndicatorUpdateCount(), qulonglong(2));
+    QCOMPARE(chart.visibleCount(), 120);
+    QCOMPARE(chart.visibleStart(), 5081);
+    QVERIFY(chart.viewportAtRightEdge());
+    QVERIFY(replay.get(25).value(QStringLiteral("hasSignal")).toBool());
+    QCOMPARE(chart.findNearest(chart.width()).value(QStringLiteral("index")).toInt(),
+             5200);
+    chart.resetViewport();
+    QCOMPARE(chart.visibleCount(), 5201);
+    chart.showLatest(120);
+    QCOMPARE(chart.visibleStart(), 5081);
 }
 
 void CandleSeriesItemTest::genericBacktestRolesAndSignals()

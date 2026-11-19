@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 SYMBOL_RE = re.compile(r"^[0-9]{6}$")
 DATE_RE = re.compile(r"^[0-9]{8}$")
+TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$")
 SERVER_VERSION = "pptrader-nas/1"
 MAX_MANIFEST_SYMBOLS = 6000
 MAX_MANIFEST_DAYS = 31
@@ -173,6 +174,83 @@ class TickDataNode:
             "changedDirectories": changed,
         }
 
+    # ── 实时增量读取（2026-11-09 新增，TickData 对外接口第 1 层）──────────────
+    # 语义：TickData 采集器每轮**覆盖写**当日 CSV，所以该文件就是「至今为止」的当日快照。
+    # 客户端从 after 开始递增轮询，服务端只返回 time > after 的记录：
+    #   · 同一 time 视为已消费（不再返回）——避免重复
+    #   · nextAfter 给出下一次应传的值 ——避免漏
+    # 这是「接口层」，不做增量定位优化（每次整文件过滤），性能优化留待后续。
+    MAX_LIVE_TICKS = 20000
+
+    def live(self, symbol: str, trading_date: str, after: str = "",
+             limit: int = 2000) -> dict[str, object]:
+        if not SYMBOL_RE.fullmatch(symbol):
+            return {"schemaVersion": 1, "error": "symbol must be 6 digits"}
+        if not DATE_RE.fullmatch(trading_date):
+            return {"schemaVersion": 1, "error": "date must be YYYYMMDD"}
+        if after and not TIME_RE.fullmatch(after):
+            return {"schemaVersion": 1, "error": "after must be HH:MM:SS"}
+        limit = max(1, min(int(limit), self.MAX_LIVE_TICKS))
+        now = datetime.now()
+        result: dict[str, object] = {
+            "schemaVersion": 1,
+            "symbol": symbol,
+            "tradingDate": trading_date,
+            "serverTime": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source": "tickdata",
+            # 收盘判定是「时钟」口径（盘后固定价格交易至 15:30），与个股有无成交无关
+            "sessionClosed": now.strftime("%H%M%S") >= "153000",
+        }
+        path = self.tick_path(symbol, trading_date)
+        if path is None:
+            result.update({"available": False, "totalRows": 0, "lastTime": "",
+                           "after": after, "nextAfter": after, "ticks": []})
+            return result
+        stat = path.stat()
+        ticks: list[dict[str, object]] = []
+        last_time = ""
+        total = 0
+        overflow = False
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            next(handle, None)          # 跳过表头 time,price,volume,amount,type
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) < 5:
+                    continue
+                total += 1
+                moment = parts[0]
+                last_time = moment
+                if after and moment <= after:
+                    continue
+                if len(ticks) >= limit:
+                    overflow = True
+                    continue
+                try:
+                    ticks.append({
+                        "time": moment,
+                        "price": float(parts[1]),
+                        "volume": int(float(parts[2])),
+                        "amount": float(parts[3]),
+                        "side": parts[4].strip().upper(),
+                    })
+                except (TypeError, ValueError):
+                    continue
+        result.update({
+            "available": True,
+            "bytes": stat.st_size,
+            "mtimeMs": int(stat.st_mtime * 1000),
+            "totalRows": total,
+            "lastTime": last_time,
+            "after": after,
+            "nextAfter": ticks[-1]["time"] if ticks else after,
+            "overflow": overflow,
+            "ticks": ticks,
+        })
+        return result
+
     def manifest(self, symbols: list[str], start: str, end: str) -> list[dict[str, object]]:
         if not symbols or len(symbols) > MAX_MANIFEST_SYMBOLS:
             raise ValueError("invalid_symbol_count")
@@ -269,6 +347,19 @@ class Handler(BaseHTTPRequestHandler):
                 "schemaVersion": 1,
                 "entries": self.node.catalog(symbol, start, end),
             })
+            return
+        match = re.fullmatch(r"/v1/live/([0-9]{6})", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            after = query.get("after", [""])[0]
+            trading_date = query.get("date", [""])[0] or datetime.now().strftime("%Y%m%d")
+            try:
+                limit = int(query.get("limit", ["2000"])[0])
+            except ValueError:
+                limit = 2000
+            self.json_response(
+                HTTPStatus.OK,
+                self.node.live(match.group(1), trading_date, after, limit))
             return
         match = re.fullmatch(r"/v1/ticks/([0-9]{6})/([0-9]{8})", parsed.path)
         if match:

@@ -26,6 +26,7 @@
 #include "services/BacktestEngine.h"
 #include "services/BatchBacktestResultRetention.h"
 #include "services/BatchBacktestService.h"
+#include "services/StrategyMatrixBacktestService.h"
 #include "services/AShareRelativeStrengthIndicator.h"
 #include "services/AShareUniverseLoader.h"
 #include "services/AShareInstrumentDayCsvImporter.h"
@@ -92,6 +93,11 @@ class TradingController final : public QObject {
     Q_PROPERTY(QString paperStrategyError READ paperStrategyError NOTIFY paperStrategyStateChanged)
     Q_PROPERTY(QAbstractItemModel *tickModel READ tickModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *candleModel READ candleModel CONSTANT)
+    Q_PROPERTY(QAbstractItemModel *backtestReplayCandleModel READ backtestReplayCandleModel CONSTANT)
+    Q_PROPERTY(bool backtestReplayActive READ backtestReplayActive NOTIFY backtestReplayChanged)
+    Q_PROPERTY(bool backtestReplayRunning READ backtestReplayRunning NOTIFY backtestReplayChanged)
+    Q_PROPERTY(int backtestReplayIndex READ backtestReplayIndex NOTIFY backtestReplayChanged)
+    Q_PROPERTY(int backtestReplayTotal READ backtestReplayTotal NOTIFY backtestReplayChanged)
     Q_PROPERTY(QVariantList validationRuns READ validationRuns NOTIFY validationRunsChanged)
     Q_PROPERTY(QAbstractItemModel *historyCandleModel READ historyCandleModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *signalModel READ signalModel CONSTANT)
@@ -131,6 +137,14 @@ class TradingController final : public QObject {
     Q_PROPERTY(QAbstractItemModel *backtestArchiveRawTickModel
                READ backtestArchiveRawTickModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *batchBacktestModel READ batchBacktestModel CONSTANT)
+    Q_PROPERTY(bool strategyMatrixRunning READ strategyMatrixRunning NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(QVariantList strategyMatrixResults READ strategyMatrixResults NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(QString strategyMatrixStatus READ strategyMatrixStatus NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(QString strategyMatrixError READ strategyMatrixError NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(int strategyMatrixTotal READ strategyMatrixTotal NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(int strategyMatrixCompleted READ strategyMatrixCompleted NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(QVariantList strategyMatrixRunHistory READ strategyMatrixRunHistory NOTIFY strategyMatrixChanged)
+    Q_PROPERTY(QVariantList strategyMatrixPreflightResults READ strategyMatrixPreflightResults NOTIFY strategyMatrixChanged)
     Q_PROPERTY(QAbstractItemModel *orderModel READ orderModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *executionModel READ executionModel CONSTANT)
     Q_PROPERTY(QAbstractItemModel *positionModel READ positionModel CONSTANT)
@@ -205,6 +219,12 @@ class TradingController final : public QObject {
     Q_PROPERTY(QDateTime backtestResultCompletedAt READ backtestResultCompletedAt
                NOTIFY backtestSummaryChanged)
     Q_PROPERTY(int backtestArchiveCount READ backtestArchiveCount NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(QVariantMap backtestArchiveStorage READ backtestArchiveStorage
+               NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(bool backtestArchiveCompactionRunning
+               READ backtestArchiveCompactionRunning NOTIFY backtestArchiveStateChanged)
+    Q_PROPERTY(QString backtestArchiveCompactionError
+               READ backtestArchiveCompactionError NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(QString selectedBacktestArchiveId READ selectedBacktestArchiveId
                NOTIFY backtestArchiveStateChanged)
     Q_PROPERTY(bool backtestArchiveLoading READ backtestArchiveLoading
@@ -801,6 +821,11 @@ public:
 
     QAbstractItemModel *tickModel();
     QAbstractItemModel *candleModel();
+    QAbstractItemModel *backtestReplayCandleModel();
+    bool backtestReplayActive() const;
+    bool backtestReplayRunning() const;
+    int backtestReplayIndex() const;
+    int backtestReplayTotal() const;
     QVariantList validationRuns() const;
     QAbstractItemModel *historyCandleModel();
     QAbstractItemModel *signalModel();
@@ -814,6 +839,14 @@ public:
     QAbstractItemModel *backtestArchiveModel();
     QAbstractItemModel *backtestArchiveRawTickModel();
     QAbstractItemModel *batchBacktestModel();
+    bool strategyMatrixRunning() const;
+    QVariantList strategyMatrixResults() const;
+    QString strategyMatrixStatus() const;
+    QString strategyMatrixError() const;
+    int strategyMatrixTotal() const;
+    int strategyMatrixCompleted() const;
+    QVariantList strategyMatrixRunHistory() const;
+    QVariantList strategyMatrixPreflightResults() const;
     QAbstractItemModel *orderModel();
     QAbstractItemModel *executionModel();
     QAbstractItemModel *positionModel();
@@ -872,6 +905,9 @@ public:
     QString backtestResultSymbol() const;
     QDateTime backtestResultCompletedAt() const;
     int backtestArchiveCount() const;
+    QVariantMap backtestArchiveStorage() const;
+    bool backtestArchiveCompactionRunning() const;
+    QString backtestArchiveCompactionError() const;
     QString selectedBacktestArchiveId() const;
     bool backtestArchiveLoading() const;
     qulonglong backtestArchiveRequestId() const;
@@ -1252,6 +1288,8 @@ public:
                                                      int version = 0) const;
     Q_INVOKABLE QString exportCustomStrategyJson(const QString &strategyId,
                                                  int version = 0) const;
+    Q_INVOKABLE QString createCustomStrategyVersionDraft(
+        const QString &strategyId, int version) const;
     Q_INVOKABLE void cancelBacktest();
     Q_INVOKABLE qulonglong runLocalBatchBacktest(
         const QString &strategyId, const QVariantMap &strategyParameters,
@@ -1266,6 +1304,20 @@ public:
         const QString &startDate, const QString &endDate,
         int maximumSymbols = 5207);
     Q_INVOKABLE void cancelLocalBatchBacktest();
+    Q_INVOKABLE QString runStrategyMatrix(const QVariantList &strategies,
+        const QStringList &symbols, const QString &frequency,
+        const QString &startDate, const QString &endDate);
+    Q_INVOKABLE void cancelStrategyMatrix();
+    Q_INVOKABLE void reportStrategyMatrixInputError();
+    Q_INVOKABLE void logStrategyMatrixSelection(
+        const QString &kind, const QString &value, bool added);
+    Q_INVOKABLE void refreshStrategyMatrixRunHistory();
+    Q_INVOKABLE bool loadStrategyMatrixRun(const QString &runId);
+    Q_INVOKABLE QString resumeStrategyMatrixRun(const QString &runId);
+    Q_INVOKABLE bool deleteStrategyMatrixRun(const QString &runId);
+    Q_INVOKABLE QVariantList preflightStrategyMatrix(
+        const QStringList &symbols, const QString &frequency,
+        const QString &startDate, const QString &endDate);
     Q_INVOKABLE qulonglong archiveBatchBacktestItem(const QString &symbol);
     Q_INVOKABLE QString resumeBatchBacktest(const QString &runId);
     Q_INVOKABLE qulonglong runPortfolioBacktest(const QString &portfolioJson,
@@ -1336,12 +1388,20 @@ public:
         const QString &pathOrUrl);
     Q_INVOKABLE void clearBacktestResult();
     Q_INVOKABLE QVariantMap replayBacktestBar(int index) const;
+    Q_INVOKABLE bool startBacktestReplay(int barsPerSecond = 10);
+    Q_INVOKABLE void pauseBacktestReplay();
+    Q_INVOKABLE void stepBacktestReplay();
+    Q_INVOKABLE void seekBacktestReplay(int revealedBars);
+    Q_INVOKABLE void logBacktestChartAction(const QString &action);
+    Q_INVOKABLE void closeBacktestReplay();
     Q_INVOKABLE bool saveValidationRun(const QString &name);
     Q_INVOKABLE bool loadValidationRun(int index);
     Q_INVOKABLE void setBacktestSampleWindow(const QDateTime &from, const QDateTime &to);
     Q_INVOKABLE bool setBacktestSampleDateRange(const QString &from, const QString &to);
     Q_INVOKABLE void clearBacktestSampleWindow();
     Q_INVOKABLE void refreshBacktestArchiveList();
+    Q_INVOKABLE bool deleteBacktestArchive(const QString &resultId);
+    Q_INVOKABLE bool compactBacktestArchiveStorage();
     Q_INVOKABLE bool loadBacktestArchive(const QString &resultId);
     Q_INVOKABLE qulonglong requestBacktestArchiveRawTickPage(
         const QString &resultId, int offset, int pageSize = 256);
@@ -1518,6 +1578,7 @@ signals:
     void liveRunningChanged();
     void backtestRunningChanged();
     void backtestStateChanged();
+    void backtestReplayChanged();
     void backtestSummaryChanged();
     void backtestSampleWindowChanged();
     void validationRunsChanged();
@@ -1525,6 +1586,7 @@ signals:
     void backtestArchiveRawTickPageStateChanged();
     void backtestConfigurationChanged();
     void batchBacktestStateChanged();
+    void strategyMatrixChanged();
     void rawTickAvailabilityStateChanged();
     void portfolioBacktestStateChanged();
     void crossSectionalBacktestStateChanged();
@@ -1690,6 +1752,9 @@ private:
                                        double initialCapital, double commissionRate,
                                        double slippageRate, QString *error) const;
     bool restartStorageServices(const QString &databasePath);
+    void stopStorageServices();
+    void finishBacktestArchiveCompaction(
+        const QString &databasePath, const SqliteCompactionResult &result);
     void finishStorageRelocation(const QString &sourcePath,
                                  const QString &targetPath,
                                  const QString &databaseUuid,
@@ -1717,6 +1782,11 @@ private:
     TickListModel m_tickModel;
     StockSearchModel m_searchModel;
     CandleListModel m_candleModel;
+    CandleListModel m_backtestReplayCandleModel;
+    QVector<CandlePoint> m_backtestReplayPoints;
+    QTimer m_backtestReplayTimer;
+    int m_backtestReplayIndex = 0;
+    bool m_backtestReplayActive = false;
     QVector<ValidationRun> m_validationRuns;
     QDateTime m_pendingSampleFrom;
     QDateTime m_pendingSampleTo;
@@ -1746,7 +1816,10 @@ private:
     LocalCandleSeriesListModel m_liveDayCandleSeriesModel;
     LocalCandleSeriesListModel m_realtimeMinuteCandleModel;
     RealtimeChartWindowListModel m_realtimeChartWindowModel;
+    MarketDataProvider *activeMarketDataProvider() const;
     MarketDataProvider *m_marketData = nullptr;
+    // TickData 实时源（可选，与 m_marketData 互斥；见 PPTRADER_TICKDATA_LIVE）
+    class TickDataLiveProvider *m_tickDataProvider = nullptr;
     SqliteLocalDataStore m_dataStore;
     AsyncMarketSnapshotQueryService m_asyncSnapshotQueryService;
     AsyncLocalCandleSeriesQueryService m_asyncLocalCandleQueryService;
@@ -1789,6 +1862,7 @@ private:
     ExternalFactorResearchRequestGate m_externalFactorResearchPreflightRequestGate;
     BacktestEngine m_backtest;
     BatchBacktestService m_batchBacktestService;
+    StrategyMatrixBacktestService m_strategyMatrixService;
     PortfolioBacktestService m_portfolioBacktestService;
     CrossSectionalBacktestService m_crossSectionalBacktestService;
     BacktestStrategyRegistry m_backtestStrategyRegistry;
@@ -1841,6 +1915,8 @@ private:
     bool m_tradingStateDirty = false;
     bool m_storageReady = false;
     bool m_storageRelocationRunning = false;
+    bool m_backtestArchiveCompactionRunning = false;
+    QThread *m_backtestArchiveCompactionThread = nullptr;
     QString m_storageRelocationError;
     QVector<NasCatalogEntry> m_nasCatalogEntries;
     QStringList m_nasManifestSymbols;
@@ -1905,6 +1981,8 @@ private:
     double m_backtestSlippageRate = 0.0002;
     QString m_backtestConfigurationError;
     QString m_selectedBacktestArchiveId;
+    QVariantMap m_backtestArchiveStorage;
+    QString m_backtestArchiveCompactionError;
     QString m_backtestArchiveError;
     QString m_backtestArchiveSaveError;
     bool m_backtestResultArchived = false;
@@ -1930,6 +2008,14 @@ private:
     QString m_activeBatchBacktestRunId;
     BatchBacktestRunSummary m_activeBatchBacktestRun;
     QVariantList m_batchBacktestRunHistory;
+    QVariantList m_strategyMatrixResults;
+    QVariantList m_strategyMatrixRunHistory;
+    QVariantList m_strategyMatrixPreflightResults;
+    QString m_strategyMatrixStatus = QStringLiteral("未运行");
+    QString m_strategyMatrixError;
+    QString m_strategyMatrixRunId;
+    int m_strategyMatrixTotal = 0;
+    int m_strategyMatrixCompleted = 0;
     AsyncOperationRequestGate m_rawTickAvailabilityRequestGate;
     QVariantMap m_rawTickAvailabilityResult;
     QString m_rawTickAvailabilityError;

@@ -194,8 +194,10 @@ void BatchBacktestResultListModel::updateArchivableState(
     const QString &symbol, bool archivable)
 {
     const int row = indexOfSymbol(symbol);
-    if (row < 0 || m_results.at(row).archivable == archivable) return;
-    m_results[row].archivable = archivable;
+    if (row < 0) return;
+    const bool available = archivable && !m_results.at(row).archived;
+    if (m_results.at(row).archivable == available) return;
+    m_results[row].archivable = available;
     emit dataChanged(index(row), index(row), {ArchivableRole});
 }
 
@@ -244,6 +246,7 @@ void BatchBacktestResultListModel::updateArchiveState(
     BatchBacktestItemResult &item = m_results[row];
     item.archived = !resultId.isEmpty();
     item.archivedResultId = resultId;
+    if (item.archived) item.archivable = false;
     emit dataChanged(index(row), index(row));
 }
 

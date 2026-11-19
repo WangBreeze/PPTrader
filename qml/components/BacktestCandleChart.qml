@@ -7,7 +7,10 @@ Control {
     id: root
     required property var theme
     required property var model
-    property string emptyText: "完成回测后显示 K 线与买卖点"
+    property string emptyText: "完成回测后显示 K 线与实际成交点"
+    property bool replayMode: false
+    property bool replayFollowLatest: true
+    property int replayVisibleBars: 120
     property var hoverPoint: ({})
     property real crosshairX: 0
     property real crosshairY: 0
@@ -16,6 +19,13 @@ Control {
     readonly property string hoverIndicatorText: indicatorSummary(root.hoverPoint)
     readonly property bool hasData: chart.pointCount > 0
     readonly property int candleCount: chart.pointCount
+
+    function followLatest() {
+        root.replayFollowLatest = true
+        if (root.replayMode) chart.showLatest(root.replayVisibleBars)
+    }
+
+    onReplayModeChanged: if (replayMode) followLatest()
 
     function indicatorSummary(point) {
         const parts = []
@@ -63,7 +73,7 @@ Control {
     activeFocusOnTab: true
     Accessible.role: Accessible.Graphic
     Accessible.name: hasData
-        ? "回测 K 线与买卖点，共 " + root.candleCount + " 根，买卖信号 "
+        ? "回测 K 线与实际成交点，共 " + root.candleCount + " 根，成交标记 "
           + chart.signalCount + " 个"
         : root.emptyText
     Accessible.description: "滚轮缩放，拖动平移，拖动右侧价格轴缩放；单击锁定十字线，Ctrl+C 复制，双击或 Home 复位"
@@ -73,18 +83,23 @@ Control {
             root.hoverPoint = ({})
             event.accepted = true
         } else if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) {
+            root.replayFollowLatest = false
             chart.zoomAt(chart.width / 2, 1.2)
             event.accepted = true
         } else if (event.key === Qt.Key_Minus) {
+            root.replayFollowLatest = false
             chart.zoomAt(chart.width / 2, 1 / 1.2)
             event.accepted = true
         } else if (event.key === Qt.Key_Left) {
+            root.replayFollowLatest = false
             chart.panByPixels(chart.width / Math.max(1, chart.visibleCount) * 5)
             event.accepted = true
         } else if (event.key === Qt.Key_Right) {
+            root.replayFollowLatest = false
             chart.panByPixels(-chart.width / Math.max(1, chart.visibleCount) * 5)
             event.accepted = true
         } else if (event.key === Qt.Key_0 || event.key === Qt.Key_Home) {
+            root.replayFollowLatest = false
             chart.resetViewport()
             chart.resetPriceRange()
             event.accepted = true
@@ -135,6 +150,10 @@ Control {
         wickColor: root.theme.textMuted
         buySignalColor: root.theme.green
         sellSignalColor: root.theme.red
+        onPointCountChanged: {
+            if (root.replayMode && root.replayFollowLatest)
+                chart.showLatest(root.replayVisibleBars)
+        }
     }
 
     MouseArea {
@@ -165,7 +184,10 @@ Control {
             if ((pressedButtons & Qt.LeftButton) !== 0) {
                 if (Math.abs(mouse.x - pressedX) + Math.abs(mouse.y - pressedY) > 4)
                     dragged = true
-                if (dragged) chart.panByPixels(mouse.x - previousX)
+                if (dragged) {
+                    root.replayFollowLatest = false
+                    chart.panByPixels(mouse.x - previousX)
+                }
                 previousX = mouse.x
             }
             root.updateCrosshair(mouse.x, mouse.y)
@@ -179,6 +201,7 @@ Control {
             }
         }
         onWheel: function(wheel) {
+            root.replayFollowLatest = false
             if ((wheel.modifiers & Qt.ShiftModifier) !== 0)
                 chart.panByPixels(wheel.angleDelta.y > 0 ? 56 : -56)
             else
@@ -187,6 +210,7 @@ Control {
             wheel.accepted = true
         }
         onDoubleClicked: function(mouse) {
+            root.replayFollowLatest = false
             chart.resetViewport()
             chart.resetPriceRange()
             root.crosshairLocked = false
@@ -282,12 +306,12 @@ Control {
         Row {
             spacing: 4
             Rectangle { width: 8; height: 8; radius: 4; color: root.theme.green }
-            Text { text: "买入"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8 }
+            Text { text: "实际入场"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8 }
         }
         Row {
             spacing: 4
             Rectangle { width: 8; height: 8; radius: 4; color: root.theme.red }
-            Text { text: "卖出"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8 }
+            Text { text: "实际出场"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8 }
         }
     }
 
@@ -370,6 +394,7 @@ Control {
             text: "复位图表"
             Accessible.name: "复位回测 K 线图缩放和平移"
             onTriggered: {
+                root.replayFollowLatest = false
                 chart.resetViewport()
                 chart.resetPriceRange()
                 root.crosshairLocked = false

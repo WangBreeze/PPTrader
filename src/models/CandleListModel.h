@@ -44,10 +44,14 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
     int count() const;
+    void setMaximumRows(int maximumRows);
     Q_INVOKABLE QVariantMap get(int row) const;
+    const QVector<CandlePoint> &points() const;
+    static QVector<CandlePoint> backtestPoints(const BacktestResult &result);
 
     void addPoint(const CandlePoint &point);
     void loadCandles(const QVector<Candle> &candles);
+    void loadPoints(const QVector<CandlePoint> &points);
     void loadBacktestResult(const BacktestResult &result);
     Q_INVOKABLE void clear();
 

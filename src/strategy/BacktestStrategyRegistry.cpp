@@ -119,6 +119,69 @@ private:
     bool m_longSignalActive = false;
 };
 
+class StochMeanReversionStrategy final : public BacktestStrategy {
+public:
+    StochMeanReversionStrategy(int period, int smoothK, int smoothD,
+                               double oversold, double overbought)
+        : m_period(period), m_smoothK(smoothK), m_smoothD(smoothD),
+          m_oversold(oversold), m_overbought(overbought) {}
+    QString id() const override { return QStringLiteral("stoch_mean_reversion"); }
+    QString displayName() const override { return QStringLiteral("STOCH 均值回归"); }
+    int minimumWarmupBars() const override { return m_period + m_smoothK + m_smoothD - 2; }
+    void onTick(const Tick &) override {}
+    void reset() override {
+        m_highs.clear(); m_lows.clear(); m_rawK.clear(); m_smoothedK.clear();
+        m_previousSpread.reset(); m_holding = false;
+    }
+    void onCandle(const Candle &candle) override {
+        if (!std::isfinite(candle.high) || !std::isfinite(candle.low)
+            || !std::isfinite(candle.close) || candle.low <= 0.0
+            || candle.high < candle.low) {
+            m_highs.clear(); m_lows.clear(); m_rawK.clear(); m_smoothedK.clear();
+            m_previousSpread.reset();
+            return;
+        }
+        m_highs.append(candle.high);
+        m_lows.append(candle.low);
+        if (m_highs.size() > m_period) { m_highs.removeFirst(); m_lows.removeFirst(); }
+        if (m_highs.size() < m_period) return;
+        const double high = *std::max_element(m_highs.cbegin(), m_highs.cend());
+        const double low = *std::min_element(m_lows.cbegin(), m_lows.cend());
+        m_rawK.append(high > low ? (candle.close - low) / (high - low) * 100.0 : 50.0);
+        if (m_rawK.size() > m_smoothK) m_rawK.removeFirst();
+        if (m_rawK.size() < m_smoothK) return;
+        const double k = std::accumulate(m_rawK.cbegin(), m_rawK.cend(), 0.0) / m_smoothK;
+        m_smoothedK.append(k);
+        if (m_smoothedK.size() > m_smoothD) m_smoothedK.removeFirst();
+        if (m_smoothedK.size() < m_smoothD) return;
+        const double d = std::accumulate(m_smoothedK.cbegin(), m_smoothedK.cend(), 0.0)
+            / m_smoothD;
+        const double spread = k - d;
+        const bool buy = !m_holding && m_previousSpread && *m_previousSpread <= 0.0
+            && spread > 0.0 && k < m_oversold;
+        const bool sell = m_holding && m_previousSpread && *m_previousSpread >= 0.0
+            && spread < 0.0 && k > m_overbought;
+        m_previousSpread = spread;
+        if (!buy && !sell) return;
+        m_holding = buy;
+        TradeSignal signal;
+        signal.instrument = candle.instrument;
+        signal.timestamp = candle.startTime;
+        signal.side = buy ? SignalSide::Buy : SignalSide::Sell;
+        signal.price = candle.close;
+        signal.volume = candle.volume;
+        signal.reason = buy ? QStringLiteral("STOCH 超卖区 K 上穿 D")
+                            : QStringLiteral("STOCH 超买区 K 下穿 D");
+        emit signalGenerated(signal);
+    }
+private:
+    int m_period, m_smoothK, m_smoothD;
+    double m_oversold, m_overbought;
+    QVector<double> m_highs, m_lows, m_rawK, m_smoothedK;
+    std::optional<double> m_previousSpread;
+    bool m_holding = false;
+};
+
 class TickMeanReversionBacktestStrategy final : public BacktestStrategy {
 public:
     TickMeanReversionBacktestStrategy(int lookbackTicks,
@@ -918,7 +981,14 @@ QVector<BacktestStrategyDescriptor> BacktestStrategyRegistry::descriptors() cons
           realParameter(QStringLiteral("maximumPositionAmount"), QStringLiteral("单笔最高金额"),
                         50000.0, 1000.0, 1000000.0, 1000.0),
           integerParameter(QStringLiteral("excludeTouchedBeforeSignal"), QStringLiteral("排除信号前已触板"),
-                           1, 0, 1)}, true, false}
+                           1, 0, 1)}, true, false},
+        {QStringLiteral("stoch_mean_reversion"), QStringLiteral("STOCH 均值回归"),
+         QStringLiteral("超卖区 K 上穿 D 买入，超买区 K 下穿 D 卖出。"), QStringLiteral("A股"), 18,
+         {integerParameter(QStringLiteral("period"), QStringLiteral("观察周期"), 14, 2, 120),
+          integerParameter(QStringLiteral("smoothK"), QStringLiteral("K 平滑"), 3, 1, 30),
+          integerParameter(QStringLiteral("smoothD"), QStringLiteral("D 平滑"), 3, 1, 30),
+          realParameter(QStringLiteral("oversold"), QStringLiteral("超卖阈值"), 30.0, 1.0, 49.0, 1.0),
+          realParameter(QStringLiteral("overbought"), QStringLiteral("超买阈值"), 70.0, 51.0, 99.0, 1.0)}}
     };
 }
 
@@ -1065,6 +1135,14 @@ std::unique_ptr<BacktestStrategy> BacktestStrategyRegistry::create(
         return std::make_unique<BollingerMeanReversionStrategy>(
             values.value(QStringLiteral("period")).toInt(),
             values.value(QStringLiteral("standardDeviations")).toDouble());
+    }
+    if (strategyId == QStringLiteral("stoch_mean_reversion")) {
+        return std::make_unique<StochMeanReversionStrategy>(
+            values.value(QStringLiteral("period")).toInt(),
+            values.value(QStringLiteral("smoothK")).toInt(),
+            values.value(QStringLiteral("smoothD")).toInt(),
+            values.value(QStringLiteral("oversold")).toDouble(),
+            values.value(QStringLiteral("overbought")).toDouble());
     }
     if (strategyId == QStringLiteral("tick_momentum")) {
         return std::make_unique<TickMomentumBacktestStrategy>(

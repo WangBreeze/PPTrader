@@ -497,6 +497,17 @@ Item {
 
             Rectangle {
                 Layout.columnSpan: grid.columns
+                Layout.fillWidth: true; Layout.preferredHeight: 980
+                visible: root.subPage === 0
+                radius: 10; color: root.theme.bgPanel; border.color: root.theme.border
+                StrategyMatrixPanel {
+                    anchors.fill: parent; anchors.margins: 18
+                    theme: root.theme; controller: root.controller
+                }
+            }
+
+            Rectangle {
+                Layout.columnSpan: grid.columns
                 Layout.fillWidth: true; Layout.preferredHeight: 620
                 visible: root.subPage === 2
                 radius: 10; color: root.theme.bgPanel; border.color: root.theme.border

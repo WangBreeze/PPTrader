@@ -138,8 +138,47 @@ int main(int argc, char *argv[])
     archive.result = result;
     QElapsedTimer archiveTimer;
     archiveTimer.start();
-    const bool archived = store.savePortfolioBacktestArchive(archive);
+    QString archiveError;
+    const bool archived = store.savePortfolioBacktestArchive(archive, &archiveError);
     const qint64 archiveElapsedMilliseconds = archiveTimer.elapsed();
+    bool archiveReloaded = false;
+    bool archiveMatches = false;
+    int restoredLegCount = -1;
+    int restoredEquityPointCount = -1;
+    int restoredTradeCount = -1;
+    double restoredFinalEquity = 0.0;
+    if (archived) {
+        pp::SqliteLocalDataStore reader;
+        if (reader.initialize(databasePath)) {
+            const auto restored = reader.loadPortfolioBacktestArchive(archive.resultId);
+            archiveReloaded = restored.has_value();
+            if (restored) {
+                restoredLegCount = restored->result.definition.legs.size();
+                restoredEquityPointCount = restored->result.equityCurve.size();
+                restoredTradeCount = restored->result.trades.size();
+                restoredFinalEquity = restored->result.summary.finalEquity;
+                archiveMatches = restored->result.definition.legs.size()
+                        == result.definition.legs.size()
+                    && restored->result.equityCurve.size() == result.equityCurve.size()
+                    && restored->result.trades.size() == result.trades.size()
+                    && qAbs(restored->result.summary.initialCapital
+                            - result.summary.initialCapital) < 1e-6
+                    && qAbs(restored->result.summary.finalEquity
+                            - result.summary.finalEquity) < 1e-6
+                    && qAbs(restored->result.summary.totalReturnPercent
+                            - result.summary.totalReturnPercent) < 1e-9
+                    && qAbs(restored->result.summary.maxDrawdownPercent
+                            - result.summary.maxDrawdownPercent) < 1e-9
+                    && qAbs(restored->result.summary.totalCommission
+                            - result.summary.totalCommission) < 1e-6
+                    && restored->result.summary.totalTrades
+                        == result.summary.totalTrades;
+            }
+        }
+        if (!archiveMatches && archiveError.isEmpty()) {
+            archiveError = QStringLiteral("组合归档恢复核对失败");
+        }
+    }
 
     QJsonObject report;
     report.insert(QStringLiteral("date"),
@@ -152,6 +191,13 @@ int main(int argc, char *argv[])
     report.insert(QStringLiteral("archiveElapsedMilliseconds"),
                   static_cast<double>(archiveElapsedMilliseconds));
     report.insert(QStringLiteral("archived"), archived);
+    report.insert(QStringLiteral("archiveReloaded"), archiveReloaded);
+    report.insert(QStringLiteral("archiveMatchesSource"), archiveMatches);
+    report.insert(QStringLiteral("archiveError"), archiveError);
+    report.insert(QStringLiteral("restoredLegCount"), restoredLegCount);
+    report.insert(QStringLiteral("restoredEquityPointCount"), restoredEquityPointCount);
+    report.insert(QStringLiteral("restoredTradeCount"), restoredTradeCount);
+    report.insert(QStringLiteral("restoredFinalEquity"), restoredFinalEquity);
     report.insert(QStringLiteral("resultId"), archive.resultId);
     report.insert(QStringLiteral("equityPoints"),
                   result.equityCurve.size());
@@ -173,5 +219,5 @@ int main(int argc, char *argv[])
         return 5;
     }
     QTextStream(stdout) << QString::fromUtf8(payload) << Qt::endl;
-    return 0;
+    return archived && archiveMatches ? 0 : 6;
 }

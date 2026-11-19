@@ -2,11 +2,28 @@
 
 本目录服务于“多个指标组成一个策略”的本地研究。指标不拥有资金或持仓；一次策略回测拥有自己的初始资金、持仓和费用。目录扩展不等于任意公式编程，也不代表策略收益有效。
 
+## 版本微调与回测快照（2026-11-12）
+
+策略管理可从任一已保存版本创建「复制微调」草稿；系统取该策略当前最高版本号加一，复制指标、入出场和风控定义，并更新草稿创建时间。编辑后仍须校验、另存为不可变版本，原版本不受影响；未保存草稿不能回测。复制操作写 `ui_click` 行为日志，记录策略 ID、源版本和草稿版本，不记录定义正文。
+
+编译自定义策略时，运行计划固定已验证定义的规范化完整 JSON 及其 SHA-256。单次和矩阵回测把该定义快照、校验值、实际运行参数与现有风控规则一起写入结果归档的规则快照；恢复时重新核对定义内容、策略 ID、版本和校验值，发现不一致则拒绝恢复。旧归档没有定义快照时仍可读取，但不能称为已校验的完整定义。实现复用既有归档字段，未触发全库结构迁移。
+
+**更新（2026-11-12，逐笔首版）**：引擎现可让 `nextOpen` 的单股自定义策略直接处理原始逐笔 Tick，并有本地命令入口；工作台和策略矩阵仍运行在 Tick 派生 K 线，尚未接入逐笔入口。逐笔模式每笔成交作为一条指标观测，O/H/L/C 均为成交价，`period` 计成交笔数，信号在下一笔 Tick 尝试成交；详见[逐笔引擎验收](custom-strategy-raw-tick-engine-2026-11-12.md)。策略版本和回测输入是两条独立身份：定义快照固定规则，数据集身份和数据版本固定使用的历史行情。
+
+真实历史分钟线两股复跑、盈利归档恢复及容量见[版本快照验收报告](custom-strategy-snapshot-validation-2026-11-12.md)。
+
 ## 目录与输入
 
 既有 10 类为 SMA、EMA、RSI、MACD、BOLLINGER、ATR、VOLUME_SMA、ROC、VWAP、PP_FLOW。2026-09-07 已新增下表 8 类，总计 18 类；构建与验收证据见 [当日扩展验收报告](custom-strategy-indicator-expansion-2026-09-07.md)。
 
-本次新增用于 DSL v2/v3 的 Bar 序列，向导以 v2 保存。每策略最多 16 个命名序列的既有限制不变：18 是可选类别数，不是必须一次添加 18 个序列。KDJ 的 K、D、J 或通道的三条输出需分别添加序列、使用不同别名。
+2026-11-12 又新增 STOCH 与 SUPERTREND，当前可选 **20 类**。STOCH 的 K、D 用简单移动平均平滑，与既有 KDJ 的递归平滑不同；SUPERTREND 的 ATR 使用 Wilder 平滑，与现有简单平均 ATR 输出并非同一序列。
+
+| 新增类别 | 参数及默认值 | 计算与首个可用位置 |
+|---|---|---|
+| STOCH | period=14、kPeriod=3、dPeriod=3、output=k（k/d） | 原始 K=100×(收盘−窗口最低)/(窗口最高−窗口最低)，再分别以 SMA 平滑 K、D；零振幅时原始 K=50；D 首次在第 period+kPeriod+dPeriod−2 根可用 |
+| SUPERTREND | period=10、multiplier=3、output=line（line/direction） | TR 经 Wilder 平滑后形成 ATR；结合前一轨道与前收盘递推趋势线，方向上为 1、下为 −1；第 period 根开始 |
+
+新增指标用于 DSL v2/v3 的 Bar 序列，向导以 v2 保存。每策略最多 16 个命名序列的既有限制不变：20 是可选类别数，不是必须一次添加 20 个序列。KDJ 的 K、D、J 或通道的三条输出需分别添加序列、使用不同别名。
 
 | 新增类别 | 参数及默认值 | 计算与首个可用位置 |
 |---|---|---|
@@ -37,3 +54,5 @@
 ## 公式参考
 
 WMA 的近期线性加权规则参考 [TradingView WMA](https://www.tradingview.com/support/solutions/43000594680-weighted-moving-average/)。CCI 的 HLC3、平均绝对偏差及 0.015 系数参考 [TradingView CCI](https://www.tradingview.com/support/solutions/43000502001-commodity-channel-index-cci/)。MFI 的正负典型价格资金流参考 [TradingView MFI](https://www.tradingview.com/support/solutions/43000502348-money-flow-mfi/)。通道上下轨和中点参考 [TradingView Donchian Channels](https://www.tradingview.com/support/solutions/43000502253-donchian-channels-dc/)。上面的热身、种子和退化窗口规则以 PPTrader 本文及回归测试为准，不宣称与所有第三方终端数值逐点一致。
+
+STOCH 的两层 SMA 参考 [TradingView Stochastic](https://www.tradingview.com/support/solutions/43000502332-stochastic-stoch/)；SUPERTREND 的轨道递推参考 [TradingView Supertrend](https://www.tradingview.com/support/solutions/43000634738-supertrend/)。新增内置 STOCH 均值回归策略在超卖区 K 上穿 D 买入、超买区 K 下穿 D 卖出；阈值和周期属于本项目策略参数。

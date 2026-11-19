@@ -102,7 +102,7 @@ cd ~/workspace/TickData
 bash scripts/post_market_workflow.sh "$(date +%Y%m%d)"
 ```
 
-该工作流包含 **7 个步骤，每步最多重试 5 次**（退避 30/60/120/300/600 秒）：
+该工作流包含 **7 个步骤（每步最多重试 5 次，退避 30/60/120/300/600 秒），末尾再跑一次冷备份**：
 
 | 顺序 | 步骤 | 实际命令 |
 |---:|---|---|
@@ -113,6 +113,7 @@ bash scripts/post_market_workflow.sh "$(date +%Y%m%d)"
 | 5 | fetch_external_5min | `python3 scripts/fetch_5min_batch.py --date <DATE> --source tencent` |
 | 6 | export_external_klines | `python3 scripts/export_external_klines.py --date <DATE> --data-dir data` |
 | 7 | verify_completeness | `python3 scripts/verify_completeness.py <DATE> data` |
+| 8 | cold_backup 冷备份（仅验收通过） | `bash scripts/cold_backup.sh` |
 
 **最小替代方案**（只采 tick，不做校验/补充/导出）：
 
@@ -123,6 +124,26 @@ cd ~/workspace/TickData
 
 > `-r/--realtime` = 采集全部 A 股，单次运行，收盘后退出。
 > 若只走这条路径，第 4 节的「异常判读」将缺少校验数据，请在报文里说明。
+
+### Step 2 —— 冷备份增量补齐（验收通过后自动执行，2026-11-09 新增）
+
+工作流新增第 6 步 `cold_backup`：**只有验收通过**（无 FATAL 步骤且 `validate_ticks_fast.py`
+退出码为 0）才会执行，把数据增量归档到移动硬盘：
+
+```bash
+# 工作流内自动调用，无需手工执行；等价手工命令：
+cd ~/workspace/TickData
+./scripts/cold_backup.sh            # 增量：已归档且无更新则跳过
+./scripts/cold_backup.sh --dry-run  # 只列计划
+./scripts/cold_backup.sh --verify --limit 3   # 校验 zstd + tar + sha256
+```
+
+- 归档落在 `/run/media/wanglc/移动硬盘/NAS/TickData`：`data-<日期>.tar.zst`（含
+  `+5min` / `+30min` / `+daily` 变体）与 `data-toplevel-files.tar.zst`，并维护 `MANIFEST.json`
+- 验收未通过、或移动硬盘未挂载时，第 6 步只写 `WARN` 并跳过，**不改变采集结论、不触发失败告警**
+- 冷备份逻辑归 TickData 仓库（`scripts/cold_backup.sh`、`docs/cold-backup.md`），PPTrader 只保留
+  此处说明与本任务的历史迁移记录
+- 报文里若要提冷备份，读 `logs/postmarket_<DATE>.log` 里的 `[6/6] 冷备份增量补齐` 段落即可
 
 ---
 
@@ -315,7 +336,7 @@ bash scripts/is_trading_day.sh <YYYYMMDD> && bash scripts/post_market_workflow.s
 流程:
   1. cd ~/workspace/TickData
   2. bash scripts/is_trading_day.sh || 退出（休市，不发消息）
-  3. bash scripts/post_market_workflow.sh $(date +%Y%m%d)
+  3. bash scripts/post_market_workflow.sh $(date +%Y%m%d)   # 含末尾冷备份增量补齐
   4. 读第 4 节的判读文件，按第 5 节模板发微信
 超时: 建议 2 小时（工作流单步上限 7200 秒）
 ```

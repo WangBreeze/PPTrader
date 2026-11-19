@@ -3,14 +3,24 @@
 #include "models/BatchBacktestResultListModel.h"
 #include "services/BatchBacktestResultRetention.h"
 #include "services/BatchBacktestService.h"
+#include "services/StrategyMatrixBacktestService.h"
 #include "services/AsyncBacktestArchiveService.h"
 #include "services/AsyncRawTickAvailabilityService.h"
 #include "services/BacktestDataVersion.h"
+#include "services/BacktestDataAvailabilityPlanner.h"
+#include "services/BacktestDataQualityGate.h"
+#include "services/BacktestEngine.h"
 #include "services/SqliteLocalDataStore.h"
+#include "strategy/CustomStrategyCompiler.h"
+#include "strategy/CustomStrategyValidator.h"
+#include "strategy/CustomBacktestStrategy.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
 #include <QSignalSpy>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -98,6 +108,32 @@ QString createDatabase(const QString &directory, int symbolCount, int barsPerSym
     return path;
 }
 
+BacktestResult archiveEligibleFixture(const BacktestResult &source)
+{
+    // 归档读写测试使用明确的闭合盈利交易；行情身份和 Tick 快照仍取自原结果。
+    BacktestResult result = source;
+    BacktestTrade trade;
+    trade.instrument = result.config.instrument;
+    trade.entryTime = result.config.from;
+    trade.exitTime = result.config.to;
+    trade.entryPrice = 10.0;
+    trade.exitPrice = 10.1;
+    trade.quantity = 100.0;
+    trade.grossPnl = 10.0;
+    trade.netPnl = 9.0;
+    trade.commission = 1.0;
+    trade.returnPercent = 1.0;
+    trade.entryReason = QStringLiteral("归档读写测试入场");
+    trade.exitReason = QStringLiteral("归档读写测试出场");
+    result.trades.append(trade);
+    result.summary.totalTrades = result.trades.size();
+    result.summary.winningTrades = 1;
+    result.summary.finalEquity = result.summary.initialCapital + 9.0;
+    result.summary.totalReturnPercent =
+        900.0 / result.summary.initialCapital;
+    return result;
+}
+
 LocalHistoryDataset datasetFor(int symbolIndex, int candleCount)
 {
     LocalHistoryDataset dataset;
@@ -155,7 +191,7 @@ BatchBacktestRequest rawRequestFor(int requestId, const QDate &startDate,
 
 bool seedDatasetDay(SqliteLocalDataStore *store, const Instrument &instrument,
                     const QDate &day, int observationCount,
-                    qint64 skippedRecords = 0)
+                    qint64 skippedRecords = 0, double priceOffset = 0.0)
 {
     if (!store || observationCount <= 0) return false;
     const QTimeZone shanghai("Asia/Shanghai");
@@ -164,7 +200,7 @@ bool seedDatasetDay(SqliteLocalDataStore *store, const Instrument &instrument,
     ticks.reserve(observationCount);
     candles.reserve(observationCount);
     for (int index = 0; index < observationCount; ++index) {
-        const double price = 10.0 + index * 0.02
+        const double price = 10.0 + priceOffset + index * 0.02
             + (day.dayOfYear() % 5) * 0.01;
         const QDateTime timestamp = QDateTime(day, QTime(9, 30), shanghai)
                                         .addSecs(index * 60).toUTC();
@@ -224,6 +260,15 @@ class BatchBacktestTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void matrixCreatesDistinctArchivedCells_data();
+    void matrixCreatesDistinctArchivedCells();
+    void matrixKeepsParameterVariantsSeparate();
+    void matrixSnapshotResumeSkipsSuccessAndRejectsChangedData();
+    void matrixMatchesStandaloneOnLocalHistory();
+    void matrixAcceptsFrozenCustomStrategy();
+    void matrixRawCustomStrategiesMatchStandalone();
+    void matrixRawTwoRealStocksMatchStandalone();
+    void matrixRealSixStockThroughput();
     void completesMultipleSymbolsAndReportsInsufficientData();
     void loadsCompletePerSymbolDateRangeWithoutUniformBarCount();
     void defaultsToCompleteRawTicksForDateRange();
@@ -255,6 +300,930 @@ private slots:
     void cancellationAndBusyGate();
     void resultModelRolesAndOrdering();
 };
+
+void BatchBacktestTest::matrixCreatesDistinctArchivedCells_data()
+{
+    QTest::addColumn<int>("strategyCount");
+    QTest::addColumn<int>("symbolCount");
+    QTest::newRow("three-strategies-one-stock") << 3 << 1;
+    QTest::newRow("one-strategy-three-stocks") << 1 << 3;
+    QTest::newRow("three-by-three") << 3 << 3;
+}
+
+void BatchBacktestTest::matrixCreatesDistinctArchivedCells()
+{
+    QFETCH(int, strategyCount);
+    QFETCH(int, symbolCount);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), symbolCount, 60);
+    QVERIFY(!path.isEmpty());
+
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 1, 5);
+    request.endDate = request.startDate;
+    request.periodSeconds = 60;
+    for (int index = 0; index < symbolCount; ++index)
+        request.datasets.append(datasetFor(index, 60));
+    const QStringList strategyIds {QStringLiteral("sma_crossover"),
+                                   QStringLiteral("macd_trend"),
+                                   QStringLiteral("bollinger_mean_reversion")};
+    for (int index = 0; index < strategyCount; ++index) {
+        StrategyMatrixEntry entry;
+        entry.strategyId = strategyIds.at(index);
+        request.strategies.append(entry);
+    }
+
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(request));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+    QCOMPARE(itemSpy.count(), strategyCount * symbolCount);
+    QCOMPARE(finishedSpy.first().at(1).toBool(), false);
+    QVERIFY(finishedSpy.first().at(2).toString().isEmpty());
+
+    SqliteLocalDataStore verificationStore;
+    QVERIFY(verificationStore.initialize(path));
+    QSet<QString> taskIds;
+    QSet<QString> resultIds;
+    QHash<QString, QString> candleOwnerBySymbol;
+    int expectedCandleRows = 0;
+    int profitableCount = 0;
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(arguments.at(0));
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        QVERIFY(!taskIds.contains(item.taskId));
+        taskIds.insert(item.taskId);
+        if (!isProfitableBacktestForArchive(
+                item.summary, BacktestDataMode::Candles)) {
+            QVERIFY(item.resultId.isEmpty());
+            continue;
+        }
+        ++profitableCount;
+        QVERIFY(!item.resultId.isEmpty());
+        QVERIFY(!resultIds.contains(item.resultId));
+        resultIds.insert(item.resultId);
+        const auto archived = verificationStore.loadBacktestArchive(item.resultId);
+        QVERIFY(archived.has_value());
+        QCOMPARE(archived->result.config.taskId, item.taskId);
+        QCOMPARE(archived->result.config.strategyId, item.strategyId);
+        QCOMPARE(archived->result.config.instrument.symbol, item.symbol);
+        QCOMPARE(archived->result.config.datasetIdentity.datasetVersion,
+                 item.datasetVersion);
+        QCOMPARE(archived->result.candles.size(), item.actualBars);
+        if (!candleOwnerBySymbol.contains(item.symbol)) {
+            QVERIFY(archived->sharedCandleResultId.isEmpty());
+            candleOwnerBySymbol.insert(item.symbol, item.resultId);
+            expectedCandleRows += item.actualBars;
+        } else {
+            QCOMPARE(archived->sharedCandleResultId,
+                     candleOwnerBySymbol.value(item.symbol));
+        }
+    }
+    const QString connectionName = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"),
+                                                          connectionName);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral("select count(*) from backtest_candles")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), expectedCandleRows);
+        QVERIFY(query.exec(QStringLiteral(
+            "select count(*) from backtest_results where candle_series_version=2")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(),
+                 profitableCount - candleOwnerBySymbol.size());
+        QVERIFY(query.exec(QStringLiteral("select count(*) from backtest_results")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), profitableCount);
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
+void BatchBacktestTest::matrixKeepsParameterVariantsSeparate()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 1, 60);
+    QVERIFY(!path.isEmpty());
+
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 1, 5);
+    request.endDate = request.startDate;
+    request.periodSeconds = 60;
+    request.datasets.append(datasetFor(0, 60));
+    for (const int fastPeriod : {5, 8}) {
+        StrategyMatrixEntry entry;
+        entry.strategyId = QStringLiteral("sma_crossover");
+        entry.profileLabel = QStringLiteral("快线%1").arg(fastPeriod);
+        entry.parameters = {{QStringLiteral("fastPeriod"), fastPeriod},
+                            {QStringLiteral("slowPeriod"), 20}};
+        request.strategies.append(entry);
+    }
+
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(request));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+    QCOMPARE(itemSpy.count(), 2);
+
+    SqliteLocalDataStore verificationStore;
+    QVERIFY(verificationStore.initialize(path));
+    QSet<QString> taskIds;
+    QSet<QString> fingerprints;
+    QSet<int> fastPeriods;
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(arguments.at(0));
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        taskIds.insert(item.taskId);
+        fingerprints.insert(item.parameterFingerprint);
+        const auto archived = verificationStore.loadBacktestArchive(item.resultId);
+        QVERIFY(archived.has_value());
+        fastPeriods.insert(archived->result.config.strategyParameters
+                               .value(QStringLiteral("fastPeriod")).toInt());
+    }
+    QCOMPARE(taskIds.size(), 2);
+    QCOMPARE(fingerprints.size(), 2);
+    QCOMPARE(fastPeriods, (QSet<int> {5, 8}));
+
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.strategies[1].parameters = request.strategies[0].parameters;
+    QVERIFY(!service.start(request));
+}
+
+void BatchBacktestTest::matrixSnapshotResumeSkipsSuccessAndRejectsChangedData()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 1, 60);
+    QVERIFY(!path.isEmpty());
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 1, 5);
+    request.endDate = request.startDate;
+    request.periodSeconds = 60;
+    request.datasets.append(datasetFor(0, 60));
+    for (const QString &id : {QStringLiteral("sma_crossover"),
+                              QStringLiteral("macd_trend")}) {
+        StrategyMatrixEntry entry;
+        entry.strategyId = id;
+        request.strategies.append(entry);
+    }
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const auto identity = store.loadBacktestDatasetIdentity(
+        request.datasets.first().instrument, 60);
+    QVERIFY(identity.has_value());
+    request.frozenIdentities.append(
+        BacktestDataAvailabilityPlanner::trimIdentity(
+            *identity, request.startDate, request.endDate));
+    QVERIFY(!request.frozenIdentities.first().isEmpty());
+    QString parseError;
+    auto restored = strategyMatrixRequestFromJson(
+        strategyMatrixRequestToJson(request), &parseError);
+    QVERIFY2(restored.has_value(), qPrintable(parseError));
+    QCOMPARE(restored->frozenIdentities.first().datasetVersion,
+             request.frozenIdentities.first().datasetVersion);
+    QCOMPARE(restored->strategies.size(), 2);
+    const QString skippedTask = strategyMatrixTaskId(
+        request.runId, request.strategies.first(), request.datasets.first());
+    restored->skipTaskIds.insert(skippedTask);
+
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(*restored));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+    QCOMPARE(itemSpy.count(), 1);
+    const auto item = qvariant_cast<StrategyMatrixItem>(itemSpy.first().first());
+    QVERIFY2(item.succeeded, qPrintable(item.error));
+    QVERIFY(item.taskId != skippedTask);
+
+    itemSpy.clear();
+    finishedSpy.clear();
+    restored->skipTaskIds.clear();
+    restored->frozenIdentities[0].datasetVersion = QStringLiteral("changed");
+    QVERIFY(service.start(*restored));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+    QCOMPARE(itemSpy.count(), 2);
+    for (const auto &arguments : itemSpy) {
+        const auto failed = qvariant_cast<StrategyMatrixItem>(arguments.first());
+        QVERIFY(!failed.succeeded);
+        QVERIFY(failed.error.contains(QStringLiteral("数据身份已变化")));
+    }
+}
+
+void BatchBacktestTest::matrixMatchesStandaloneOnLocalHistory()
+{
+    const QString path = qEnvironmentVariable("PPTRADER_MATRIX_REAL_DB");
+    if (path.isEmpty()) QSKIP("Set PPTRADER_MATRIX_REAL_DB to an isolated local history database");
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 7, 20);
+    request.endDate = QDate(2026, 11, 9);
+    request.periodSeconds = 86400;
+    for (const QString &symbol : {QStringLiteral("000001"),
+                                  QStringLiteral("600519")}) {
+        LocalHistoryDataset dataset;
+        dataset.instrument = {symbol, symbol, Market::AShare,
+                              symbol.startsWith(QLatin1Char('6'))
+                                  ? QStringLiteral("上交所") : QStringLiteral("深交所")};
+        dataset.periodSeconds = 86400;
+        dataset.source = QStringLiteral("raw_tick_cache_v1");
+        request.datasets.append(dataset);
+    }
+    for (const QString &id : {QStringLiteral("sma_crossover"),
+                              QStringLiteral("macd_trend")}) {
+        StrategyMatrixEntry entry;
+        entry.strategyId = id;
+        request.strategies.append(entry);
+    }
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(request));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 30000);
+    QCOMPARE(itemSpy.count(), 4);
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(arguments.at(0));
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        const auto archived = store.loadBacktestArchive(item.resultId);
+        QVERIFY(archived.has_value());
+        const QVector<Candle> candles = store.loadCandlesFromSource(
+            archived->result.config.instrument, 86400,
+            QDateTime(request.startDate, QTime(0, 0), QTimeZone("Asia/Shanghai")).toUTC(),
+            QDateTime(request.endDate.addDays(1), QTime(0, 0),
+                      QTimeZone("Asia/Shanghai")).toUTC().addMSecs(-1),
+            QStringLiteral("raw_tick_cache_v1"));
+        BacktestEngine standalone;
+        QSignalSpy standaloneFinished(&standalone, &BacktestEngine::finished);
+        BacktestConfig config = archived->result.config;
+        QVERIFY(standalone.start(config, candles));
+        QTRY_COMPARE_WITH_TIMEOUT(standaloneFinished.count(), 1, 10000);
+        const BacktestResult &expected = standalone.result();
+        QCOMPARE(item.dataVersion, expected.config.dataVersion);
+        QCOMPARE(item.summary.totalReturnPercent,
+                 expected.summary.totalReturnPercent);
+        QCOMPARE(item.summary.maxDrawdownPercent,
+                 expected.summary.maxDrawdownPercent);
+        QCOMPARE(item.summary.totalTrades, expected.summary.totalTrades);
+        QCOMPARE(item.summary.totalCommission,
+                 expected.summary.totalCommission);
+        QCOMPARE(archived->result.trades.size(), expected.trades.size());
+        for (int index = 0; index < expected.trades.size(); ++index) {
+            const auto &actualTrade = archived->result.trades.at(index);
+            const auto &expectedTrade = expected.trades.at(index);
+            QCOMPARE(actualTrade.entryTime, expectedTrade.entryTime);
+            QCOMPARE(actualTrade.exitTime, expectedTrade.exitTime);
+            QCOMPARE(actualTrade.entryPrice, expectedTrade.entryPrice);
+            QCOMPARE(actualTrade.exitPrice, expectedTrade.exitPrice);
+            QCOMPARE(actualTrade.quantity, expectedTrade.quantity);
+        }
+        QCOMPARE(archived->result.chartSignals.size(), expected.chartSignals.size());
+        for (int index = 0; index < expected.chartSignals.size(); ++index) {
+            const auto &actualSignal = archived->result.chartSignals.at(index);
+            const auto &expectedSignal = expected.chartSignals.at(index);
+            QCOMPARE(actualSignal.timestamp, expectedSignal.timestamp);
+            QCOMPARE(actualSignal.side, expectedSignal.side);
+            QCOMPARE(actualSignal.price, expectedSignal.price);
+        }
+    }
+}
+
+void BatchBacktestTest::matrixAcceptsFrozenCustomStrategy()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 1, 60);
+    QVERIFY(!path.isEmpty());
+    static constexpr auto document = R"({
+      "schemaVersion":1,"strategyId":"custom_matrix_test","version":2,
+      "name":"矩阵自定义策略","description":"固定版本回测测试","author":"Qt Test",
+      "market":"A股","executionScope":"backtest_only",
+      "createdAt":"2026-08-08T00:00:00.000Z",
+      "updatedAt":"2026-08-08T00:00:00.000Z",
+      "parameters":[
+        {"key":"fastPeriod","displayName":"快线","type":"integer",
+         "defaultValue":3,"minimumValue":2,"maximumValue":120,"step":1},
+        {"key":"slowPeriod","displayName":"慢线","type":"integer",
+         "defaultValue":8,"minimumValue":3,"maximumValue":250,"step":1}],
+      "entry":{"op":"gt",
+        "left":{"indicator":"SMA","period":{"parameter":"fastPeriod"}},
+        "right":{"indicator":"SMA","period":{"parameter":"slowPeriod"}}},
+      "exit":{"op":"crossesBelow",
+        "left":{"indicator":"SMA","period":{"parameter":"fastPeriod"}},
+        "right":{"indicator":"SMA","period":{"parameter":"slowPeriod"}}}
+    })";
+    CustomStrategyDefinition definition;
+    definition.document = QJsonDocument::fromJson(document).object();
+    QString error;
+    const auto plan = CustomStrategyCompiler().compile(definition, {}, &error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    definition.strategyId = plan->strategyId;
+    definition.version = plan->version;
+    definition.name = plan->name;
+
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 1, 5);
+    request.endDate = request.startDate;
+    request.periodSeconds = 60;
+    request.datasets = {datasetFor(0, 60)};
+    StrategyMatrixEntry entry;
+    entry.strategyId = plan->strategyId;
+    entry.version = plan->version;
+    entry.parameters = plan->normalizedParameters;
+    entry.custom = true;
+    entry.customPlan = *plan;
+    entry.definitionSnapshot = definition;
+    request.strategies = {entry};
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const auto identity = store.loadBacktestDatasetIdentity(
+        request.datasets.first().instrument, 60);
+    QVERIFY(identity.has_value());
+    request.frozenIdentities.append(
+        BacktestDataAvailabilityPlanner::trimIdentity(
+            *identity, request.startDate, request.endDate));
+    auto restored = strategyMatrixRequestFromJson(
+        strategyMatrixRequestToJson(request), &error);
+    QVERIFY2(restored.has_value(), qPrintable(error));
+    QCOMPARE(restored->strategies.first().customPlan.normalizedParameters,
+             plan->normalizedParameters);
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(*restored));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 10000);
+    QCOMPARE(itemSpy.count(), 1);
+    const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(
+        itemSpy.first().first());
+    QVERIFY2(item.succeeded, qPrintable(item.error));
+    const auto archive = store.loadBacktestArchive(item.resultId);
+    QVERIFY(archive.has_value());
+    QCOMPARE(archive->result.config.strategyVersion, 2);
+    QCOMPARE(archive->result.config.strategyParameters, plan->normalizedParameters);
+    QCOMPARE(archive->result.config.ruleSnapshot, plan->ruleSnapshot());
+}
+
+void BatchBacktestTest::matrixRawCustomStrategiesMatchStandalone()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = createDatabase(directory.path(), 2, 12);
+    QVERIFY(!path.isEmpty());
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const QDate firstDay(2026, 1, 5);
+    const QDate lastDay = firstDay.addDays(1);
+    for (int symbolIndex = 0; symbolIndex < 2; ++symbolIndex) {
+        QVERIFY(seedDatasetDay(&store, datasetFor(symbolIndex, 12).instrument,
+                               lastDay, 12, 0, 2.0));
+    }
+
+    static constexpr auto document = R"({
+      "schemaVersion":2,"strategyId":"custom_matrix_raw_sma","version":1,
+      "name":"逐笔矩阵均线测试","description":"验证逐笔矩阵配对","author":"Qt Test",
+      "market":"A股","executionScope":"backtest_only",
+      "createdAt":"2026-11-13T00:00:00.000Z",
+      "updatedAt":"2026-11-13T00:00:00.000Z",
+      "parameters":[{"key":"period","displayName":"成交笔数窗口",
+        "type":"integer","defaultValue":3,"minimumValue":2,
+        "maximumValue":8,"step":1}],
+      "entry":{"op":"gt","left":{"indicator":"SMA",
+        "period":{"parameter":"period"}},"right":{"value":0}},
+      "exit":{"op":"gt","left":{"field":"close"},"right":{"value":0}},
+      "signal":{"priceMode":"nextOpen"}
+    })";
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(CustomStrategyValidator().parseAndValidate(
+        QString::fromUtf8(document), &definition, &error), qPrintable(error));
+
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = firstDay;
+    request.endDate = lastDay;
+    request.dataMode = BacktestDataMode::RawTicks;
+    request.periodSeconds = 0;
+    for (int symbolIndex = 0; symbolIndex < 2; ++symbolIndex) {
+        LocalHistoryDataset dataset = datasetFor(symbolIndex, 0);
+        dataset.periodSeconds = 0;
+        dataset.source = QStringLiteral("raw_trade_ticks_v1");
+        request.datasets.append(dataset);
+        const auto identity = store.loadRawBacktestDatasetIdentity(dataset.instrument);
+        QVERIFY(identity.has_value());
+        request.frozenIdentities.append(
+            BacktestDataAvailabilityPlanner::trimIdentity(
+                *identity, firstDay, lastDay));
+    }
+    for (int period : {3, 5}) {
+        const QVariantMap parameters {{QStringLiteral("period"), period}};
+        const auto plan = CustomStrategyCompiler().compile(
+            definition, parameters, &error);
+        QVERIFY2(plan.has_value(), qPrintable(error));
+        StrategyMatrixEntry entry;
+        entry.strategyId = plan->strategyId;
+        entry.version = plan->version;
+        entry.profileLabel = QStringLiteral("SMA%1").arg(period);
+        entry.parameters = plan->normalizedParameters;
+        entry.custom = true;
+        entry.customPlan = *plan;
+        entry.definitionSnapshot = definition;
+        request.strategies.append(entry);
+    }
+    auto restored = strategyMatrixRequestFromJson(
+        strategyMatrixRequestToJson(request), &error);
+    QVERIFY2(restored.has_value(), qPrintable(error));
+    QCOMPARE(restored->dataMode, BacktestDataMode::RawTicks);
+    QCOMPARE(restored->strategies.size(), 2);
+    QJsonObject invalidSnapshot = QJsonDocument::fromJson(
+        strategyMatrixRequestToJson(request).toUtf8()).object();
+    invalidSnapshot.insert(QStringLiteral("dataMode"), QStringLiteral("candles"));
+    QVERIFY(!strategyMatrixRequestFromJson(QString::fromUtf8(
+        QJsonDocument(invalidSnapshot).toJson(QJsonDocument::Compact))).has_value());
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(*restored));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+    QCOMPARE(itemSpy.count(), 4);
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(
+            arguments.first());
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        QCOMPARE(item.actualBars, 24);
+        QVERIFY(!item.resultId.isEmpty());
+        const auto archive = store.loadBacktestArchive(
+            item.resultId, BacktestArchiveLoadMode::CompleteInputSnapshot);
+        QVERIFY(archive.has_value());
+        QCOMPARE(archive->result.config.dataMode, BacktestDataMode::RawTicks);
+        QCOMPARE(archive->result.config.datasetIdentity.datasetVersion,
+                 item.datasetVersion);
+        QCOMPARE(archive->result.summary.totalTrades, 1);
+        QCOMPARE(archive->result.rawTicks.size(), 24);
+        QVERIFY(archive->result.config.ruleSnapshot.contains(
+            QStringLiteral("rawTickPolicyVersion")));
+
+        BacktestEngine standalone;
+        QSignalSpy standaloneFinished(&standalone, &BacktestEngine::finished);
+        const auto &entry = item.profileLabel == QStringLiteral("SMA3")
+            ? request.strategies.at(0) : request.strategies.at(1);
+        QVERIFY(standalone.start(
+            archive->result.config, archive->result.rawTicks,
+            std::make_unique<CustomBacktestStrategy>(
+                entry.customPlan, CustomBacktestInputMode::RawTicks)));
+        QTRY_COMPARE_WITH_TIMEOUT(standaloneFinished.count(), 1, 5000);
+        const BacktestResult expected = standalone.result();
+        QCOMPARE(item.dataVersion, expected.config.dataVersion);
+        QCOMPARE(item.summary.totalReturnPercent,
+                 expected.summary.totalReturnPercent);
+        QCOMPARE(item.summary.maxDrawdownPercent,
+                 expected.summary.maxDrawdownPercent);
+        QCOMPARE(item.summary.totalCommission,
+                 expected.summary.totalCommission);
+        QCOMPARE(archive->result.trades.size(), expected.trades.size());
+        QCOMPARE(archive->result.trades.first().entryTime,
+                 expected.trades.first().entryTime);
+        QCOMPARE(archive->result.trades.first().exitTime,
+                 expected.trades.first().exitTime);
+        QCOMPARE(archive->result.trades.first().netPnl,
+                 expected.trades.first().netPnl);
+    }
+
+    StrategyMatrixRequest changed = *restored;
+    changed.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    changed.frozenIdentities[0].datasetVersion =
+        QStringLiteral("sha256:") + QString(64, QLatin1Char('0'));
+    StrategyMatrixBacktestService isolated;
+    isolated.setDatabasePath(path);
+    QSignalSpy isolatedItems(&isolated, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy isolatedFinished(&isolated, &StrategyMatrixBacktestService::finished);
+    QVERIFY(isolated.start(changed));
+    QTRY_COMPARE_WITH_TIMEOUT(isolatedFinished.count(), 1, 15000);
+    QCOMPARE(isolatedItems.count(), 4);
+    int rejected = 0;
+    int successful = 0;
+    for (const QList<QVariant> &arguments : isolatedItems) {
+        const auto item = qvariant_cast<StrategyMatrixItem>(arguments.first());
+        if (item.symbol == request.datasets.at(0).instrument.symbol) {
+            QVERIFY(!item.succeeded);
+            QVERIFY(item.error.contains(QStringLiteral("数据身份已变化")));
+            ++rejected;
+        } else {
+            QVERIFY2(item.succeeded, qPrintable(item.error));
+            ++successful;
+        }
+    }
+    QCOMPARE(rejected, 2);
+    QCOMPARE(successful, 2);
+
+    StrategyMatrixTaskRecord unarchived;
+    unarchived.taskId = QStringLiteral("finished-without-archive");
+    unarchived.datasetVersion = request.frozenIdentities.first().datasetVersion;
+    unarchived.strategyId = request.strategies.first().strategyId;
+    unarchived.strategyVersion = request.strategies.first().version;
+    unarchived.symbol = request.datasets.first().instrument.symbol;
+    unarchived.dataVersion = qvariant_cast<StrategyMatrixItem>(
+        itemSpy.first().first()).dataVersion;
+    unarchived.actualBars = 24;
+    unarchived.status = QStringLiteral("succeeded");
+    QVERIFY(store.reconcileStrategyMatrixTaskArchive(&unarchived));
+    QVERIFY(unarchived.resultId.isEmpty());
+    unarchived.status = QStringLiteral("pending");
+    QVERIFY(!store.reconcileStrategyMatrixTaskArchive(&unarchived));
+
+    StrategyMatrixRequest oversized = *restored;
+    oversized.frozenIdentities[0].days[0].rawCount =
+        RawMatrixMaxProcessedTicks + 1;
+    StrategyMatrixBacktestService limited;
+    limited.setDatabasePath(path);
+    QVERIFY(!limited.start(oversized));
+}
+
+void BatchBacktestTest::matrixRawTwoRealStocksMatchStandalone()
+{
+    const QString sourcePath = qEnvironmentVariable("PPTRADER_RAW_MATRIX_SOURCE_DB");
+    if (sourcePath.isEmpty())
+        QSKIP("Set PPTRADER_RAW_MATRIX_SOURCE_DB for the read-only history probe");
+    const QDate firstDay(2026, 7, 20);
+    const QDate lastDay(2026, 7, 21);
+    const QDateTime sourceModified = QFileInfo(sourcePath).lastModified();
+    const QString sourceConnection = QUuid::createUuid().toString(
+        QUuid::WithoutBraces);
+    QSqlDatabase source = QSqlDatabase::addDatabase(
+        QStringLiteral("QSQLITE"), sourceConnection);
+    source.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+    source.setDatabaseName(sourcePath);
+    QVERIFY(source.open());
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString targetPath = directory.filePath(QStringLiteral("raw-matrix.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(targetPath));
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = firstDay;
+    request.endDate = lastDay;
+    request.dataMode = BacktestDataMode::RawTicks;
+    request.periodSeconds = 0;
+    QHash<QString, QVector<RawTradeTick>> sourceTicks;
+    for (const QString &symbol : {QStringLiteral("600519"),
+                                  QStringLiteral("000001")}) {
+        LocalHistoryDataset dataset;
+        dataset.instrument = {symbol, symbol, Market::AShare,
+            symbol.startsWith(QLatin1Char('6'))
+                ? QStringLiteral("XSHG") : QStringLiteral("XSHE")};
+        dataset.source = QStringLiteral("raw_trade_ticks_v1");
+        request.datasets.append(dataset);
+        for (const QDate day : {firstDay, lastDay}) {
+            QVector<RawTradeTick> ticks;
+            QSqlQuery sourceQuery(source);
+            sourceQuery.setForwardOnly(true);
+            sourceQuery.prepare(QStringLiteral(
+                "select name, venue, timestamp_utc, source_line, price, "
+                "volume_shares, amount, direction, source from raw_trade_ticks "
+                "where symbol=? and trading_date=? "
+                "order by timestamp_utc, source_line"));
+            sourceQuery.addBindValue(symbol);
+            sourceQuery.addBindValue(day.toString(Qt::ISODate));
+            QVERIFY(sourceQuery.exec());
+            while (sourceQuery.next()) {
+                RawTradeTick tick;
+                tick.instrument = dataset.instrument;
+                tick.instrument.name = sourceQuery.value(0).toString();
+                tick.instrument.venue = sourceQuery.value(1).toString();
+                tick.tradingDate = day;
+                tick.timestamp = QDateTime::fromString(
+                    sourceQuery.value(2).toString(), Qt::ISODateWithMs);
+                tick.sourceLine = sourceQuery.value(3).toLongLong();
+                tick.price = sourceQuery.value(4).toDouble();
+                tick.volumeShares = sourceQuery.value(5).toDouble();
+                tick.amount = sourceQuery.value(6).toDouble();
+                tick.direction = static_cast<RawTradeDirection>(
+                    sourceQuery.value(7).toInt());
+                tick.source = sourceQuery.value(8).toString();
+                ticks.append(tick);
+            }
+            QVERIFY(!ticks.isEmpty());
+            sourceTicks[symbol] += ticks;
+            QVERIFY(store.beginRawTradeTickImport(
+                dataset.instrument, day, QStringLiteral("tickdata_csv_tick")));
+            QVERIFY(store.appendRawTradeTicks(ticks));
+            TickDataImportResult audit;
+            audit.succeeded = true;
+            audit.linesRead = ticks.size();
+            audit.validRecords = ticks.size();
+            audit.qualityStatus = QStringLiteral("healthy");
+            QVERIFY(store.commitRawTradeTickImport(audit));
+        }
+        const auto identity = store.loadRawBacktestDatasetIdentity(
+            dataset.instrument);
+        QVERIFY(identity.has_value());
+        request.frozenIdentities.append(
+            BacktestDataAvailabilityPlanner::trimIdentity(
+                *identity, firstDay, lastDay));
+    }
+    source.close();
+    source = {};
+    QSqlDatabase::removeDatabase(sourceConnection);
+    static constexpr auto document = R"({
+      "schemaVersion":2,"strategyId":"custom_matrix_real_sma","version":1,
+      "name":"真实逐笔矩阵均线测试","description":"验证逐笔矩阵配对","author":"Qt Test",
+      "market":"A股","executionScope":"backtest_only",
+      "createdAt":"2026-11-13T00:00:00.000Z",
+      "updatedAt":"2026-11-13T00:00:00.000Z",
+      "parameters":[{"key":"period","displayName":"成交笔数窗口",
+        "type":"integer","defaultValue":5,"minimumValue":2,
+        "maximumValue":12,"step":1}],
+      "entry":{"op":"gt","left":{"indicator":"SMA",
+        "period":{"parameter":"period"}},"right":{"value":0}},
+      "exit":{"op":"gt","left":{"field":"close"},"right":{"value":0}},
+      "signal":{"priceMode":"nextOpen"}
+    })";
+    CustomStrategyDefinition definition;
+    QString error;
+    QVERIFY2(CustomStrategyValidator().parseAndValidate(
+        QString::fromUtf8(document), &definition, &error), qPrintable(error));
+    for (int period : {5, 8}) {
+        const auto plan = CustomStrategyCompiler().compile(
+            definition, {{QStringLiteral("period"), period}}, &error);
+        QVERIFY2(plan.has_value(), qPrintable(error));
+        StrategyMatrixEntry entry;
+        entry.strategyId = plan->strategyId;
+        entry.version = plan->version;
+        entry.profileLabel = QStringLiteral("SMA%1").arg(period);
+        entry.parameters = plan->normalizedParameters;
+        entry.custom = true;
+        entry.customPlan = *plan;
+        entry.definitionSnapshot = definition;
+        request.strategies.append(entry);
+    }
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(targetPath);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QVERIFY(service.start(request));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 30000);
+    QCOMPARE(itemSpy.count(), 4);
+    QHash<QString, QString> rawOwnerBySymbol;
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const auto item = qvariant_cast<StrategyMatrixItem>(arguments.first());
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        BacktestEngine standalone;
+        QSignalSpy standaloneFinished(&standalone, &BacktestEngine::finished);
+        const auto &entry = item.profileLabel == QStringLiteral("SMA5")
+            ? request.strategies.at(0) : request.strategies.at(1);
+        BacktestConfig config;
+        config.taskId = item.taskId;
+        config.strategyId = entry.strategyId;
+        config.strategyVersion = entry.version;
+        config.strategyParameters = entry.parameters;
+        config.ruleSnapshot = CustomBacktestStrategy(
+            entry.customPlan, CustomBacktestInputMode::RawTicks).ruleSnapshot();
+        config.instrument = item.symbol == QStringLiteral("600519")
+            ? request.datasets.at(0).instrument : request.datasets.at(1).instrument;
+        config.dataMode = BacktestDataMode::RawTicks;
+        config.initialCapital = request.initialCapital;
+        config.commissionRate = request.commissionRate;
+        config.slippageRate = request.slippageRate;
+        config.lotSize = 100;
+        QVERIFY(standalone.start(config, sourceTicks.value(item.symbol),
+            std::make_unique<CustomBacktestStrategy>(
+                entry.customPlan, CustomBacktestInputMode::RawTicks)));
+        QTRY_COMPARE_WITH_TIMEOUT(standaloneFinished.count(), 1, 5000);
+        const BacktestResult expected = standalone.result();
+        QCOMPARE(item.actualBars, expected.config.actualBars);
+        QCOMPARE(item.dataVersion, expected.config.dataVersion);
+        QCOMPARE(item.summary.totalReturnPercent,
+                 expected.summary.totalReturnPercent);
+        QCOMPARE(item.summary.maxDrawdownPercent,
+                 expected.summary.maxDrawdownPercent);
+        QCOMPARE(item.summary.totalTrades, expected.summary.totalTrades);
+        QCOMPARE(item.summary.totalCommission,
+                 expected.summary.totalCommission);
+        QCOMPARE(!item.resultId.isEmpty(),
+                 isProfitableBacktestForArchive(expected));
+        QVERIFY(!item.resultId.isEmpty());
+        if (!item.resultId.isEmpty()) {
+            const auto archive = store.loadBacktestArchive(
+                item.resultId, BacktestArchiveLoadMode::CompleteInputSnapshot);
+            QVERIFY(archive.has_value());
+            if (!rawOwnerBySymbol.contains(item.symbol)) {
+                QVERIFY(archive->sharedRawTickResultId.isEmpty());
+                rawOwnerBySymbol.insert(item.symbol, item.resultId);
+            } else {
+                QCOMPARE(archive->sharedRawTickResultId,
+                         rawOwnerBySymbol.value(item.symbol));
+            }
+            QCOMPARE(archive->result.trades.size(), expected.trades.size());
+            QCOMPARE(archive->result.rawTicks.size(), expected.rawTicks.size());
+            QCOMPARE(archive->result.chartSignals.size(),
+                     expected.chartSignals.size());
+            const auto tickPage = store.loadBacktestRawTickPage(item.resultId, 100, 5);
+            QVERIFY(tickPage.has_value());
+            QCOMPARE(tickPage->ticks.first().timestamp,
+                     expected.rawTicks.at(100).timestamp);
+            QCOMPARE(archive->result.trades.first().entryTime,
+                     expected.trades.first().entryTime);
+            QCOMPARE(archive->result.trades.first().exitTime,
+                     expected.trades.first().exitTime);
+        }
+        qInfo().noquote() << "raw matrix" << item.symbol << item.profileLabel
+                          << item.actualBars << item.summary.totalTrades
+                          << item.summary.totalReturnPercent;
+    }
+    QCOMPARE(rawOwnerBySymbol.size(), 2);
+    const QString inspectionConnection = QUuid::createUuid().toString(
+        QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), inspectionConnection);
+        database.setDatabaseName(targetPath);
+        QVERIFY(database.open());
+        QSqlQuery count(database);
+        QVERIFY(count.exec(QStringLiteral("select count(*) from backtest_raw_ticks")));
+        QVERIFY(count.next());
+        QCOMPARE(count.value(0).toInt(),
+                 sourceTicks.value(QStringLiteral("600519")).size()
+                     + sourceTicks.value(QStringLiteral("000001")).size());
+        qInfo().noquote() << "shared raw archive rows"
+                          << count.value(0).toInt()
+                          << "standalone rows"
+                          << 2 * count.value(0).toInt();
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(inspectionConnection);
+    QCOMPARE(QFileInfo(sourcePath).lastModified(), sourceModified);
+}
+
+void BatchBacktestTest::matrixRealSixStockThroughput()
+{
+    const QString path = qEnvironmentVariable("PPTRADER_MATRIX_BENCH_DB");
+    if (path.isEmpty()) QSKIP("Set PPTRADER_MATRIX_BENCH_DB for the local six-stock benchmark");
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    const auto existingArchives = store.loadBacktestArchiveSummaries();
+    if (!existingArchives.isEmpty())
+        QVERIFY(store.loadBacktestArchive(existingArchives.first().resultId).has_value());
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = QDate(2026, 7, 20);
+    request.endDate = QDate(2026, 11, 9);
+    request.periodSeconds = 60;
+    for (const QString &symbol : {QStringLiteral("000001"), QStringLiteral("000858"),
+                                  QStringLiteral("300750"), QStringLiteral("600036"),
+                                  QStringLiteral("600519"), QStringLiteral("601318")}) {
+        LocalHistoryDataset dataset;
+        dataset.instrument = {symbol, symbol, Market::AShare,
+                              symbol.startsWith(QLatin1Char('6'))
+                                  ? QStringLiteral("上交所") : QStringLiteral("深交所")};
+        dataset.periodSeconds = 60;
+        dataset.source = QStringLiteral("raw_tick_cache_v1");
+        request.datasets.append(dataset);
+    }
+    const int profileCount = qEnvironmentVariable("PPTRADER_MATRIX_BENCH_VARIANTS")
+                                 == QStringLiteral("2") ? 2 : 1;
+    for (const QString &id : {QStringLiteral("sma_crossover"),
+                              QStringLiteral("macd_trend"),
+                              QStringLiteral("bollinger_mean_reversion")}) {
+        for (int profile = 0; profile < profileCount; ++profile) {
+            StrategyMatrixEntry entry;
+            entry.strategyId = id;
+            if (profile == 1) {
+                entry.profileLabel = QStringLiteral("微调");
+                if (id == QStringLiteral("sma_crossover")) {
+                    entry.parameters = {{QStringLiteral("fastPeriod"), 8},
+                                        {QStringLiteral("slowPeriod"), 20}};
+                } else if (id == QStringLiteral("macd_trend")) {
+                    entry.parameters = {{QStringLiteral("signalPeriod"), 12}};
+                } else {
+                    entry.parameters = {{QStringLiteral("standardDeviations"), 2.5}};
+                }
+            }
+            request.strategies.append(entry);
+        }
+    }
+
+    StrategyMatrixBacktestService service;
+    service.setDatabasePath(path);
+    QSignalSpy itemSpy(&service, &StrategyMatrixBacktestService::itemReady);
+    QSignalSpy finishedSpy(&service, &StrategyMatrixBacktestService::finished);
+    QElapsedTimer matrixClock;
+    matrixClock.start();
+    QVERIFY(service.start(request));
+    QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 120000);
+    const qint64 matrixMilliseconds = matrixClock.elapsed();
+    QCOMPARE(itemSpy.count(), request.strategies.size() * request.datasets.size());
+    QHash<QString, StrategyMatrixItem> matrixItems;
+    int totalBars = 0;
+    qint64 matrixTaskMilliseconds = 0;
+    for (const QList<QVariant> &arguments : itemSpy) {
+        const StrategyMatrixItem item = qvariant_cast<StrategyMatrixItem>(arguments.at(0));
+        QVERIFY2(item.succeeded, qPrintable(item.error));
+        matrixItems.insert(item.strategyId + QLatin1Char(':')
+                               + item.profileLabel + QLatin1Char(':') + item.symbol,
+                           item);
+        totalBars += item.actualBars;
+        matrixTaskMilliseconds += item.elapsedMilliseconds;
+    }
+
+    QElapsedTimer serialClock;
+    serialClock.start();
+    qint64 serialTaskMilliseconds = 0;
+    qint64 serialArchiveMilliseconds = 0;
+    for (const LocalHistoryDataset &dataset : request.datasets) {
+        for (const StrategyMatrixEntry &strategy : request.strategies) {
+            const auto rawIdentity = store.loadBacktestDatasetIdentity(
+                dataset.instrument, request.periodSeconds);
+            QVERIFY(rawIdentity.has_value());
+            const BacktestDatasetIdentity identity =
+                BacktestDataAvailabilityPlanner::trimIdentity(
+                    *rawIdentity, request.startDate, request.endDate);
+            const auto days = store.loadAShareInstrumentDayRecords(
+                {dataset.instrument.symbol}, request.startDate, request.endDate);
+            const auto audits = store.loadRawTickImportDayAudits(
+                dataset.instrument, request.startDate, request.endDate);
+            QVERIFY(BacktestDataQualityGate::assess(
+                identity, request.startDate, request.endDate, days, audits).eligible);
+            const QDateTime from(request.startDate, QTime(0, 0),
+                                 QTimeZone("Asia/Shanghai"));
+            const QDateTime until(request.endDate.addDays(1), QTime(0, 0),
+                                  QTimeZone("Asia/Shanghai"));
+            const QVector<Candle> candles = store.loadCandlesFromSource(
+                dataset.instrument, 60, from.toUTC(), until.toUTC().addMSecs(-1),
+                QStringLiteral("raw_tick_cache_v1"));
+            BacktestConfig config;
+            config.taskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            config.strategyId = strategy.strategyId;
+            config.strategyParameters = strategy.parameters;
+            config.instrument = dataset.instrument;
+            config.datasetIdentity = identity;
+            config.frequency = QStringLiteral("1m");
+            config.periodSeconds = 60;
+            config.sampleFrom = from.toUTC();
+            config.sampleTo = until.toUTC().addMSecs(-1);
+            config.initialCapital = request.initialCapital;
+            config.commissionRate = request.commissionRate;
+            config.slippageRate = request.slippageRate;
+            BacktestEngine engine;
+            QSignalSpy finished(&engine, &BacktestEngine::finished);
+            QElapsedTimer taskClock;
+            taskClock.start();
+            QVERIFY(engine.start(config, candles));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 30000);
+            serialTaskMilliseconds += taskClock.elapsed();
+            const StrategyMatrixItem matrixItem = matrixItems.value(
+                strategy.strategyId + QLatin1Char(':') + strategy.profileLabel
+                    + QLatin1Char(':') + dataset.instrument.symbol);
+            QCOMPARE(engine.result().config.dataVersion, matrixItem.dataVersion);
+            QCOMPARE(engine.result().summary.totalReturnPercent,
+                     matrixItem.summary.totalReturnPercent);
+            QCOMPARE(engine.result().summary.maxDrawdownPercent,
+                     matrixItem.summary.maxDrawdownPercent);
+            QCOMPARE(engine.result().summary.totalTrades,
+                     matrixItem.summary.totalTrades);
+            QCOMPARE(engine.result().summary.totalCommission,
+                     matrixItem.summary.totalCommission);
+            BacktestArchiveRecord archive;
+            archive.resultId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            archive.completedAt = QDateTime::currentDateTimeUtc();
+            archive.result = engine.result();
+            QElapsedTimer archiveClock;
+            archiveClock.start();
+            QVERIFY(store.saveBacktestArchive(archive));
+            serialArchiveMilliseconds += archiveClock.elapsed();
+        }
+    }
+    const qint64 serialMilliseconds = serialClock.elapsed();
+    qInfo().noquote() << QStringLiteral(
+        "matrix_benchmark tasks=%1 total_bars=%2 matrix_ms=%3 serial_ms=%4 ratio=%5 "
+        "matrix_task_ms=%6 matrix_other_ms=%7 serial_task_ms=%8 "
+        "serial_archive_ms=%9 serial_other_ms=%10")
+        .arg(request.strategies.size() * request.datasets.size())
+        .arg(totalBars).arg(matrixMilliseconds).arg(serialMilliseconds)
+        .arg(serialMilliseconds > 0
+                 ? double(matrixMilliseconds) / serialMilliseconds : 0.0, 0, 'f', 3)
+        .arg(matrixTaskMilliseconds)
+        .arg(matrixMilliseconds - matrixTaskMilliseconds)
+        .arg(serialTaskMilliseconds)
+        .arg(serialArchiveMilliseconds)
+        .arg(serialMilliseconds - serialTaskMilliseconds - serialArchiveMilliseconds);
+}
 
 void BatchBacktestTest::runsEveryRegisteredRawTickStrategyForDateRange()
 {
@@ -937,7 +1906,7 @@ void BatchBacktestTest::asyncArchiveMaterializesAndPersistsDeferredRawTicks()
 
     QVERIFY(archiveService.request(
         701, resultId, QDateTime::currentDateTimeUtc(),
-        std::make_shared<const BacktestResult>(deferred)));
+        std::make_shared<const BacktestResult>(archiveEligibleFixture(deferred))));
     QCOMPARE(archiveFinishedSpy.count(), 0);
     QTRY_COMPARE_WITH_TIMEOUT(archiveFinishedSpy.count(), 1, 10000);
     QCOMPARE(archiveFinishedSpy.first().at(0).toULongLong(), quint64(701));
@@ -1062,7 +2031,7 @@ void BatchBacktestTest::asyncArchiveLoadsLightRecordAndRawTickPage()
     const QString resultId = QStringLiteral("async-page-archive");
     QVERIFY(archiveService.request(
         801, resultId, QDateTime::currentDateTimeUtc(),
-        std::make_shared<const BacktestResult>(deferred)));
+        std::make_shared<const BacktestResult>(archiveEligibleFixture(deferred))));
     QTRY_COMPARE_WITH_TIMEOUT(saveSpy.count(), 1, 10000);
     QVERIFY(saveSpy.first().at(3).toString().isEmpty());
 
@@ -1141,7 +2110,7 @@ void BatchBacktestTest::asyncArchiveRejectsChangedIdentityWithoutPartialRecord()
     const QString resultId = QStringLiteral("changed-identity-archive");
     QVERIFY(archiveService.request(
         702, resultId, QDateTime::currentDateTimeUtc(),
-        std::make_shared<const BacktestResult>(deferred)));
+        std::make_shared<const BacktestResult>(archiveEligibleFixture(deferred))));
     QTRY_COMPARE_WITH_TIMEOUT(archiveFinishedSpy.count(), 1, 10000);
     QCOMPARE(archiveFinishedSpy.first().at(0).toULongLong(), quint64(702));
     QVERIFY(archiveFinishedSpy.first().at(2).toString().isEmpty());
@@ -1767,7 +2736,7 @@ void BatchBacktestTest::runPersistenceRoundTrip()
     const QString path = directory.filePath(QStringLiteral("runs.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
 
     BatchBacktestRunSummary summary;
     summary.runId = QStringLiteral("run-1");

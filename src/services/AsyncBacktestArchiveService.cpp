@@ -68,7 +68,12 @@ bool AsyncBacktestArchiveService::request(
             archive.resultId = resultId;
             archive.completedAt = completedAt;
             archive.result = *result;
-            if (!m_workerStore) {
+            if (!isProfitableBacktestForArchive(archive.result)) {
+                error = archive.result.config.dataMode == BacktestDataMode::RawTicks
+                        && archive.result.summary.totalTrades == 0
+                    ? QStringLiteral("原始 Tick 回测没有闭合交易，不归档")
+                    : QStringLiteral("净收益未大于 0，按盈利归档规则不保存");
+            } else if (!m_workerStore) {
                 error = QStringLiteral("回测归档数据库不可用");
             } else if (archive.result.config.dataMode == BacktestDataMode::RawTicks
                        && archive.result.rawTickSnapshotDeferred) {

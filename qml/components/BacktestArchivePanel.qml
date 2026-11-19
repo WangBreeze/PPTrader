@@ -1,6 +1,7 @@
 // qmllint disable unqualified
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 
 Item {
     id: root
@@ -14,6 +15,15 @@ Item {
         && root.controller.backtestResultConfiguration.rawTickSnapshotAvailable === true
     readonly property bool rawTickBrowserOpened: rawTickBrowser.opened
     property string rawTickBrowserResultId: ""
+
+    function formatBytes(value) {
+        if (value === undefined || value < 0) return "未测"
+        if (value < 1024) return value + " B"
+        if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KiB"
+        if (value < 1024 * 1024 * 1024)
+            return (value / 1048576).toFixed(1) + " MiB"
+        return (value / 1073741824).toFixed(2) + " GiB"
+    }
 
     function openRawTickBrowser() {
         if (!root.rawTickArchiveReady)
@@ -42,9 +52,21 @@ Item {
     }
     Text {
         anchors.right: parent.right; y: 3
-        text: root.controller.backtestArchiveCount + " 条 · SQLite 本地只读恢复"
+        text: root.controller.backtestArchiveCount + " 条 · SQLite 本地归档"
         color: root.theme.textMuted
         font.family: root.theme.fontFamily; font.pixelSize: 9
+    }
+    Text {
+        anchors.right: parent.right; y: 17
+        text: "数据库 " + root.formatBytes(root.controller.backtestArchiveStorage.databaseBytes
+                + root.controller.backtestArchiveStorage.walBytes)
+            + "（含行情）"
+            + (root.controller.backtestArchiveStorage.archiveBytes >= 0
+                ? " · 归档表 " + root.formatBytes(root.controller.backtestArchiveStorage.archiveBytes)
+                : "")
+            + " · 可复用 " + root.formatBytes(root.controller.backtestArchiveStorage.reusableBytes)
+        color: root.theme.textMuted
+        font.family: root.theme.fontFamily; font.pixelSize: 8
     }
 
     Rectangle {
@@ -123,7 +145,7 @@ Item {
         Text {
             anchors.centerIn: parent
             visible: root.controller.backtestArchiveCount === 0
-            text: "尚无归档结果\n成功完成回测后会自动事务化保存"
+            text: "尚无归档结果\n净收益大于 0 的回测才会保存"
             horizontalAlignment: Text.AlignHCenter
             color: root.theme.textMuted
             font.family: root.theme.fontFamily; font.pixelSize: 10
@@ -178,6 +200,7 @@ Item {
             theme: root.theme; text: root.controller.backtestArchiveLoading ? "加载中" : "加载所选结果"
             visualWidth: 116; primary: true
             available: !!root.selectedSummary.resultId && !root.controller.backtestRunning
+                       && !root.controller.backtestArchiveCompactionRunning
                        && !root.controller.backtestArchiveLoading
             toolTip: available ? "在后台从 SQLite 恢复结果与不可变身份；原始 Tick 输入保持按需分页"
                                : "请先选择归档，且等待当前回测结束"
@@ -188,6 +211,7 @@ Item {
             x: 138; y: parent.height - 42
             theme: root.theme; text: "刷新列表"; visualWidth: 88
             available: !root.controller.backtestArchiveLoading
+                       && !root.controller.backtestArchiveCompactionRunning
             toolTip: "仅刷新 SQLite 归档目录，不访问网络"
             Accessible.name: "刷新归档回测列表"
             onClicked: root.controller.refreshBacktestArchiveList()
@@ -196,6 +220,7 @@ Item {
             x: 232; y: parent.height - 42
             theme: root.theme; text: "逐笔浏览"; visualWidth: 80
             available: root.rawTickArchiveReady
+                       && !root.controller.backtestArchiveCompactionRunning
                        && !root.controller.backtestArchiveRawTickPageLoading
             toolTip: root.rawTickArchiveReady
                 ? "按页读取已归档的原始 Tick；每页 256 条，不访问网络"
@@ -203,6 +228,141 @@ Item {
             Accessible.name: "浏览归档原始 Tick"
             Accessible.description: toolTip
             onClicked: root.openRawTickBrowser()
+        }
+        PpButton {
+            objectName: "deleteBacktestArchiveButton"
+            x: 12; y: parent.height - 75
+            theme: root.theme; text: "删除所选"; visualWidth: 88
+            available: !!root.selectedSummary.resultId
+                && !root.controller.backtestRunning
+                && !root.controller.backtestArchiveCompactionRunning
+                && !root.controller.backtestArchiveLoading
+            toolTip: "删除所选结果及其 K 线、成交和权益快照；矩阵结果请在矩阵批次中删除"
+            Accessible.name: "删除所选回测归档"
+            Accessible.description: toolTip
+            onClicked: deleteConfirm.open()
+        }
+        PpButton {
+            x: 108; y: parent.height - 75
+            theme: root.theme; text: "更新占用"; visualWidth: 88
+            available: !root.controller.backtestArchiveCompactionRunning
+            toolTip: "重新统计数据库文件、归档条数和可复用空间"
+            Accessible.name: "更新回测归档占用"
+            onClicked: root.controller.refreshBacktestArchiveList()
+        }
+        PpButton {
+            objectName: "compactBacktestArchiveButton"
+            x: 204; y: parent.height - 75
+            theme: root.theme
+            text: root.controller.backtestArchiveCompactionRunning ? "整理中" : "整理空间"
+            visualWidth: 104
+            available: root.controller.backtestArchiveStorage.databaseBytes > 0
+                && !root.controller.backtestArchiveCompactionRunning
+            toolTip: "停用数据库后在后台回收空闲页；需要临时磁盘空间，期间暂停数据库操作"
+            Accessible.name: "整理回测数据库空间"
+            Accessible.description: toolTip
+            onClicked: compactConfirm.open()
+        }
+    }
+
+    Popup {
+        id: deleteConfirm
+        objectName: "deleteBacktestArchiveConfirm"
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape
+        width: Math.min(parent ? parent.width - 32 : 430, 430)
+        height: 166
+        x: parent ? Math.round((parent.width - width) / 2) : 0
+        y: parent ? Math.round((parent.height - height) / 2) : 0
+        background: Rectangle {
+            radius: 9; color: root.theme.bgPanel; border.color: root.theme.border
+        }
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: 14; spacing: 10
+            Text {
+                Layout.fillWidth: true
+                text: "删除所选归档结果？"
+                color: root.theme.textPrimary
+                font.family: root.theme.fontFamily; font.pixelSize: 14
+                font.weight: Font.Bold
+            }
+            Text {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                text: root.selectedSummary.symbol + " · " + root.selectedSummary.strategyId
+                    + "\n结果、K 线、成交和权益快照将一并删除。"
+                color: root.theme.textMuted
+                font.family: root.theme.fontFamily; font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                PpButton {
+                    theme: root.theme; text: "取消"; visualWidth: 72
+                    onClicked: deleteConfirm.close()
+                }
+                PpButton {
+                    objectName: "confirmDeleteBacktestArchiveButton"
+                    theme: root.theme; text: "确认删除"; visualWidth: 92
+                    onClicked: {
+                        root.controller.deleteBacktestArchive(root.selectedSummary.resultId)
+                        deleteConfirm.close()
+                    }
+                }
+            }
+        }
+    }
+
+    Popup {
+        id: compactConfirm
+        objectName: "compactBacktestArchiveConfirm"
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape
+        width: Math.min(parent ? parent.width - 32 : 430, 430)
+        height: 188
+        x: parent ? Math.round((parent.width - width) / 2) : 0
+        y: parent ? Math.round((parent.height - height) / 2) : 0
+        background: Rectangle {
+            radius: 9; color: root.theme.bgPanel; border.color: root.theme.border
+        }
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: 14; spacing: 10
+            Text {
+                Layout.fillWidth: true
+                text: "整理数据库空间？"
+                color: root.theme.textPrimary
+                font.family: root.theme.fontFamily; font.pixelSize: 14
+                font.weight: Font.Bold
+            }
+            Text {
+                Layout.fillWidth: true; Layout.fillHeight: true
+                text: "当前可复用页 "
+                    + root.formatBytes(root.controller.backtestArchiveStorage.reusableBytes)
+                    + "。整理会重排数据库，实际缩小量以完成后为准。过程中暂停数据库操作，并需要约 "
+                    + root.formatBytes(2 * root.controller.backtestArchiveStorage.databaseBytes)
+                    + " 临时空间。历史行情和剩余归档会保留。"
+                color: root.theme.textMuted
+                font.family: root.theme.fontFamily; font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                PpButton {
+                    theme: root.theme; text: "取消"; visualWidth: 72
+                    onClicked: compactConfirm.close()
+                }
+                PpButton {
+                    objectName: "confirmCompactBacktestArchiveButton"
+                    theme: root.theme; text: "开始整理"; visualWidth: 92
+                    onClicked: {
+                        root.controller.compactBacktestArchiveStorage()
+                        compactConfirm.close()
+                    }
+                }
+            }
         }
     }
 
@@ -367,8 +527,12 @@ Item {
         x: Math.max(420, parent.width - 340) + 16; y: 4
         width: 320; visible: root.controller.backtestArchiveError.length > 0
                             || root.controller.backtestArchiveSaveError.length > 0
+                            || root.controller.backtestArchiveCompactionError.length > 0
         text: root.controller.backtestArchiveError.length > 0
-              ? root.controller.backtestArchiveError : root.controller.backtestArchiveSaveError
+              ? root.controller.backtestArchiveError
+              : root.controller.backtestArchiveCompactionError.length > 0
+                  ? root.controller.backtestArchiveCompactionError
+                  : root.controller.backtestArchiveSaveError
         color: root.theme.red; elide: Text.ElideRight
         font.family: root.theme.fontFamily; font.pixelSize: 9
         Accessible.name: text

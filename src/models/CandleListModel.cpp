@@ -93,6 +93,18 @@ QHash<int, QByteArray> CandleListModel::roleNames() const
 }
 
 int CandleListModel::count() const { return m_points.size(); }
+const QVector<CandlePoint> &CandleListModel::points() const { return m_points; }
+
+void CandleListModel::setMaximumRows(int maximumRows)
+{
+    m_maxRows = std::max(1, maximumRows);
+    if (m_points.size() <= m_maxRows) return;
+    const int removed = m_points.size() - m_maxRows;
+    beginRemoveRows({}, 0, removed - 1);
+    m_points.remove(0, removed);
+    endRemoveRows();
+    emit countChanged();
+}
 
 QVariantMap CandleListModel::get(int row) const
 {
@@ -155,33 +167,70 @@ void CandleListModel::loadCandles(const QVector<Candle> &candles)
     if (previousCount != m_points.size()) emit countChanged();
 }
 
-void CandleListModel::loadBacktestResult(const BacktestResult &result)
+void CandleListModel::loadPoints(const QVector<CandlePoint> &points)
 {
-    QHash<qint64, TradeSignal> signalsByTimestamp;
-    for (const TradeSignal &signal : result.chartSignals) {
-        if (signal.timestamp.isValid())
-            signalsByTimestamp.insert(signal.timestamp.toMSecsSinceEpoch(), signal);
+    const int previousCount = m_points.size();
+    beginResetModel();
+    const int first = std::max(0, int(points.size()) - m_maxRows);
+    m_points = points.mid(first);
+    endResetModel();
+    if (previousCount != m_points.size()) emit countChanged();
+}
+
+QVector<CandlePoint> CandleListModel::backtestPoints(const BacktestResult &result)
+{
+    QHash<qint64, TradeSignal> fillsByTimestamp;
+    const auto addFill = [&fillsByTimestamp, &result](
+        const QDateTime &timestamp, SignalSide side, double price,
+        double quantity, double commission, const QString &reason) {
+        if (!timestamp.isValid() || price <= 0.0 || quantity <= 0.0) return;
+        TradeSignal fill;
+        fill.instrument = result.config.instrument;
+        fill.timestamp = timestamp;
+        fill.side = side;
+        fill.price = price;
+        fill.volume = quantity;
+        fill.reason = QStringLiteral("实际%1 · %2 股 · 手续费 %3 · %4")
+            .arg(side == SignalSide::Buy ? QStringLiteral("入场")
+                                         : QStringLiteral("出场"))
+            .arg(quantity, 0, 'f', 0).arg(commission, 0, 'f', 2).arg(reason);
+        fillsByTimestamp.insert(timestamp.toMSecsSinceEpoch(), fill);
+    };
+    for (const BacktestTrade &trade : result.trades) {
+        const double entryCommission = trade.entryPrice * trade.quantity
+            * std::max(0.0, result.config.commissionRate);
+        addFill(trade.entryTime, SignalSide::Buy, trade.entryPrice,
+                trade.quantity, entryCommission, trade.entryReason);
+        addFill(trade.exitTime, SignalSide::Sell, trade.exitPrice,
+                trade.quantity, trade.commission - entryCommission,
+                trade.exitReason);
+    }
+    if (result.finalPosition.quantity > 0.0) {
+        addFill(result.finalPosition.entryTime, SignalSide::Buy,
+                result.finalPosition.averagePrice, result.finalPosition.quantity,
+                result.finalPosition.entryCommission,
+                result.finalPosition.entryReason + QStringLiteral(" · 持仓中"));
     }
 
-    const int previousCount = m_points.size();
-    const int candleCount = static_cast<int>(result.candles.size());
-    const int firstIndex = std::max(0, candleCount - m_maxRows);
-    beginResetModel();
-    m_points.clear();
-    m_points.reserve(candleCount - firstIndex);
-    for (int index = firstIndex; index < candleCount; ++index) {
+    QVector<CandlePoint> points;
+    points.reserve(result.candles.size());
+    for (const Candle &candle : result.candles) {
         CandlePoint point;
-        point.candle = result.candles.at(index);
-        const auto signal = signalsByTimestamp.constFind(
+        point.candle = candle;
+        const auto signal = fillsByTimestamp.constFind(
             point.candle.startTime.toMSecsSinceEpoch());
-        if (signal != signalsByTimestamp.constEnd()) {
+        if (signal != fillsByTimestamp.constEnd()) {
             point.hasSignal = true;
             point.signal = *signal;
         }
-        m_points.append(point);
+        points.append(point);
     }
-    endResetModel();
-    if (previousCount != m_points.size()) emit countChanged();
+    return points;
+}
+
+void CandleListModel::loadBacktestResult(const BacktestResult &result)
+{
+    loadPoints(backtestPoints(result));
 }
 
 void CandleListModel::clear()

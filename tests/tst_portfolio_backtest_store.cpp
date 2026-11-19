@@ -157,7 +157,7 @@ void PortfolioBacktestStoreTest::archiveRoundTripAndMigrationVersion()
     const QString path = directory.filePath(QStringLiteral("portfolio.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
 
     const PortfolioResult result = makeResult();
     PortfolioArchiveRecord record;
@@ -201,6 +201,20 @@ void PortfolioBacktestStoreTest::archiveRoundTripAndMigrationVersion()
     QCOMPARE(restored->result.trades.first().side,
              result.trades.first().side);
     QCOMPARE(restored->result.datasetVersions, result.datasetVersions);
+    QCOMPARE(restored->result.summary.initialCapital,
+             result.summary.initialCapital);
+    QCOMPARE(restored->result.summary.finalEquity,
+             result.summary.finalEquity);
+    QCOMPARE(restored->result.summary.totalReturnPercent,
+             result.summary.totalReturnPercent);
+    QCOMPARE(restored->result.summary.maxDrawdownPercent,
+             result.summary.maxDrawdownPercent);
+    QCOMPARE(restored->result.summary.sharpeRatio,
+             result.summary.sharpeRatio);
+    QCOMPARE(restored->result.summary.totalCommission,
+             result.summary.totalCommission);
+    QCOMPARE(restored->result.summary.totalTrades,
+             result.summary.totalTrades);
 }
 
 void PortfolioBacktestStoreTest::crossSectionalArchiveRejectsIncompleteIdentity()
@@ -425,7 +439,7 @@ void PortfolioBacktestStoreTest::industryDatasetRoundTripAndDateResolution()
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QCOMPARE(store.schemaVersion(), 25);
+        QCOMPARE(store.schemaVersion(), 28);
         AShareIndustryDataset dataset;
         dataset.classification = QStringLiteral("test-classification");
         dataset.source = QStringLiteral("test-fixture");
@@ -1037,7 +1051,7 @@ void PortfolioBacktestStoreTest::factorDefinitionRegistryVersionsByImmutableCont
     const QString path = directory.filePath(QStringLiteral("factors.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
 
     FactorDefinitionVersion first;
     first.factorId = QStringLiteral("strategy.factor.momentum");
@@ -1093,7 +1107,7 @@ factorCandidateRegistryRoundTripAndEvaluationAudit()
     const QString path = directory.filePath(QStringLiteral("candidates.db"));
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(path));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
 
     FactorCandidateVersion first;
     first.candidateId = QStringLiteral("candidate.momentum");
@@ -1193,7 +1207,7 @@ factorCandidateRegistryRoundTripAndEvaluationAudit()
 
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
-    QCOMPARE(reopened.schemaVersion(), 25);
+    QCOMPARE(reopened.schemaVersion(), 28);
     QCOMPARE(reopened.loadFactorCandidateVersions().size(), 2);
     QCOMPARE(reopened.loadFactorCandidateEvaluations(first.candidateId, 1).size(),
              1);
@@ -1259,7 +1273,7 @@ void PortfolioBacktestStoreTest::authorizedFactorDatasetRoundTripsAcrossRestart(
 
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
-    QCOMPARE(reopened.schemaVersion(), 25);
+    QCOMPARE(reopened.schemaVersion(), 28);
     const auto catalog = reopened.loadExternalFactorDatasets();
     QCOMPARE(catalog.size(), 1);
     QCOMPARE(catalog.first().datasetId, dataset.datasetId);
@@ -1457,7 +1471,7 @@ externalFactorResearchArchiveRoundTripsImmutableIdentity()
 
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
-    QCOMPARE(reopened.schemaVersion(), 25);
+    QCOMPARE(reopened.schemaVersion(), 28);
     const auto restored = reopened.loadExternalFactorResearchArchive(
         record.resultId);
     QVERIFY(restored.has_value());

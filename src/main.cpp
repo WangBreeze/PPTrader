@@ -6,6 +6,7 @@
 #include "models/CandleListModel.h"
 #ifdef PPTRADER_CONTRACT_TESTS
 #include "app/WizardContractProbe.h"
+#include "app/StrategyMatrixContractProbe.h"
 #endif
 
 #include <QApplication>
@@ -85,6 +86,8 @@ int main(int argc, char *argv[])
 #ifdef PPTRADER_CONTRACT_TESTS
     if (startupArguments.contains(QStringLiteral("--wizard-contract-probe")))
         return runWizardContractProbe();
+    if (startupArguments.contains(QStringLiteral("--matrix-contract-probe")))
+        return runStrategyMatrixContractProbe();
     if (startupArguments.contains(QStringLiteral("--paper-panel-probe")))
         return runPaperStrategyContractProbe();
     if (startupArguments.contains(QStringLiteral("--paper-flow-acceptance")))

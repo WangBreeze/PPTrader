@@ -27,9 +27,11 @@ std::optional<double> fieldValue(CustomOperandKind kind, const Candle &candle)
 
 } // namespace
 
-CustomBacktestStrategy::CustomBacktestStrategy(CompiledCustomStrategy plan, QObject *parent)
+CustomBacktestStrategy::CustomBacktestStrategy(
+    CompiledCustomStrategy plan, CustomBacktestInputMode inputMode, QObject *parent)
     : BacktestStrategy(parent)
     , m_plan(std::move(plan))
+    , m_inputMode(inputMode)
     , m_indicators(m_plan.indicators)
     , m_previousLeft(m_plan.conditions.size())
     , m_previousRight(m_plan.conditions.size())
@@ -78,12 +80,116 @@ QVariantMap CustomBacktestStrategy::normalizedParameters() const
 
 QVariantMap CustomBacktestStrategy::ruleSnapshot() const
 {
-    return m_plan.rules.toVariantMap();
+    QVariantMap snapshot = m_plan.ruleSnapshot();
+    if (m_inputMode == CustomBacktestInputMode::RawTicks) {
+        snapshot.insert(QStringLiteral("rawTickPolicyVersion"), 1);
+        snapshot.insert(QStringLiteral("rawTickIndicatorBasis"),
+                        QStringLiteral("one_trade_one_observation"));
+        snapshot.insert(QStringLiteral("rawTickExecutionBasis"),
+                        QStringLiteral("next_observed_trade"));
+    }
+    return snapshot;
+}
+
+bool CustomBacktestStrategy::supportsProvidedRawTicks() const
+{
+    return m_inputMode == CustomBacktestInputMode::RawTicks
+        && m_plan.signalPriceMode == CustomSignalPriceMode::NextOpen
+        && m_plan.crossIndicators.isEmpty()
+        && m_plan.selection.count == 0
+        && m_plan.universeSymbols.isEmpty();
 }
 
 void CustomBacktestStrategy::onTick(const Tick &tick)
 {
-    Q_UNUSED(tick)
+    if (!supportsProvidedRawTicks() || !tick.timestamp.isValid()
+        || !std::isfinite(tick.price) || tick.price <= 0.0
+        || !std::isfinite(tick.volume) || tick.volume < 0.0) return;
+
+    static const QTimeZone shanghaiTimeZone("Asia/Shanghai");
+    const QDate tradingDate = tick.timestamp.toTimeZone(shanghaiTimeZone).date();
+    auto emitTickSignal = [&](SignalSide side, const QString &reason) {
+        TradeSignal signal;
+        signal.instrument = tick.instrument;
+        signal.timestamp = tick.timestamp;
+        signal.side = side;
+        signal.price = tick.price;
+        signal.volume = tick.volume;
+        signal.reason = QStringLiteral("自定义策略 %1 v%2 · %3（下一笔 Tick 成交口径）")
+            .arg(m_plan.name).arg(m_plan.version).arg(reason);
+        emit signalGenerated(signal);
+    };
+
+    // 先在当前成交上执行上一笔已形成的意图，再把当前成交放入指标窗口。
+    if (m_tickPendingEntry) {
+        m_tickPendingEntry = false;
+        m_hasPosition = true;
+        m_entryReferencePrice = tick.price;
+        m_entryTradingDate = tradingDate;
+        m_holdingBars = 0;
+        emitTickSignal(SignalSide::Buy,
+                       QStringLiteral("进入条件于 %1 成立")
+                           .arg(m_tickEntryDecisionTime.toString(Qt::ISODateWithMs)));
+        m_tickEntryDecisionTime = {};
+    } else if (!m_tickPendingExitReason.isEmpty()
+               && tradingDate > m_entryTradingDate) {
+        const QString reason = QStringLiteral("%1；信号于 %2 成立")
+            .arg(m_tickPendingExitReason,
+                 m_tickExitDecisionTime.toString(Qt::ISODateWithMs));
+        m_hasPosition = false;
+        m_entryReferencePrice = 0.0;
+        m_entryTradingDate = {};
+        m_holdingBars = 0;
+        m_tickPendingExitReason.clear();
+        m_tickExitDecisionTime = {};
+        emitTickSignal(SignalSide::Sell, reason);
+    }
+
+    Candle observation;
+    observation.instrument = tick.instrument;
+    observation.startTime = tick.timestamp;
+    observation.periodSeconds = 0;
+    observation.open = observation.high = observation.low = observation.close = tick.price;
+    observation.volume = tick.volume;
+    observation.directionalVolumeKnown = tick.rawTradeDirectionKnown;
+    if (tick.rawTradeDirectionKnown) {
+        if (tick.rawTradeDirection == RawTradeDirection::Buy)
+            observation.buyVolume = tick.volume;
+        else if (tick.rawTradeDirection == RawTradeDirection::Sell)
+            observation.sellVolume = tick.volume;
+        else observation.neutralVolume = tick.volume;
+    }
+    observation.source = QStringLiteral("raw_trade_tick_observation_v1");
+    m_indicators.append(observation);
+    const std::optional<bool> entry = evaluateCondition(m_plan.entryCondition, observation);
+    const std::optional<bool> exit = evaluateCondition(m_plan.exitCondition, observation);
+    if (m_indicators.barCount() < minimumWarmupBars()) return;
+
+    if (!m_hasPosition) {
+        if (entry.value_or(false)) {
+            m_tickPendingEntry = true;
+            m_tickEntryDecisionTime = tick.timestamp;
+        }
+        return;
+    }
+
+    ++m_holdingBars;
+    if (!m_tickPendingExitReason.isEmpty()) return;
+    if (m_plan.rules.stopLossPercent > 0.0
+        && tick.price <= m_entryReferencePrice
+            * (1.0 - m_plan.rules.stopLossPercent / 100.0)) {
+        m_tickPendingExitReason = QStringLiteral("止损规则触发");
+    } else if (m_plan.rules.takeProfitPercent > 0.0
+               && tick.price >= m_entryReferencePrice
+                   * (1.0 + m_plan.rules.takeProfitPercent / 100.0)) {
+        m_tickPendingExitReason = QStringLiteral("止盈规则触发");
+    } else if (m_plan.rules.maximumHoldingBars > 0
+               && m_holdingBars >= m_plan.rules.maximumHoldingBars) {
+        m_tickPendingExitReason = QStringLiteral("最大持仓 Tick 规则触发");
+    } else if (exit.value_or(false)) {
+        m_tickPendingExitReason = QStringLiteral("退出条件成立");
+    }
+    if (!m_tickPendingExitReason.isEmpty()) m_tickExitDecisionTime = tick.timestamp;
 }
 
 CandleExecutionContext CustomBacktestStrategy::candleExecutionContext() const
@@ -93,6 +199,7 @@ CandleExecutionContext CustomBacktestStrategy::candleExecutionContext() const
 
 void CustomBacktestStrategy::onCandle(const Candle &candle)
 {
+    if (m_inputMode != CustomBacktestInputMode::Candles) return;
     m_indicators.append(candle);
     const std::optional<bool> entry = evaluateCondition(m_plan.entryCondition, candle);
     const std::optional<bool> exit = evaluateCondition(m_plan.exitCondition, candle);
@@ -189,6 +296,17 @@ void CustomBacktestStrategy::onCandle(const Candle &candle)
     m_pendingExitReason.clear();
 }
 
+void CustomBacktestStrategy::onExecutionRejected(const TradeSignal &signal)
+{
+    if (signal.side != SignalSide::Buy) return;
+    m_hasPosition = false;
+    m_entryReferencePrice = 0.0;
+    m_entryTradingDate = {};
+    m_holdingBars = 0;
+    m_tickPendingExitReason.clear();
+    m_tickExitDecisionTime = {};
+}
+
 void CustomBacktestStrategy::reset()
 {
     m_indicators.reset();
@@ -202,6 +320,10 @@ void CustomBacktestStrategy::reset()
     m_entryTradingDate = {};
     m_holdingBars = 0;
     m_pendingExitReason.clear();
+    m_tickPendingEntry = false;
+    m_tickEntryDecisionTime = {};
+    m_tickPendingExitReason.clear();
+    m_tickExitDecisionTime = {};
 }
 
 std::optional<double> CustomBacktestStrategy::evaluateOperand(

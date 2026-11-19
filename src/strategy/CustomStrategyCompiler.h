@@ -11,7 +11,8 @@
 namespace pp {
 
 enum class CustomIndicatorKind { Sma, Ema, Rsi, Macd, Bollinger, Atr, VolumeSma,
-                                 Roc, Vwap, PpFlow, Wma, Bias, Cci, Wr, Donchian, Obv, Mfi, Kdj };
+                                 Roc, Vwap, PpFlow, Wma, Bias, Cci, Wr, Donchian, Obv, Mfi, Kdj,
+                                 Stoch, Supertrend };
 enum class CustomOperandKind { Constant, Open, High, Low, Close, Volume, Indicator,
                                Cross };
 enum class CustomCrossIndicatorKind { Rank, ZScore, Percentile, Mean, Median, Peer };
@@ -84,6 +85,8 @@ struct CompiledCustomStrategy {
     QString strategyId;
     QString name;
     int version = 1;
+    QString definitionJson;
+    QString definitionSha256;
     QVariantMap normalizedParameters;
     QVector<CompiledCustomIndicator> indicators;
     QVector<CompiledCrossIndicator> crossIndicators;
@@ -96,6 +99,8 @@ struct CompiledCustomStrategy {
     int minimumWarmupBars = 1;
     CompiledCustomRules rules;
     CustomSignalPriceMode signalPriceMode = CustomSignalPriceMode::TriggerClose;
+
+    QVariantMap ruleSnapshot() const;
 };
 
 class CustomStrategyCompiler {

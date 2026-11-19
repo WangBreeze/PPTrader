@@ -173,7 +173,7 @@ void AShareInstrumentDayImportTest::transactionRoundTripAndIdempotency()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(directory.filePath(QStringLiteral("test.db"))));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
     AShareInstrumentDayImportRun first = makeRun(parsed);
     bool reused = true;
     QString importError;

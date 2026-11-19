@@ -2,6 +2,7 @@
 
 #include "strategy/CustomStrategyValidator.h"
 
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -274,13 +275,22 @@ private:
             else if (name == QStringLiteral("MFI")) indicator.kind = CustomIndicatorKind::Mfi;
             else indicator.kind = CustomIndicatorKind::VolumeSma;
             indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
-        } else if (m_v2 && name == QStringLiteral("KDJ")) {
-            indicator.kind = CustomIndicatorKind::Kdj;
+        } else if (m_v2 && (name == QStringLiteral("KDJ") || name == QStringLiteral("STOCH"))) {
+            indicator.kind = name == QStringLiteral("KDJ")
+                ? CustomIndicatorKind::Kdj : CustomIndicatorKind::Stoch;
             indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
             bool optionOk = true;
             indicator.kPeriod = static_cast<int>(resolveNumber(object.value(QStringLiteral("kPeriod")), true, &optionOk));
             ok = ok && optionOk;
             indicator.dPeriod = static_cast<int>(resolveNumber(object.value(QStringLiteral("dPeriod")), true, &optionOk));
+            ok = ok && optionOk;
+            indicator.output = object.value(QStringLiteral("output")).toString();
+        } else if (m_v2 && name == QStringLiteral("SUPERTREND")) {
+            indicator.kind = CustomIndicatorKind::Supertrend;
+            indicator.period = static_cast<int>(resolveNumber(object.value(QStringLiteral("period")), true, &ok));
+            bool optionOk = true;
+            indicator.standardDeviations = resolveNumber(
+                object.value(QStringLiteral("multiplier")), false, &optionOk);
             ok = ok && optionOk;
             indicator.output = object.value(QStringLiteral("output")).toString();
         } else if (m_v2 && name == QStringLiteral("DONCHIAN")) {
@@ -349,6 +359,9 @@ int CompiledCustomIndicator::minimumBars() const
     case CustomIndicatorKind::Rsi: return period + 1;
     case CustomIndicatorKind::Macd:
         return output == QStringLiteral("macd") ? slowPeriod : slowPeriod + signalPeriod - 1;
+    case CustomIndicatorKind::Stoch:
+        return period + kPeriod - 1
+            + (output == QStringLiteral("d") ? dPeriod - 1 : 0);
     case CustomIndicatorKind::Roc:
     case CustomIndicatorKind::Mfi:
         return period + 1;
@@ -363,6 +376,7 @@ int CompiledCustomIndicator::minimumBars() const
     case CustomIndicatorKind::Wr:
     case CustomIndicatorKind::Donchian:
     case CustomIndicatorKind::Kdj:
+    case CustomIndicatorKind::Supertrend:
         return period;
     case CustomIndicatorKind::Vwap:
     case CustomIndicatorKind::Obv:
@@ -389,6 +403,14 @@ QVariantMap CompiledCustomRules::toVariantMap() const
             {QStringLiteral("takeProfitPercent"), takeProfitPercent},
             {QStringLiteral("maximumHoldingBars"), maximumHoldingBars},
             {QStringLiteral("tPlusOne"), tPlusOne}};
+}
+
+QVariantMap CompiledCustomStrategy::ruleSnapshot() const
+{
+    QVariantMap snapshot = rules.toVariantMap();
+    snapshot.insert(QStringLiteral("definitionJson"), definitionJson);
+    snapshot.insert(QStringLiteral("definitionSha256"), definitionSha256);
+    return snapshot;
 }
 
 std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
@@ -430,6 +452,10 @@ std::optional<CompiledCustomStrategy> CustomStrategyCompiler::compile(
     plan.strategyId = validated.strategyId;
     plan.name = validated.name;
     plan.version = validated.version;
+    plan.definitionJson = validated.canonicalJson();
+    plan.definitionSha256 = QStringLiteral("sha256:")
+        + QString::fromLatin1(QCryptographicHash::hash(
+            plan.definitionJson.toUtf8(), QCryptographicHash::Sha256).toHex());
     plan.normalizedParameters = normalized;
     const QJsonObject position = validated.document.value(QStringLiteral("position")).toObject();
     if (!position.isEmpty()) {

@@ -415,7 +415,7 @@ Item {
             PpButton {
                 theme: root.theme; text: "取消"; visualWidth: 76
                 available: root.controller.batchBacktestRunning
-                toolTip: "取消批量回测；已完成项保留并可归档"
+                toolTip: "取消批量回测；已完成的净盈利结果自动归档"
                 onClicked: root.controller.cancelLocalBatchBacktest()
             }
             Text {
@@ -481,6 +481,7 @@ Item {
                     required property string error
                     required property string datasetVersion
                     required property real totalReturnPercent
+                    required property int totalTrades
                     required property bool hasOpenPosition
                     required property real openPositionQuantity
                     required property real openPositionAveragePrice
@@ -597,7 +598,13 @@ Item {
                             text: segmentedResearch ? "独立分段"
                                   : researchOnly ? "研究汇总"
                                   : archived ? "已归档"
-                                  : (succeeded ? (archivable ? "可归档" : "结果已释放") : "--")
+                                  : (succeeded
+                                     ? (dataMode === "raw_ticks" && totalTrades === 0
+                                        ? "无闭合交易"
+                                        : !(totalReturnPercent > 0)
+                                        ? "未盈利不归档"
+                                        : (archivable ? "可归档" : "结果已释放"))
+                                     : "--")
                             color: archived ? root.theme.cyan : root.theme.textMuted
                             font.family: root.theme.fontFamily; font.pixelSize: 8
                         }
@@ -618,6 +625,10 @@ Item {
                                      ? "已有归档任务在后台执行；完成后可继续归档其他结果"
                                      : archivable
                                      ? "后台物化并校验完整输入快照，再写入回测归档"
+                                     : dataMode === "raw_ticks" && totalTrades === 0
+                                     ? "原始 Tick 回测没有闭合交易，不归档未实现收益"
+                                     : !(totalReturnPercent > 0)
+                                     ? "净收益未大于 0，按规则不归档"
                                      : "内存结果已释放；请重新运行该标的后归档"
                             Accessible.name: symbol + (archivingThis ? "正在归档" : "归档")
                             Accessible.description: toolTip

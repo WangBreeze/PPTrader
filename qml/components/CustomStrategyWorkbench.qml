@@ -81,6 +81,21 @@ Item {
         operationMessage = "正在后台保存新版本…"
     }
 
+    function cloneSelectedVersion() {
+        if (!savedDefinitionMatches || editorDirty) {
+            operationMessage = "请先保存当前编辑内容或重新选择已保存版本"
+            return
+        }
+        const draft = controller.createCustomStrategyVersionDraft(
+            selectedStrategyId, selectedVersion)
+        if (draft.length === 0) {
+            operationMessage = "无法创建新版本草稿"
+            return
+        }
+        jsonEditor.text = draft
+        operationMessage = "已复制为新版本草稿；修改参数和规则后校验并保存"
+    }
+
     function runLocalBacktest() {
         if (!validateEditor() || !canRun) {
             operationMessage = savedDefinitionMatches
@@ -247,6 +262,7 @@ Item {
             Row {
                 x: 10; y: parent.height - 46; spacing: 8
                 PpButton { theme: root.theme; text: "校验"; visualWidth: 78; toolTip: "校验 JSON、字段路径、指标和规则"; onClicked: root.validateEditor() }
+                PpButton { theme: root.theme; text: "复制微调"; visualWidth: 100; available: root.savedDefinitionMatches && !root.controller.customStrategySaveLoading; toolTip: "从已保存版本创建新的可编辑草稿，不改动原版本"; onClicked: root.cloneSelectedVersion() }
                 PpButton { theme: root.theme; text: root.controller.customStrategySaveLoading ? "保存中…" : "保存新版本"; visualWidth: 104; primary: true; available: !root.controller.customStrategySaveLoading; toolTip: "后台写入不可变版本并刷新本地策略模型"; onClicked: root.saveNewVersion() }
                 PpButton {
                     theme: root.theme; text: "本地回测"; visualWidth: 92
@@ -271,9 +287,11 @@ Item {
                 Text { width: parent.width; text: "校验与运行边界"; color: root.theme.textPrimary; font.family: root.theme.fontFamily; font.pixelSize: 11; font.weight: Font.Bold }
                 Text { width: parent.width; text: root.selectedStrategyId.length > 0 ? root.selectedStrategyId + " · v" + root.selectedVersion : "未选择已保存版本"; color: root.selectedStrategyId.length > 0 ? root.theme.cyan : root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 11; elide: Text.ElideRight }
                 Text { width: parent.width; text: "执行范围：仅历史回测（backtest_only）"; color: root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap; Accessible.name: text }
+                Text { width: parent.width; text: "本页回测：历史 Tick 派生 K 线；逐笔 Tick 暂用本地命令入口"; color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap; Accessible.name: text }
                 Rectangle { width: parent.width; height: 1; color: root.theme.border }
                 Text { width: parent.width; text: root.validation.valid ? "JSON：有效" : "JSON：无效/未校验"; color: root.validation.valid ? root.theme.green : root.theme.red; font.family: root.theme.fontFamily; font.pixelSize: 10; font.weight: Font.Bold }
                 Text { width: parent.width; text: root.analysis.executable ? "编译：backtest_ready" : "编译：不可运行"; color: root.analysis.executable ? root.theme.green : root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 10 }
+                Text { width: parent.width; text: "定义校验：" + (root.analysis.ruleSnapshot ? (root.analysis.ruleSnapshot.definitionSha256 || "--") : "--"); color: root.theme.textMuted; font.family: root.theme.fontFamily; font.pixelSize: 8; wrapMode: Text.WrapAnywhere; Accessible.name: text }
                 Text { width: parent.width; text: root.savedDefinitionMatches ? "版本：与已保存定义一致" : "版本：未保存或内容已变化"; color: root.savedDefinitionMatches ? root.theme.green : root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap }
                 Text { width: parent.width; text: root.controller.selectedBacktestDataAvailable ? "本地数据：" + root.controller.selectedBacktestInstrumentTitle + " · " + root.controller.selectedBacktestFrequency + " · " + root.controller.selectedBacktestCandleCount + " 根" : "本地数据：未选择"; color: root.controller.selectedBacktestDataAvailable ? root.theme.textPrimary : root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap }
                 Text { width: parent.width; text: root.runAvailability.available ? "运行检查：通过" : "运行检查：" + root.runAvailability.error; color: root.runAvailability.available ? root.theme.green : root.theme.yellow; font.family: root.theme.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap; Accessible.name: text }

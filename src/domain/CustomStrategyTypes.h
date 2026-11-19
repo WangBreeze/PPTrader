@@ -21,6 +21,7 @@ struct CustomStrategyDefinition {
     QJsonObject document;
 
     QString canonicalJson() const;
+    QString newVersionDraftJson(int nextVersion, const QDateTime &createdAt) const;
     QVariantMap toVariantMap() const;
 };
 

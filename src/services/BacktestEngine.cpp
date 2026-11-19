@@ -24,13 +24,27 @@ BacktestEngine::BacktestEngine(QObject *parent)
 
 BacktestEngine::~BacktestEngine() = default;
 
+void BacktestEngine::setCandleObservationsPerTurn(int observations)
+{
+    if (!isRunning()) m_candleObservationsPerTurn = std::clamp(observations, 1, 1024);
+}
+
+void BacktestEngine::setObservationSignalsEnabled(bool enabled)
+{
+    if (!isRunning()) m_observationSignalsEnabled = enabled;
+}
+
 bool BacktestEngine::start(const BacktestConfig &config, QVector<Candle> candles,
                            std::unique_ptr<BacktestStrategy> providedStrategy)
 {
-    if (isRunning()) {
-        cancel();
-    }
+    if (isRunning()) cancel();
+    return startPreparedCandles(config, prepareCandles(config, std::move(candles)),
+                                std::move(providedStrategy));
+}
 
+BacktestEngine::PreparedCandleInput BacktestEngine::prepareCandles(
+    const BacktestConfig &config, QVector<Candle> candles)
+{
     candles.erase(std::remove_if(candles.begin(), candles.end(), [&config](const Candle &candle) {
         return candle.instrument.symbol != config.instrument.symbol
             || candle.close <= 0.0
@@ -51,6 +65,33 @@ bool BacktestEngine::start(const BacktestConfig &config, QVector<Candle> candles
                 return candle.startTime > config.sampleTo;
             }), candles.end());
     }
+
+    PreparedCandleInput prepared;
+    prepared.symbol = config.instrument.symbol;
+    prepared.periodSeconds = config.periodSeconds;
+    prepared.sampleFrom = config.sampleFrom;
+    prepared.sampleTo = config.sampleTo;
+    if (!candles.isEmpty()) {
+        prepared.dataVersion = computeBacktestDataVersion(
+            candles, config.instrument.symbol, config.periodSeconds);
+    }
+    prepared.candles = std::move(candles);
+    return prepared;
+}
+
+bool BacktestEngine::startPreparedCandles(
+    const BacktestConfig &config, const PreparedCandleInput &prepared,
+    std::unique_ptr<BacktestStrategy> providedStrategy)
+{
+    if (isRunning()) cancel();
+    if (prepared.symbol != config.instrument.symbol
+        || prepared.periodSeconds != config.periodSeconds
+        || prepared.sampleFrom != config.sampleFrom
+        || prepared.sampleTo != config.sampleTo) {
+        emit errorOccurred(QStringLiteral("预处理 K 线与回测配置不一致"));
+        return false;
+    }
+    const QVector<Candle> &candles = prepared.candles;
 
     const bool hasProvidedStrategy = bool(providedStrategy);
     QString strategyError;
@@ -108,12 +149,11 @@ bool BacktestEngine::start(const BacktestConfig &config, QVector<Candle> candles
     m_result.config = config;
     m_result.config.dataMode = BacktestDataMode::Candles;
     m_result.config.strategyParameters = normalizedParameters;
-    m_result.config.dataVersion = computeBacktestDataVersion(
-        candles, config.instrument.symbol, config.periodSeconds);
+    m_result.config.dataVersion = prepared.dataVersion;
     m_result.config.actualBars = candles.size();
     m_result.config.from = candles.first().startTime;
     m_result.config.to = candles.last().startTime;
-    m_candles = std::move(candles);
+    m_candles = candles;
     m_position = {};
     m_currentSignal = {};
     m_hasCurrentSignal = false;
@@ -158,23 +198,36 @@ bool BacktestEngine::start(const BacktestConfig &config, QVector<RawTradeTick> t
         }), ticks.end());
     }
 
-    if (providedStrategy) {
-        emit errorOccurred(QStringLiteral("自定义策略暂不支持原始 Tick 回测"));
-        return false;
-    }
-    if (!m_registry.supportsDataMode(config.strategyId, QStringLiteral("raw_ticks"))) {
+    const bool hasProvidedStrategy = bool(providedStrategy);
+    if (!hasProvidedStrategy
+        && !m_registry.supportsDataMode(config.strategyId, QStringLiteral("raw_ticks"))) {
         emit errorOccurred(QStringLiteral("所选策略不支持原始 Tick 回测"));
         return false;
     }
     QString strategyError;
     QVariantMap normalizedParameters;
-    auto strategy = m_registry.create(config.strategyId, config.strategyParameters,
-                                      &strategyError);
-    if (!strategy
-        || !m_registry.normalizeParameters(config.strategyId, config.strategyParameters,
-                                           &normalizedParameters, &strategyError)) {
-        emit errorOccurred(strategyError);
-        return false;
+    std::unique_ptr<BacktestStrategy> strategy = std::move(providedStrategy);
+    if (strategy) {
+        if (!config.strategyId.startsWith(QStringLiteral("custom_"))
+            || !strategy->supportsProvidedRawTicks()
+            || strategy->id() != config.strategyId
+            || strategy->strategyVersion() != config.strategyVersion
+            || strategy->normalizedParameters() != config.strategyParameters
+            || strategy->ruleSnapshot() != config.ruleSnapshot
+            || config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()) {
+            emit errorOccurred(QStringLiteral("自定义原始 Tick 策略身份、价格模式或规则快照无效"));
+            return false;
+        }
+        normalizedParameters = config.strategyParameters;
+    } else {
+        strategy = m_registry.create(config.strategyId, config.strategyParameters,
+                                     &strategyError);
+        if (!strategy
+            || !m_registry.normalizeParameters(config.strategyId, config.strategyParameters,
+                                               &normalizedParameters, &strategyError)) {
+            emit errorOccurred(strategyError);
+            return false;
+        }
     }
     if (config.instrument.market != Market::AShare) {
         emit errorOccurred(QStringLiteral("当前内置回测策略仅支持 A 股"));
@@ -227,26 +280,44 @@ bool BacktestEngine::start(const BacktestConfig &config, QVector<RawTradeTick> t
 
 bool BacktestEngine::startStreamedRawTicks(const BacktestConfig &config,
                                            int expectedObservations,
-                                           RawTickChunkLoader loader)
+                                           RawTickChunkLoader loader,
+                                           std::unique_ptr<BacktestStrategy> providedStrategy)
 {
     if (isRunning()) cancel();
     if (!loader) {
         emit errorOccurred(QStringLiteral("原始 Tick 分段读取器不可用"));
         return false;
     }
-    if (!m_registry.supportsDataMode(config.strategyId, QStringLiteral("raw_ticks"))) {
+    const bool hasProvidedStrategy = bool(providedStrategy);
+    if (!hasProvidedStrategy
+        && !m_registry.supportsDataMode(config.strategyId, QStringLiteral("raw_ticks"))) {
         emit errorOccurred(QStringLiteral("所选策略不支持原始 Tick 回测"));
         return false;
     }
     QString strategyError;
     QVariantMap normalizedParameters;
-    auto strategy = m_registry.create(config.strategyId, config.strategyParameters,
-                                      &strategyError);
-    if (!strategy
-        || !m_registry.normalizeParameters(config.strategyId, config.strategyParameters,
-                                           &normalizedParameters, &strategyError)) {
-        emit errorOccurred(strategyError);
-        return false;
+    std::unique_ptr<BacktestStrategy> strategy = std::move(providedStrategy);
+    if (strategy) {
+        if (!config.strategyId.startsWith(QStringLiteral("custom_"))
+            || !strategy->supportsProvidedRawTicks()
+            || strategy->id() != config.strategyId
+            || strategy->strategyVersion() != config.strategyVersion
+            || strategy->normalizedParameters() != config.strategyParameters
+            || strategy->ruleSnapshot() != config.ruleSnapshot
+            || config.strategyVersion < 1 || config.ruleSnapshot.isEmpty()) {
+            emit errorOccurred(QStringLiteral("自定义原始 Tick 策略身份、价格模式或规则快照无效"));
+            return false;
+        }
+        normalizedParameters = config.strategyParameters;
+    } else {
+        strategy = m_registry.create(config.strategyId, config.strategyParameters,
+                                     &strategyError);
+        if (!strategy
+            || !m_registry.normalizeParameters(config.strategyId, config.strategyParameters,
+                                               &normalizedParameters, &strategyError)) {
+            emit errorOccurred(strategyError);
+            return false;
+        }
     }
     const QString datasetVersion = config.datasetIdentity.datasetVersion;
     if (config.instrument.market != Market::AShare) {
@@ -419,22 +490,28 @@ void BacktestEngine::processNextObservation()
         return;
     }
 
-    const Candle &candle = m_candles.at(m_index);
-    m_hasCurrentSignal = false;
-    m_strategy->onCandle(candle);
-    appendEquityPoint(candle.startTime, candle.close);
+    const int chunkEnd = std::min(total, m_index + m_candleObservationsPerTurn);
+    while (m_index < chunkEnd) {
+        const Candle &candle = m_candles.at(m_index);
+        m_hasCurrentSignal = false;
+        m_hasCurrentFill = false;
+        m_strategy->onCandle(candle);
+        appendEquityPoint(candle.startTime, candle.close);
 
-    CandlePoint point;
-    point.candle = candle;
-    point.hasSignal = m_hasCurrentSignal;
-    if (m_hasCurrentSignal) {
-        point.signal = m_currentSignal;
-        m_result.chartSignals.append(m_currentSignal);
+        if (m_hasCurrentSignal) {
+            m_result.chartSignals.append(m_currentSignal);
+        }
+        if (m_observationSignalsEnabled) {
+            CandlePoint point;
+            point.candle = candle;
+            point.hasSignal = m_hasCurrentFill;
+            if (m_hasCurrentFill) point.signal = m_currentFill;
+            emit pointReady(point);
+            if (!m_timer.isActive()) return;
+        }
+        ++m_index;
     }
-    emit pointReady(point);
-
-    ++m_index;
-    emit progressChanged(progress());
+    if (m_observationSignalsEnabled) emit progressChanged(progress());
     if (m_index >= m_candles.size()) {
         finishBacktest();
     }
@@ -503,6 +580,7 @@ void BacktestEngine::openPosition(const TradeSignal &signal, double marketPrice,
                             double(m_strategy->targetPositionShares()));
     }
     if (quantity <= 0.0) {
+        m_strategy->onExecutionRejected(signal);
         return;
     }
 
@@ -514,6 +592,13 @@ void BacktestEngine::openPosition(const TradeSignal &signal, double marketPrice,
     m_position.entryCommission = commission;
     m_position.entryTime = timestamp;
     m_position.entryReason = signal.reason;
+    m_currentFill = signal;
+    m_currentFill.timestamp = timestamp;
+    m_currentFill.price = fillPrice;
+    m_currentFill.volume = quantity;
+    m_currentFill.reason = QStringLiteral("实际入场 · %1 股 · 手续费 %2 · %3")
+        .arg(quantity, 0, 'f', 0).arg(commission, 0, 'f', 2).arg(signal.reason);
+    m_hasCurrentFill = true;
 }
 
 void BacktestEngine::closePosition(const TradeSignal &signal, double marketPrice,
@@ -547,6 +632,14 @@ void BacktestEngine::closePosition(const TradeSignal &signal, double marketPrice
     trade.exitReason = signal.reason;
     m_result.trades.append(trade);
     emit tradeCompleted(trade);
+
+    m_currentFill = signal;
+    m_currentFill.timestamp = timestamp;
+    m_currentFill.price = fillPrice;
+    m_currentFill.volume = quantity;
+    m_currentFill.reason = QStringLiteral("实际出场 · %1 股 · 手续费 %2 · %3")
+        .arg(quantity, 0, 'f', 0).arg(exitCommission, 0, 'f', 2).arg(signal.reason);
+    m_hasCurrentFill = true;
 
     m_position = {};
 }
@@ -589,7 +682,7 @@ void BacktestEngine::appendEquityPoint(const QDateTime &timestamp, double market
     if (keepForDisplay) {
         m_result.equityCurve.append(point);
         m_equityCurveObservationIndices.append(observationIndex);
-        emit equityPointReady(point);
+        if (m_observationSignalsEnabled) emit equityPointReady(point);
     }
 }
 

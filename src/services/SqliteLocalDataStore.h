@@ -4,6 +4,7 @@
 #include "services/CustomStrategyStore.h"
 #include "services/StrategyExecutionStore.h"
 #include "domain/BatchBacktestTypes.h"
+#include "domain/StrategyMatrixRunTypes.h"
 #include "domain/BacktestDataQualityTypes.h"
 #include "domain/PortfolioTypes.h"
 #include "domain/TickDataImportTypes.h"
@@ -21,6 +22,13 @@
 #include <functional>
 
 namespace pp {
+
+struct SqliteCompactionResult {
+    bool succeeded = false;
+    qint64 beforeBytes = 0;
+    qint64 afterBytes = 0;
+    QString error;
+};
 
 class SqliteLocalDataStore final : public LocalDataStore, public StrategyExecutionStore,
                                    public CustomStrategyStore {
@@ -42,6 +50,8 @@ public:
     QString databaseUuid() const;
     QString lastMigrationBackupPath() const;
     bool verifyIntegrity(QString *error = nullptr) const;
+    static SqliteCompactionResult compactDatabaseFile(
+        const QString &databasePath, const QString &expectedDatabaseUuid);
 
     bool appendTick(const Tick &tick) override;
     bool appendTicks(const QVector<Tick> &ticks) override;
@@ -196,6 +206,16 @@ public:
     QVector<BatchBacktestRunSummary> loadBatchBacktestRuns(int limit = 20);
     QVector<BatchBacktestRunItem> loadBatchBacktestRunItems(
         const QString &runId);
+    bool createStrategyMatrixRun(const StrategyMatrixRunRecord &run,
+                                 const QVector<StrategyMatrixTaskRecord> &tasks);
+    bool upsertStrategyMatrixTask(const StrategyMatrixTaskRecord &task);
+    bool updateStrategyMatrixRunStatus(const QString &runId, const QString &status,
+                                       const QString &error = {});
+    QVector<StrategyMatrixRunRecord> loadStrategyMatrixRuns(int limit = 20);
+    std::optional<StrategyMatrixRunRecord> loadStrategyMatrixRun(const QString &runId);
+    QVector<StrategyMatrixTaskRecord> loadStrategyMatrixTasks(const QString &runId);
+    bool reconcileStrategyMatrixTaskArchive(StrategyMatrixTaskRecord *task);
+    bool deleteStrategyMatrixRun(const QString &runId, QString *error = nullptr);
     bool savePortfolioBacktestArchive(
         const PortfolioArchiveRecord &record, QString *error = nullptr);
     QVector<PortfolioArchiveSummary> loadPortfolioBacktestArchiveSummaries(
@@ -204,6 +224,8 @@ public:
         const QString &resultId);
     bool saveBacktestArchive(const BacktestArchiveRecord &record) override;
     QVector<BacktestArchiveSummary> loadBacktestArchiveSummaries() override;
+    bool deleteBacktestArchive(const QString &resultId, QString *error = nullptr);
+    QVariantMap backtestArchiveStorageStats();
     std::optional<BacktestArchiveRecord> loadBacktestArchive(
         const QString &resultId,
         BacktestArchiveLoadMode mode = BacktestArchiveLoadMode::Display) override;

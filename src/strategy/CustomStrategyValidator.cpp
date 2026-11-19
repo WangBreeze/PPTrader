@@ -728,6 +728,31 @@ bool CustomStrategyValidator::validateOperand(const QJsonObject &operand,
         }
         return true;
     }
+    if (v2 && indicator == QStringLiteral("STOCH")) {
+        if (!hasOnlyKeys(operand, {QStringLiteral("indicator"), QStringLiteral("period"),
+                                  QStringLiteral("kPeriod"), QStringLiteral("dPeriod"),
+                                  QStringLiteral("output"), QStringLiteral("alias")}, path, error)
+            || !validateIntegerOption(QStringLiteral("period"), 2, 500)
+            || !validateIntegerOption(QStringLiteral("kPeriod"), 1, 100)
+            || !validateIntegerOption(QStringLiteral("dPeriod"), 1, 100)
+            || !QSet<QString>{QStringLiteral("k"), QStringLiteral("d")}
+                    .contains(operand.value(QStringLiteral("output")).toString())) {
+            return fail(error, QStringLiteral("%1.STOCH 配置无效").arg(path));
+        }
+        return true;
+    }
+    if (v2 && indicator == QStringLiteral("SUPERTREND")) {
+        if (!hasOnlyKeys(operand, {QStringLiteral("indicator"), QStringLiteral("period"),
+                                  QStringLiteral("multiplier"), QStringLiteral("output"),
+                                  QStringLiteral("alias")}, path, error)
+            || !validateIntegerOption(QStringLiteral("period"), 2, 500)
+            || !validateNumericOption(QStringLiteral("multiplier"), 0.1, 20.0)
+            || !QSet<QString>{QStringLiteral("line"), QStringLiteral("direction")}
+                    .contains(operand.value(QStringLiteral("output")).toString())) {
+            return fail(error, QStringLiteral("%1.SUPERTREND 配置无效").arg(path));
+        }
+        return true;
+    }
     if (v2 && indicator == QStringLiteral("DONCHIAN")) {
         if (!hasOnlyKeys(operand, {QStringLiteral("indicator"), QStringLiteral("period"),
                                   QStringLiteral("output"), QStringLiteral("alias")}, path, error)
@@ -893,6 +918,26 @@ QVariantMap CustomStrategyValidator::schemaDescriptor() const
                                         QStringLiteral("k"),
                                         {QStringLiteral("k"), QStringLiteral("d"), QStringLiteral("j")},
                                         {QStringLiteral("K 线"), QStringLiteral("D 线"), QStringLiteral("J 线（不截断）")})}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("STOCH")},
+                    {QStringLiteral("displayName"), QStringLiteral("随机振荡指标（SMA 平滑）")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("period"), QStringLiteral("观察周期"), 14, 2, 500),
+                        integerParameter(QStringLiteral("kPeriod"), QStringLiteral("K 平滑周期"), 3, 1, 100),
+                        integerParameter(QStringLiteral("dPeriod"), QStringLiteral("D 平滑周期"), 3, 1, 100),
+                        choiceParameter(QStringLiteral("output"), QStringLiteral("输出序列"),
+                                        QStringLiteral("k"),
+                                        {QStringLiteral("k"), QStringLiteral("d")},
+                                        {QStringLiteral("K 线"), QStringLiteral("D 线")})}}},
+        QVariantMap{{QStringLiteral("name"), QStringLiteral("SUPERTREND")},
+                    {QStringLiteral("displayName"), QStringLiteral("超级趋势")},
+                    {QStringLiteral("parameters"), QVariantList{
+                        integerParameter(QStringLiteral("period"), QStringLiteral("ATR 周期"), 10, 2, 500),
+                        realParameter(QStringLiteral("multiplier"), QStringLiteral("ATR 倍数"),
+                                      3.0, 0.1, 20.0, 0.1),
+                        choiceParameter(QStringLiteral("output"), QStringLiteral("输出序列"),
+                                        QStringLiteral("line"),
+                                        {QStringLiteral("line"), QStringLiteral("direction")},
+                                        {QStringLiteral("趋势线"), QStringLiteral("方向（上 1 / 下 −1）")})}}},
         QVariantMap{{QStringLiteral("name"), QStringLiteral("OBV")},
                     {QStringLiteral("displayName"), QStringLiteral("能量潮（首根为零，不按日重置）")},
                     {QStringLiteral("parameters"), QVariantList{}}},
@@ -923,7 +968,8 @@ QVariantMap CustomStrategyValidator::schemaDescriptor() const
                 QStringLiteral("VWAP"), QStringLiteral("PP_FLOW"), QStringLiteral("WMA"),
                 QStringLiteral("BIAS"), QStringLiteral("CCI"), QStringLiteral("WR"),
                 QStringLiteral("DONCHIAN"), QStringLiteral("OBV"), QStringLiteral("MFI"),
-                QStringLiteral("KDJ")}},
+                QStringLiteral("KDJ"), QStringLiteral("STOCH"),
+                QStringLiteral("SUPERTREND")}},
             {QStringLiteral("indicatorSchemas"), indicatorSchemas},
             {QStringLiteral("crossIndicators"), QStringList{QStringLiteral("RANK"), QStringLiteral("ZSCORE"),
                 QStringLiteral("PERCENTILE"), QStringLiteral("MEAN"), QStringLiteral("MEDIAN"),

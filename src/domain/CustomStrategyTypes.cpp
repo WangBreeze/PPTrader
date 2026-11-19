@@ -10,6 +10,18 @@ QString CustomStrategyDefinition::canonicalJson() const
     return QString::fromUtf8(QJsonDocument(document).toJson(QJsonDocument::Compact));
 }
 
+QString CustomStrategyDefinition::newVersionDraftJson(
+    int nextVersion, const QDateTime &createdAt) const
+{
+    if (nextVersion <= version || nextVersion > 1000000 || !createdAt.isValid()) return {};
+    QJsonObject draft = document;
+    const QString timestamp = createdAt.toUTC().toString(Qt::ISODateWithMs);
+    draft.insert(QStringLiteral("version"), nextVersion);
+    draft.insert(QStringLiteral("createdAt"), timestamp);
+    draft.insert(QStringLiteral("updatedAt"), timestamp);
+    return QString::fromUtf8(QJsonDocument(draft).toJson(QJsonDocument::Indented));
+}
+
 QVariantMap CustomStrategyDefinition::toVariantMap() const
 {
     return {{QStringLiteral("schemaVersion"), schemaVersion},

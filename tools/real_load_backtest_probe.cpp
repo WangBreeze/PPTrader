@@ -570,7 +570,7 @@ int main(int argc, char *argv[])
         && QFileInfo::exists(existingDb) && maximumSymbolsOk
         && maximumSymbols >= 1 && maximumSymbols <= 10000) {
         pp::SqliteLocalDataStore discoveryStore;
-        if (discoveryStore.initialize(existingDb)) {
+        if (discoveryStore.initializeReadOnly(existingDb)) {
             symbols.clear();
             const QVector<pp::Instrument> instruments =
                 discoveryStore.rawBacktestInstruments(maximumSymbols);
@@ -756,7 +756,8 @@ int main(int argc, char *argv[])
     int catalogIdentityCount = -1;
     if (measureCatalog) {
         pp::SqliteLocalDataStore store;
-        if (store.initialize(databasePath)) {
+        if (skipLoad ? store.initializeReadOnly(databasePath)
+                     : store.initialize(databasePath)) {
             QElapsedTimer catalogTimer;
             catalogTimer.start();
             catalogIdentityCount = store.loadBacktestDatasetIdentities().size();
@@ -772,7 +773,8 @@ int main(int argc, char *argv[])
     QDate availableEndDate;
     {
         pp::SqliteLocalDataStore store;
-        if (store.initialize(databasePath)) {
+        if (skipLoad ? store.initializeReadOnly(databasePath)
+                     : store.initialize(databasePath)) {
             QElapsedTimer prepareTimer;
             prepareTimer.start();
             for (const QString &symbol : symbols) {
@@ -937,6 +939,15 @@ int main(int argc, char *argv[])
     ProcessMemorySample memoryAfterBacktest;
     QString archiveResultId;
     qint64 archiveElapsedMilliseconds = -1;
+    QString archiveError;
+    bool archiveReloaded = false;
+    bool archiveMatches = false;
+    int profitableCount = 0;
+    int nonProfitableCount = 0;
+    int archiveSavedCount = 0;
+    int archiveFailedCount = 0;
+    QJsonArray archiveItems;
+    QVector<pp::BatchBacktestItemResult> profitableItems;
     {
         pp::BatchBacktestService service;
         service.setDatabasePath(databasePath);
@@ -968,6 +979,7 @@ int main(int argc, char *argv[])
         request.lotSize = 100;
         request.maximumActiveEngines = 20;
         request.holdoutTradingDays = holdoutTradingDays;
+        request.archiveProfitableResults = !noArchive;
 
         int completed = 0;
         int succeeded = 0;
@@ -981,7 +993,6 @@ int main(int argc, char *argv[])
         int openPositionCount = 0;
         int peakResidentDatasets = 0;
         qint64 peakResidentObservations = 0;
-        pp::BacktestResult retained;
         QEventLoop loop;
         QObject::connect(&service, &pp::BatchBacktestService::itemReady,
                          &loop, [&](quint64, const pp::BatchBacktestItemResult &item) {
@@ -996,6 +1007,19 @@ int main(int argc, char *argv[])
                 ++succeeded;
                 dataVersion = item.dataVersion;
                 datasetVersion = item.datasetVersion;
+                if (pp::isProfitableBacktestForArchive(
+                        item.summary, item.dataMode)) {
+                    profitableItems.append(item);
+                    if (item.archived) {
+                        ++archiveSavedCount;
+                        if (archiveResultId.isEmpty())
+                            archiveResultId = item.archivedResultId;
+                    } else if (!noArchive) {
+                        ++archiveFailedCount;
+                        if (archiveError.isEmpty()) archiveError = item.error.isEmpty()
+                            ? QStringLiteral("盈利结果没有归档") : item.error;
+                    }
+                }
             } else {
                 errors.append(item.instrument.symbol + QStringLiteral(":") + item.error);
             }
@@ -1045,7 +1069,11 @@ int main(int argc, char *argv[])
                 }
             }
             if (result.finalPosition.quantity > 0.0) ++openPositionCount;
-            retained = result;
+            if (pp::isProfitableBacktestForArchive(result)) {
+                ++profitableCount;
+            } else {
+                ++nonProfitableCount;
+            }
         });
         QObject::connect(&service, &pp::BatchBacktestService::rawTickResidencyChanged,
                          &loop, [&](quint64, int residentDatasets,
@@ -1093,19 +1121,42 @@ int main(int argc, char *argv[])
         backtestResult.insert(QStringLiteral("peakResidentObservations"),
                               static_cast<double>(peakResidentObservations));
 
-        if (!noArchive && !retained.config.datasetIdentity.isEmpty()) {
-            pp::SqliteLocalDataStore store;
-            if (store.initialize(databasePath)) {
-                pp::BacktestArchiveRecord archive;
-                archive.resultId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-                archive.completedAt = QDateTime::currentDateTimeUtc();
-                archive.result = retained;
-                QElapsedTimer archiveTimer;
-                archiveTimer.start();
-                if (store.saveBacktestArchive(archive)) {
-                    archiveResultId = archive.resultId;
-                    archiveElapsedMilliseconds = archiveTimer.elapsed();
+        if (!noArchive && !profitableItems.isEmpty()) {
+            pp::SqliteLocalDataStore reader;
+            if (reader.initializeReadOnly(databasePath)) {
+                archiveMatches = true;
+                archiveReloaded = true;
+                for (const pp::BatchBacktestItemResult &item : profitableItems) {
+                    const auto restored = item.archived
+                        ? reader.loadBacktestArchive(
+                              item.archivedResultId,
+                              pp::BacktestArchiveLoadMode::CompleteInputSnapshot)
+                        : std::nullopt;
+                    const bool matched = restored
+                        && restored->result.config.dataVersion == item.dataVersion
+                        && restored->result.config.datasetIdentity.datasetVersion
+                            == (item.holdoutEnabled
+                                ? item.holdoutDatasetVersion : item.datasetVersion)
+                        && qAbs(restored->result.summary.finalEquity
+                                - item.summary.finalEquity) < 1e-6
+                        && (rawMode
+                            ? restored->result.rawTicks.size() == item.actualBars
+                            : restored->result.candles.size() == item.actualBars);
+                    archiveReloaded = archiveReloaded && restored.has_value();
+                    archiveMatches = archiveMatches && matched;
+                    archiveItems.append(QJsonObject {
+                        {QStringLiteral("symbol"), item.instrument.symbol},
+                        {QStringLiteral("resultId"), item.archivedResultId},
+                        {QStringLiteral("totalReturnPercent"),
+                         item.summary.totalReturnPercent},
+                        {QStringLiteral("matchesSource"), matched}});
+                    if (!matched && archiveError.isEmpty())
+                        archiveError = QStringLiteral("回测归档恢复核对失败");
                 }
+            } else {
+                archiveMatches = false;
+                archiveReloaded = false;
+                archiveError = QStringLiteral("回测归档数据库不可用");
             }
         }
     }
@@ -1172,6 +1223,15 @@ int main(int argc, char *argv[])
     archive.insert(QStringLiteral("resultId"), archiveResultId);
     archive.insert(QStringLiteral("elapsedMilliseconds"),
                    static_cast<double>(archiveElapsedMilliseconds));
+    archive.insert(QStringLiteral("integratedInBacktest"), !noArchive);
+    archive.insert(QStringLiteral("reloaded"), archiveReloaded);
+    archive.insert(QStringLiteral("matchesSource"), archiveMatches);
+    archive.insert(QStringLiteral("error"), archiveError);
+    archive.insert(QStringLiteral("profitableCount"), profitableCount);
+    archive.insert(QStringLiteral("nonProfitableCount"), nonProfitableCount);
+    archive.insert(QStringLiteral("savedCount"), archiveSavedCount);
+    archive.insert(QStringLiteral("failedCount"), archiveFailedCount);
+    archive.insert(QStringLiteral("items"), archiveItems);
     report.insert(QStringLiteral("archive"), archive);
     report.insert(QStringLiteral("databaseBytes"), static_cast<double>(databaseBytes));
     report.insert(QStringLiteral("databasePath"), databasePath);

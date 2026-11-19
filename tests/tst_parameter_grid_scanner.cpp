@@ -239,7 +239,7 @@ void ParameterGridScannerTest::nextOpenUsesActualOpenInEngineAndScan()
     config.strategyId = plan->strategyId;
     config.strategyVersion = plan->version;
     config.strategyParameters = plan->normalizedParameters;
-    config.ruleSnapshot = plan->rules.toVariantMap();
+    config.ruleSnapshot = plan->ruleSnapshot();
     BacktestEngine engine;
     QSignalSpy finished(&engine, &BacktestEngine::finished);
     QVERIFY(engine.start(config, bars, std::make_unique<CustomBacktestStrategy>(*plan)));
@@ -291,7 +291,7 @@ void ParameterGridScannerTest::candleTPlusOneMatchesEngineAndScan()
     config.strategyId = plan->strategyId;
     config.strategyVersion = plan->version;
     config.strategyParameters = plan->normalizedParameters;
-    config.ruleSnapshot = plan->rules.toVariantMap();
+    config.ruleSnapshot = plan->ruleSnapshot();
     BacktestEngine engine;
     QSignalSpy finished(&engine, &BacktestEngine::finished);
     QVERIFY(engine.start(config, bars, std::make_unique<CustomBacktestStrategy>(*plan)));

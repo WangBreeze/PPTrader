@@ -1006,7 +1006,7 @@ void CustomStrategyWizardQmlTest::indicatorCatalogScrollsToLastChoiceInHalfScree
     WizardControllerStub controller;
     const QVariantList indicatorSchemas = controller.customStrategySchema()
         .value(QStringLiteral("indicatorSchemas")).toList();
-    QCOMPARE(indicatorSchemas.size(), 18);
+    QCOMPARE(indicatorSchemas.size(), 20);
     const QString lastIndicator = indicatorSchemas.last().toMap()
         .value(QStringLiteral("name")).toString();
     std::unique_ptr<QObject> wizard = createWizard(engine, controller);

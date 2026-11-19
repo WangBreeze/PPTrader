@@ -7,6 +7,8 @@
 #include <QVariantMap>
 #include <QVector>
 
+#include <cmath>
+
 namespace pp {
 
 enum class BacktestDataMode {
@@ -112,6 +114,25 @@ struct BacktestResult {
     QVariantMap strategyEvaluationFacts; // 策略观察事实；不等同于成交或归档
 };
 
+// 自动归档只保存扣除费用和滑点后期末净权益为正的回测。
+// 原始 Tick 还要求至少一笔闭合交易，避免把单日未平仓浮盈当作已验证收益。
+inline bool isProfitableBacktestForArchive(
+    const PerformanceSummary &summary, BacktestDataMode mode)
+{
+    return std::isfinite(summary.initialCapital)
+        && std::isfinite(summary.finalEquity)
+        && std::isfinite(summary.totalReturnPercent)
+        && summary.initialCapital > 0.0
+        && summary.finalEquity > summary.initialCapital
+        && summary.totalReturnPercent > 0.0
+        && (mode != BacktestDataMode::RawTicks || summary.totalTrades > 0);
+}
+
+inline bool isProfitableBacktestForArchive(const BacktestResult &result)
+{
+    return isProfitableBacktestForArchive(result.summary, result.config.dataMode);
+}
+
 struct BacktestArchiveSummary {
     QString resultId;
     QString taskId;
@@ -140,6 +161,8 @@ struct BacktestArchiveRecord {
     QString resultId;
     QDateTime completedAt;
     BacktestResult result;
+    QString sharedCandleResultId;
+    QString sharedRawTickResultId;
 };
 
 struct BacktestRawTickPage {

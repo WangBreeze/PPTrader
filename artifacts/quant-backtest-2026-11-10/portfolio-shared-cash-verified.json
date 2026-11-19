@@ -1,0 +1,67 @@
+{
+    "archiveElapsedMilliseconds": 0,
+    "archiveError": "",
+    "archiveMatchesSource": true,
+    "archiveReloaded": true,
+    "archived": true,
+    "bars": 26,
+    "date": "2026-11-10",
+    "engineElapsedMilliseconds": 2,
+    "equityPoints": 26,
+    "finalEquity": 1035946.31353936,
+    "legs": [
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:873246a7b90c644857378a959e8d92b3f190fe6627a4957d7bc32abee13aa5d4",
+            "dayCount": 26,
+            "rawTickCount": 119327,
+            "symbol": "000001"
+        },
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:d26b77860b2cab0dae6aa312761ddb47eb984097c5a8724b93aafe877431187d",
+            "dayCount": 26,
+            "rawTickCount": 120864,
+            "symbol": "000858"
+        },
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:ad3229ff0b5518ba0f50ee11eed65699abd485bccb7d9bdcdd5df4bfc41591c8",
+            "dayCount": 26,
+            "rawTickCount": 123900,
+            "symbol": "300750"
+        },
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:fe7147e637903887ff99a05efb1da31a134c1fed77716b7235e447071c1fff12",
+            "dayCount": 26,
+            "rawTickCount": 123015,
+            "symbol": "600036"
+        },
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:01ddecc492d27c8590a3e0bb9fb1ff1decac997247e9bcb6c5cdf2ea148ec4d3",
+            "dayCount": 26,
+            "rawTickCount": 108892,
+            "symbol": "600519"
+        },
+        {
+            "bars": 26,
+            "datasetVersion": "sha256:289de570ba975757b351ead4ef8ef4f75d9971da3de18aef21e8ca5539fc33b6",
+            "dayCount": 26,
+            "rawTickCount": 123437,
+            "symbol": "601318"
+        }
+    ],
+    "maxDrawdownPercent": 5.659009010892898,
+    "periodSeconds": 86400,
+    "restoredEquityPointCount": 26,
+    "restoredFinalEquity": 1035946.31353936,
+    "restoredLegCount": 6,
+    "restoredTradeCount": 27,
+    "resultId": "d69824cc-40ab-4fd6-88b5-235ef07d925e",
+    "sharpeRatio": 2.042401341508218,
+    "totalCommission": 307.63526064,
+    "totalReturnPercent": 3.594631353935984,
+    "trades": 27
+}

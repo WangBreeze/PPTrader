@@ -1,4 +1,5 @@
 #include "visualization/LocalCandleSeriesItem.h"
+#include "models/CandleListModel.h"
 
 #include "models/LocalCandleSeriesListModel.h"
 
@@ -505,6 +506,14 @@ void LocalCandleSeriesItem::scrollToLatest()
     applyViewport({totalCount - count, count});
 }
 
+void LocalCandleSeriesItem::showLatest(int bars)
+{
+    if (m_points.isEmpty()) return;
+    const int totalCount = int(m_points.size());
+    const int count = std::clamp(bars, 1, totalCount);
+    applyViewport({totalCount - count, count});
+}
+
 void LocalCandleSeriesItem::scalePriceRange(qreal factor)
 {
     if (!std::isfinite(factor) || factor <= 0.0 || !m_range.valid) return;
@@ -971,6 +980,44 @@ bool LocalCandleSeriesItem::updateTypedModelRows(int first, int last)
 
 bool LocalCandleSeriesItem::appendTypedModelRows(int first, int last)
 {
+    if (const auto *candles = qobject_cast<const CandleListModel *>(m_model.data())) {
+        const int addedCount = last - first + 1;
+        const QVector<CandlePoint> &source = candles->points();
+        if (addedCount <= 0 || first != m_points.size()
+            || source.size() != m_points.size() + addedCount
+            || last != source.size() - 1) return false;
+        const int previousCount = m_points.size();
+        const int previousSignalCount = m_signalCount;
+        const LocalCandleViewport previousViewport = m_viewport;
+        const bool wasAtRightEdge = previousCount > 0
+            && previousViewport.start + previousViewport.count >= previousCount;
+        const LocalCandlePlotRange previousRange = m_range;
+        m_points.reserve(source.size());
+        m_signals.reserve(source.size());
+        for (int row = first; row <= last; ++row) {
+            const CandlePoint &point = source.at(row);
+            LocalCandleSeriesPoint visible;
+            visible.candle = point.candle;
+            visible.endTime = point.candle.startTime.addSecs(
+                std::max(1, point.candle.periodSeconds));
+            visible.sourceCount = 1;
+            m_points.append(visible);
+            SignalVisual signal;
+            signal.present = point.hasSignal;
+            if (signal.present) {
+                signal.buy = point.signal.side == SignalSide::Buy;
+                signal.side = signalSideName(point.signal.side);
+                signal.reason = point.signal.reason;
+                signal.price = point.signal.price;
+                ++m_signalCount;
+            }
+            m_signals.append(signal);
+        }
+        finishModelDataChange(previousCount, previousSignalCount,
+                              previousViewport, wasAtRightEdge, previousRange,
+                              first);
+        return true;
+    }
     const auto *typed = qobject_cast<const LocalCandleSeriesListModel *>(
         m_model.data());
     const int addedCount = last - first + 1;

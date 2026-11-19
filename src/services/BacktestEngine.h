@@ -20,6 +20,15 @@ class BacktestEngine final : public QObject {
 public:
     static constexpr int RawTickDisplayEquityPointLimit = 8192;
 
+    struct PreparedCandleInput {
+        QVector<Candle> candles;
+        QString symbol;
+        int periodSeconds = 0;
+        QDateTime sampleFrom;
+        QDateTime sampleTo;
+        QString dataVersion;
+    };
+
     using RawTickChunkLoader =
         std::function<bool(QVector<RawTradeTick> *ticks, QString *error)>;
 
@@ -28,11 +37,19 @@ public:
 
     bool start(const BacktestConfig &config, QVector<Candle> candles,
                std::unique_ptr<BacktestStrategy> providedStrategy = {});
+    static PreparedCandleInput prepareCandles(
+        const BacktestConfig &config, QVector<Candle> candles);
+    bool startPreparedCandles(
+        const BacktestConfig &config, const PreparedCandleInput &prepared,
+        std::unique_ptr<BacktestStrategy> providedStrategy = {});
     bool start(const BacktestConfig &config, QVector<RawTradeTick> ticks,
                std::unique_ptr<BacktestStrategy> providedStrategy = {});
     bool startStreamedRawTicks(const BacktestConfig &config,
                                int expectedObservations,
-                               RawTickChunkLoader loader);
+                               RawTickChunkLoader loader,
+                               std::unique_ptr<BacktestStrategy> providedStrategy = {});
+    void setCandleObservationsPerTurn(int observations);
+    void setObservationSignalsEnabled(bool enabled);
     void cancel();
     bool isRunning() const;
     double progress() const;
@@ -80,7 +97,11 @@ private:
     BacktestPosition m_position;
     TradeSignal m_currentSignal;
     bool m_hasCurrentSignal = false;
+    TradeSignal m_currentFill;
+    bool m_hasCurrentFill = false;
     int m_index = 0;
+    int m_candleObservationsPerTurn = 1;
+    bool m_observationSignalsEnabled = true;
     int m_rawTickChunkIndex = 0;
     int m_rawTickProcessed = 0;
     int m_rawTickExpected = 0;

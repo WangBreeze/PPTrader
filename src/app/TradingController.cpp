@@ -5,8 +5,13 @@
 
 #include "services/CompositeMarketDataProvider.h"
 #include "services/CustomStrategyPreviewService.h"
+#include "services/BacktestDataAvailabilityPlanner.h"
+#include "services/BacktestDataQualityGate.h"
 #include "services/MarketSession.h"
 #include "services/MootdxMarketDataProvider.h"
+#include "services/TickDataLiveProvider.h"
+
+#include <cstdio>
 #include "services/StorageProfile.h"
 #include "strategy/CustomBacktestStrategy.h"
 #include "strategy/PairSpreadStrategy.h"
@@ -94,6 +99,56 @@ QString periodText(int periodSeconds)
     if (periodSeconds % 3600 == 0) return QStringLiteral("%1h").arg(periodSeconds / 3600);
     if (periodSeconds % 60 == 0) return QStringLiteral("%1m").arg(periodSeconds / 60);
     return QStringLiteral("%1s").arg(periodSeconds);
+}
+
+StrategyMatrixTaskRecord matrixTaskRecord(
+    const QString &runId, const StrategyMatrixItem &item)
+{
+    StrategyMatrixTaskRecord task;
+    task.runId = runId;
+    task.taskId = item.taskId;
+    task.strategyId = item.strategyId;
+    task.profileLabel = item.profileLabel;
+    task.strategyVersion = item.strategyVersion;
+    task.parameterFingerprint = item.parameterFingerprint;
+    task.symbol = item.symbol;
+    task.datasetVersion = item.datasetVersion;
+    task.dataVersion = item.dataVersion;
+    task.status = item.succeeded ? QStringLiteral("succeeded")
+                                 : QStringLiteral("failed");
+    task.error = item.error;
+    task.resultId = item.resultId;
+    task.actualBars = item.actualBars;
+    task.elapsedMilliseconds = item.elapsedMilliseconds;
+    task.totalReturnPercent = item.summary.totalReturnPercent;
+    task.maxDrawdownPercent = item.summary.maxDrawdownPercent;
+    task.totalTrades = item.summary.totalTrades;
+    task.totalCommission = item.summary.totalCommission;
+    task.finalEquity = item.summary.finalEquity;
+    return task;
+}
+
+QVariantMap matrixTaskMap(const StrategyMatrixTaskRecord &task)
+{
+    return {{QStringLiteral("taskId"), task.taskId},
+            {QStringLiteral("strategyId"), task.strategyId},
+            {QStringLiteral("profileLabel"), task.profileLabel},
+            {QStringLiteral("parameterFingerprint"), task.parameterFingerprint},
+            {QStringLiteral("strategyVersion"), task.strategyVersion},
+            {QStringLiteral("symbol"), task.symbol},
+            {QStringLiteral("datasetVersion"), task.datasetVersion},
+            {QStringLiteral("dataVersion"), task.dataVersion},
+            {QStringLiteral("resultId"), task.resultId},
+            {QStringLiteral("error"), task.error.isEmpty()
+                ? QStringLiteral("等待恢复") : task.error},
+            {QStringLiteral("actualBars"), task.actualBars},
+            {QStringLiteral("elapsedMilliseconds"), task.elapsedMilliseconds},
+            {QStringLiteral("succeeded"), task.status == QStringLiteral("succeeded")},
+            {QStringLiteral("totalReturnPercent"), task.totalReturnPercent},
+            {QStringLiteral("maxDrawdownPercent"), task.maxDrawdownPercent},
+            {QStringLiteral("totalTrades"), task.totalTrades},
+            {QStringLiteral("totalCommission"), task.totalCommission},
+            {QStringLiteral("finalEquity"), task.finalEquity}};
 }
 
 QVector<EquityPoint> portfolioEquityPoints(const PortfolioResult &result)
@@ -225,6 +280,42 @@ TradingController::TradingController(QObject *parent)
             this, &TradingController::handleProviderState);
     connect(m_marketData, &MarketDataProvider::providerRouteChanged,
             this, &TradingController::handleProviderRoute);
+
+    // ── TickData 实时源（2026-11-09，可选）─────────────────────────────────
+    // 默认关闭：它与 CompositeMarketDataProvider 是**互斥**的行情源，
+    // 同时开启会让同一笔成交投递两次（重复 tick 会污染策略与回测统计）。
+    // 开启方式：环境变量 PPTRADER_TICKDATA_LIVE=1
+    //   节点地址：PPTRADER_TICKDATA_ENDPOINT（默认 http://127.0.0.1:18765）
+    //   轮询间隔：PPTRADER_TICKDATA_POLL_MS（默认 3000）
+    // 详见 docs/tickdata-live-api-2026-11-09.md
+    if (qEnvironmentVariableIsSet("PPTRADER_TICKDATA_LIVE")) {
+        m_tickDataProvider = new TickDataLiveProvider(this);
+        const QByteArray endpoint = qgetenv("PPTRADER_TICKDATA_ENDPOINT");
+        if (!endpoint.isEmpty()) {
+            m_tickDataProvider->setEndpoint(QUrl(QString::fromUtf8(endpoint)));
+        }
+        const QByteArray tradingDate = qgetenv("PPTRADER_TICKDATA_DATE");
+        if (!tradingDate.isEmpty()) {
+            m_tickDataProvider->setTradingDate(QString::fromUtf8(tradingDate));
+        }
+        bool ok = false;
+        const int pollMs = qEnvironmentVariableIntValue("PPTRADER_TICKDATA_POLL_MS", &ok);
+        if (ok && pollMs > 0) m_tickDataProvider->setPollIntervalMs(pollMs);
+        connect(m_tickDataProvider, &MarketDataProvider::tickReceived,
+                this, &TradingController::handleTick);
+        connect(m_tickDataProvider, &MarketDataProvider::providerError,
+                this, &TradingController::setStatusText);
+        // 新数据源需要可观测：只看「有新增」的那些轮，避免日志被空轮淹没。
+        connect(m_tickDataProvider, &TickDataLiveProvider::pollCompleted, this,
+                [this](int symbols, int newTicks) {
+                    if (newTicks <= 0) return;
+                    std::fprintf(stderr,
+                                 "[TickData] 本轮 %d 个标的，新增 %d 条 tick，累计 %lld 条\n",
+                                 symbols, newTicks,
+                                 static_cast<long long>(m_tickDataProvider->deliveredTicks()));
+                    std::fflush(stderr);
+                });
+    }
     connect(&m_realtimeMinuteService, &TencentMinuteBarService::resultReady,
             this, &TradingController::finishRealtimeMinuteRequest);
     connect(&m_realtimeChartWindowModel,
@@ -355,7 +446,10 @@ TradingController::TradingController(QObject *parent)
                 if (requestId != m_batchBacktestRequestId) return;
                 BatchBacktestItemResult visibleResult = result;
                 visibleResult.archivable =
-                    m_batchRetainedResults.contains(result.instrument.symbol);
+                    !result.archived
+                    && isProfitableBacktestForArchive(
+                        result.summary, result.dataMode)
+                    && m_batchRetainedResults.contains(result.instrument.symbol);
                 m_batchBacktestModel.addResult(visibleResult);
                 if (m_storageReady && !m_activeBatchBacktestRunId.isEmpty()) {
                     BatchBacktestRunItem item;
@@ -369,6 +463,41 @@ TradingController::TradingController(QObject *parent)
                     m_dataStore.upsertBatchBacktestRunItem(item);
                 }
             });
+    connect(&m_strategyMatrixService, &StrategyMatrixBacktestService::itemReady,
+            this, [this](const StrategyMatrixItem &item) {
+        if (!item.taskId.startsWith(m_strategyMatrixRunId + QLatin1Char(':'))) return;
+        if (!m_dataStore.upsertStrategyMatrixTask(
+                matrixTaskRecord(m_strategyMatrixRunId, item))) {
+            m_strategyMatrixError = QStringLiteral("矩阵任务状态保存失败，请检查本地数据库");
+        }
+        m_strategyMatrixResults.append(item.toVariantMap());
+        ++m_strategyMatrixCompleted;
+        m_strategyMatrixStatus = QStringLiteral("矩阵回测：%1/%2")
+            .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal);
+        LogService::instance().info(QStringLiteral("strategy_matrix"),
+            QStringLiteral("任务 %1：%2").arg(item.taskId,
+                item.succeeded ? QStringLiteral("完成") : item.error));
+        emit strategyMatrixChanged();
+    });
+    connect(&m_strategyMatrixService, &StrategyMatrixBacktestService::finished,
+            this, [this](const QString &runId, bool cancelled, const QString &error) {
+        if (runId != m_strategyMatrixRunId) return;
+        if (!m_dataStore.updateStrategyMatrixRunStatus(
+                runId, !error.isEmpty() ? QStringLiteral("failed")
+                     : cancelled ? QStringLiteral("cancelled")
+                                 : QStringLiteral("completed"), error)) {
+            m_strategyMatrixError = QStringLiteral("矩阵批次状态保存失败");
+        } else if (m_strategyMatrixError.isEmpty()) {
+            m_strategyMatrixError = error;
+        }
+        m_strategyMatrixStatus = !error.isEmpty() ? QStringLiteral("矩阵回测失败")
+            : cancelled ? QStringLiteral("矩阵回测已取消")
+                        : QStringLiteral("矩阵回测完成：%1/%2")
+                              .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal);
+        refreshStrategyMatrixRunHistory();
+        refreshBacktestArchiveList();
+        emit strategyMatrixChanged();
+    });
     connect(&m_batchBacktestService, &BatchBacktestService::itemCompleted, this,
             [this](quint64 requestId, const QString &symbol,
                    const BacktestResult &result) {
@@ -378,7 +507,8 @@ TradingController::TradingController(QObject *parent)
                 for (const QString &oldest : evicted) {
                     m_batchBacktestModel.updateArchivableState(oldest, false);
                 }
-                m_batchBacktestModel.updateArchivableState(symbol, true);
+                m_batchBacktestModel.updateArchivableState(
+                    symbol, isProfitableBacktestForArchive(result));
             });
     connect(&m_batchBacktestService, &BatchBacktestService::progressChanged, this,
             [this](quint64 requestId, int completed, int total,
@@ -469,6 +599,9 @@ TradingController::TradingController(QObject *parent)
     m_customStrategyReplayTimer.setSingleShot(false);
     connect(&m_customStrategyReplayTimer, &QTimer::timeout,
             this, &TradingController::handleCustomStrategyReplayTick);
+    m_backtestReplayTimer.setInterval(100);
+    connect(&m_backtestReplayTimer, &QTimer::timeout, this,
+            &TradingController::stepBacktestReplay);
     connect(&m_parameterGridBacktestService, &ParameterGridBacktestService::completed,
             this, &TradingController::handleParameterGridCompleted);
     connect(&m_parameterGridBacktestService, &ParameterGridBacktestService::failed,
@@ -707,6 +840,7 @@ TradingController::TradingController(QObject *parent)
         m_authorizedFactorImportService.setDatabasePath(databasePath);
         m_externalFactorResearchService.setDatabasePath(databasePath);
         m_batchBacktestService.setDatabasePath(databasePath);
+        m_strategyMatrixService.setDatabasePath(databasePath);
         m_persistedTickCount = m_dataStore.tickCount();
         m_persistedSignalCount = m_dataStore.signalCount();
         const TradingState tradingState = m_dataStore.loadTradingState();
@@ -725,6 +859,11 @@ TradingController::TradingController(QObject *parent)
         refreshAShareInstrumentDayImportHistory();
         refreshAShareIndustryImportHistory();
         recoverBatchBacktestRuns();
+        refreshStrategyMatrixRunHistory();
+        if (!m_strategyMatrixRunHistory.isEmpty()) {
+            loadStrategyMatrixRun(m_strategyMatrixRunHistory.first()
+                                      .toMap().value(QStringLiteral("runId")).toString());
+        }
         reloadRawTickParameterSensitivityHistory();
         refreshPortfolioBacktestArchiveList();
         refreshCrossSectionalBacktestArchiveList();
@@ -801,6 +940,7 @@ void TradingController::shutdown()
     m_marketClockTimer.stop();
     m_tradingPersistenceTimer.stop();
     m_customStrategyReplayTimer.stop();
+    m_backtestReplayTimer.stop();
     m_realtimeMinuteRefreshTimer.stop();
     m_realtimeChartWindowModel.shutdown();
     stopAllPaperStrategies();
@@ -808,6 +948,7 @@ void TradingController::shutdown()
     // Cancel producers before draining their worker queues.
     m_backtest.cancel();
     m_batchBacktestService.cancel();
+    m_strategyMatrixService.cancel();
     m_portfolioBacktestService.cancel();
     m_crossSectionalBacktestService.cancel();
     m_parameterGridBacktestService.cancel();
@@ -830,6 +971,7 @@ void TradingController::shutdown()
     } else if (m_marketData) {
         m_marketData->stop();
     }
+    if (m_tickDataProvider) m_tickDataProvider->stop();
 
     // These stop methods use bounded worker-thread waits. Calling them while
     // aboutToQuit still owns a live event loop avoids teardown-time deadlocks.
@@ -844,10 +986,44 @@ void TradingController::shutdown()
     m_portfolioBacktestService.stop();
     m_crossSectionalBacktestService.stop();
     m_rawTickSensitivityService.stop();
+    if (m_backtestArchiveCompactionThread)
+        m_backtestArchiveCompactionThread->wait();
 }
 
 QAbstractItemModel *TradingController::tickModel() { return &m_tickModel; }
 QAbstractItemModel *TradingController::candleModel() { return &m_candleModel; }
+QAbstractItemModel *TradingController::backtestReplayCandleModel()
+{
+    return &m_backtestReplayCandleModel;
+}
+bool TradingController::backtestReplayActive() const { return m_backtestReplayActive; }
+bool TradingController::backtestReplayRunning() const
+{
+    return m_backtestReplayTimer.isActive();
+}
+int TradingController::backtestReplayIndex() const { return m_backtestReplayIndex; }
+int TradingController::backtestReplayTotal() const
+{
+    return m_backtestReplayPoints.size();
+}
+bool TradingController::strategyMatrixRunning() const
+{
+    return m_strategyMatrixService.isRunning();
+}
+QVariantList TradingController::strategyMatrixResults() const
+{
+    return m_strategyMatrixResults;
+}
+QString TradingController::strategyMatrixStatus() const
+{
+    return m_strategyMatrixStatus;
+}
+QString TradingController::strategyMatrixError() const
+{
+    return m_strategyMatrixError;
+}
+int TradingController::strategyMatrixTotal() const { return m_strategyMatrixTotal; }
+int TradingController::strategyMatrixCompleted() const { return m_strategyMatrixCompleted; }
 QAbstractItemModel *TradingController::historyCandleModel() { return &m_historyCandleModel; }
 QAbstractItemModel *TradingController::signalModel() { return &m_signalModel; }
 QAbstractItemModel *TradingController::strategyModel() { return &m_strategyModel; }
@@ -1020,6 +1196,18 @@ QDateTime TradingController::backtestResultCompletedAt() const
     return m_displayedBacktestCompletedAt;
 }
 int TradingController::backtestArchiveCount() const { return m_backtestArchiveModel.count(); }
+QVariantMap TradingController::backtestArchiveStorage() const
+{
+    return m_backtestArchiveStorage;
+}
+bool TradingController::backtestArchiveCompactionRunning() const
+{
+    return m_backtestArchiveCompactionRunning;
+}
+QString TradingController::backtestArchiveCompactionError() const
+{
+    return m_backtestArchiveCompactionError;
+}
 QString TradingController::selectedBacktestArchiveId() const
 {
     return m_selectedBacktestArchiveId;
@@ -2432,9 +2620,10 @@ void TradingController::clearNasSyncState()
 
 bool TradingController::relocateStorage(const QString &pathOrUrl)
 {
-    if (m_storageRelocationRunning || !m_storageReady) return false;
+    if (m_storageRelocationRunning || m_backtestArchiveCompactionRunning
+        || !m_storageReady) return false;
     if (m_realtimeLiveSessionState.requested() || backtestRunning()
-        || batchBacktestRunning()
+        || batchBacktestRunning() || strategyMatrixRunning()
         || historyDownloadRunning()
         || m_tickDataImportRunning || m_tickDataBatchRunning
         || m_aShareInstrumentDayImportRunning
@@ -2476,20 +2665,7 @@ bool TradingController::relocateStorage(const QString &pathOrUrl)
 
     persistTradingState();
     const QString uuid = m_dataStore.databaseUuid();
-    m_backtestArchiveLoadRequestGate.cancel();
-    clearBacktestArchiveRawTickPage();
-    m_asyncSnapshotQueryService.stop();
-    m_asyncLocalCandleQueryService.stop();
-    m_asyncLocalTickQueryService.stop();
-    m_asyncLiveDayCandleQueryService.stop();
-    m_asyncCustomStrategyWorkspaceService.stop();
-    m_asyncBacktestArchiveService.stop();
-    m_backtestDatasetService.stop();
-    m_nasBacktestPreparationService.stop();
-    m_portfolioBacktestService.stop();
-    m_crossSectionalBacktestService.stop();
-    m_rawTickSensitivityService.stop();
-    m_dataStore.close();
+    stopStorageServices();
     m_storageReady = false;
     m_storageRelocationRunning = true;
     m_storageRelocationError.clear();
@@ -2511,6 +2687,24 @@ bool TradingController::relocateStorage(const QString &pathOrUrl)
     return true;
 }
 
+void TradingController::stopStorageServices()
+{
+    m_backtestArchiveLoadRequestGate.cancel();
+    clearBacktestArchiveRawTickPage();
+    m_asyncSnapshotQueryService.stop();
+    m_asyncLocalCandleQueryService.stop();
+    m_asyncLocalTickQueryService.stop();
+    m_asyncLiveDayCandleQueryService.stop();
+    m_asyncCustomStrategyWorkspaceService.stop();
+    m_asyncBacktestArchiveService.stop();
+    m_backtestDatasetService.stop();
+    m_nasBacktestPreparationService.stop();
+    m_portfolioBacktestService.stop();
+    m_crossSectionalBacktestService.stop();
+    m_rawTickSensitivityService.stop();
+    m_dataStore.close();
+}
+
 bool TradingController::restartStorageServices(const QString &databasePath)
 {
     if (!m_dataStore.initialize(databasePath)) return false;
@@ -2521,10 +2715,12 @@ bool TradingController::restartStorageServices(const QString &databasePath)
     m_authorizedFactorImportService.setDatabasePath(databasePath);
     m_externalFactorResearchService.setDatabasePath(databasePath);
     m_batchBacktestService.setDatabasePath(databasePath);
+    m_strategyMatrixService.setDatabasePath(databasePath);
     m_persistedTickCount = m_dataStore.tickCount();
     m_persistedSignalCount = m_dataStore.signalCount();
     reloadCustomStrategies();
     refreshLocalBacktestDataCatalog();
+    refreshStrategyMatrixRunHistory();
     refreshBacktestArchiveList();
     reloadTickDataImportRunHistory();
     refreshAShareInstrumentDayImportHistory();
@@ -2658,6 +2854,14 @@ QVariantList TradingController::realtimeProviderCapabilities() const
     return m_realtimeProviderCapabilities;
 }
 
+// 当前生效的行情源：TickData 实时源开启时用它，否则用原有的 Composite。
+// 二者互斥 —— 同时开启会让同一笔成交投递两次。
+MarketDataProvider *TradingController::activeMarketDataProvider() const
+{
+    return m_tickDataProvider ? static_cast<MarketDataProvider *>(m_tickDataProvider)
+                              : m_marketData;
+}
+
 void TradingController::startLive()
 {
     if (m_paperReplayBook.hasRun()) {
@@ -2670,7 +2874,8 @@ void TradingController::startLive()
         degradeProvider(m_aShareUniverseError);
         return;
     }
-    m_marketData->start(buildMarketUniverse());
+    // TickData 实时源开启时优先用它（与 m_marketData 互斥，避免同一笔成交投递两次）
+    activeMarketDataProvider()->start(buildMarketUniverse());
     m_realtimeLiveSessionState.requestStart();
     emit liveRunningChanged();
     requestRealtimeMinuteSeries(selectedLiveSymbol());
@@ -2683,6 +2888,7 @@ void TradingController::stopLive()
     if (!m_realtimeLiveSessionState.requested()) return;
     stopAllPaperStrategies();
     m_marketData->stop();
+    if (m_tickDataProvider) m_tickDataProvider->stop();
     m_realtimeMinuteRefreshTimer.stop();
     m_realtimeMinuteService.cancel();
     m_realtimeMinuteRequestGate.cancel();
@@ -2747,7 +2953,7 @@ qulonglong TradingController::runStrategyBacktest(const QString &strategyId,
                                                   double commissionRate,
                                                   double slippageRate)
 {
-    if (batchBacktestRunning()) {
+    if (batchBacktestRunning() || strategyMatrixRunning()) {
         handleBacktestError(QStringLiteral("请先取消正在运行的多标的批量回测"));
         return 0;
     }
@@ -2851,7 +3057,7 @@ qulonglong TradingController::runCustomStrategyBacktest(
     const QString &symbol, const QString &frequency, int barCount,
     double initialCapital, double commissionRate, double slippageRate)
 {
-    if (batchBacktestRunning()) {
+    if (batchBacktestRunning() || strategyMatrixRunning()) {
         handleBacktestError(QStringLiteral("请先取消正在运行的多标的批量回测"));
         return 0;
     }
@@ -2929,7 +3135,7 @@ qulonglong TradingController::runCustomStrategyBacktest(
     m_pendingBacktestConfig.strategyId = plan->strategyId;
     m_pendingBacktestConfig.strategyVersion = plan->version;
     m_pendingBacktestConfig.strategyParameters = plan->normalizedParameters;
-    m_pendingBacktestConfig.ruleSnapshot = plan->rules.toVariantMap();
+    m_pendingBacktestConfig.ruleSnapshot = plan->ruleSnapshot();
     m_pendingBacktestConfig.instrument = dataset->instrument;
     m_pendingBacktestConfig.frequency = frequency;
     m_pendingBacktestConfig.periodSeconds = periodSeconds;
@@ -2992,7 +3198,7 @@ QVariantMap TradingController::customStrategyLocalRunAvailability(
     }
     if (plan) {
         result.insert(QStringLiteral("normalizedParameters"), plan->normalizedParameters);
-        result.insert(QStringLiteral("ruleSnapshot"), plan->rules.toVariantMap());
+        result.insert(QStringLiteral("ruleSnapshot"), plan->ruleSnapshot());
     }
     return result;
 }
@@ -3148,7 +3354,7 @@ qulonglong TradingController::runSelectedLocalCustomStrategyBacktest(
     m_pendingBacktestConfig.strategyId = plan->strategyId;
     m_pendingBacktestConfig.strategyVersion = plan->version;
     m_pendingBacktestConfig.strategyParameters = plan->normalizedParameters;
-    m_pendingBacktestConfig.ruleSnapshot = plan->rules.toVariantMap();
+    m_pendingBacktestConfig.ruleSnapshot = plan->ruleSnapshot();
     m_pendingBacktestConfig.instrument = dataset->instrument;
     m_pendingBacktestConfig.frequency = dataset->frequency();
     m_pendingBacktestConfig.periodSeconds = dataset->periodSeconds;
@@ -3307,7 +3513,7 @@ QVariantMap TradingController::analyzeCustomStrategyJson(
             {QStringLiteral("strategyId"), plan->strategyId},
             {QStringLiteral("version"), plan->version},
             {QStringLiteral("normalizedParameters"), plan->normalizedParameters},
-            {QStringLiteral("ruleSnapshot"), plan->rules.toVariantMap()},
+            {QStringLiteral("ruleSnapshot"), plan->ruleSnapshot()},
             {QStringLiteral("minimumWarmupBars"), plan->minimumWarmupBars},
             {QStringLiteral("indicatorCount"), plan->indicators.size()},
             {QStringLiteral("conditionCount"), plan->conditions.size()},
@@ -3397,6 +3603,30 @@ QString TradingController::exportCustomStrategyJson(const QString &strategyId,
     return {};
 }
 
+QString TradingController::createCustomStrategyVersionDraft(
+    const QString &strategyId, int version) const
+{
+    const CustomStrategyDefinition *source = nullptr;
+    int latestVersion = 0;
+    for (const CustomStrategyDefinition &definition : m_customStrategyDefinitions) {
+        if (definition.strategyId != strategyId) continue;
+        latestVersion = std::max(latestVersion, definition.version);
+        if (definition.version == version) source = &definition;
+    }
+    if (!source || latestVersion >= 1000000) {
+        LogService::instance().warning(QStringLiteral("ui_click"),
+            QStringLiteral("action=clone_custom_strategy_version rejected id=%1 version=%2")
+                .arg(strategyId).arg(version));
+        return {};
+    }
+    const QString draft = source->newVersionDraftJson(
+        latestVersion + 1, QDateTime::currentDateTimeUtc());
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=clone_custom_strategy_version accepted id=%1 source=%2 draft=%3")
+            .arg(strategyId).arg(version).arg(latestVersion + 1));
+    return draft;
+}
+
 void TradingController::reloadCustomStrategies()
 {
     m_customStrategyDefinitions = m_dataStore.loadCustomStrategies();
@@ -3437,6 +3667,591 @@ qulonglong TradingController::runLocalBatchBacktest(
         startDate.toString(Qt::ISODate), endDate.toString(Qt::ISODate), maximumSymbols);
 }
 
+QString TradingController::runStrategyMatrix(
+    const QVariantList &strategies, const QStringList &symbols,
+    const QString &frequency, const QString &startDateText,
+    const QString &endDateText)
+{
+    const QString interactionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("intent=%1 action=run_strategy_matrix strategies=%2 symbols=%3")
+            .arg(interactionId).arg(strategies.size()).arg(symbols.size()));
+    const auto reject = [this, interactionId](const QString &message) {
+        m_strategyMatrixError = message;
+        m_strategyMatrixStatus = QStringLiteral("矩阵回测未启动");
+        LogService::instance().warning(QStringLiteral("ui_click"),
+            QStringLiteral("intent=%1 action=run_strategy_matrix rejected=%2")
+                .arg(interactionId, message));
+        emit strategyMatrixChanged();
+        return QString{};
+    };
+    if (!m_storageReady || m_storageRelocationRunning)
+        return reject(QStringLiteral("本地回测数据库不可用"));
+    if (m_strategyMatrixService.isRunning() || batchBacktestRunning()
+        || backtestRunning())
+        return reject(QStringLiteral("请先结束正在运行的回测"));
+    const QDate startDate = QDate::fromString(startDateText.trimmed(), Qt::ISODate);
+    const QDate endDate = QDate::fromString(endDateText.trimmed(), Qt::ISODate);
+    const bool raw = frequency.trimmed().compare(
+        QStringLiteral("tick"), Qt::CaseInsensitive) == 0;
+    const int periodSeconds = raw ? 0
+        : HistoricalDataService::periodSecondsForFrequency(frequency);
+    if (!startDate.isValid() || !endDate.isValid() || startDate > endDate
+        || (!raw && periodSeconds <= 0))
+        return reject(QStringLiteral("请选择有效周期和日期范围"));
+    QString configError;
+    if (!validateBacktestConfiguration(raw ? QStringLiteral("1m") : frequency, 2,
+            m_backtestConfiguredInitialCapital, m_backtestCommissionRate,
+            m_backtestSlippageRate, &configError))
+        return reject(configError);
+
+    StrategyMatrixRequest request;
+    request.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.startDate = startDate;
+    request.endDate = endDate;
+    request.dataMode = raw ? BacktestDataMode::RawTicks
+                           : BacktestDataMode::Candles;
+    request.periodSeconds = periodSeconds;
+    request.initialCapital = m_backtestConfiguredInitialCapital;
+    request.commissionRate = m_backtestCommissionRate;
+    request.slippageRate = m_backtestSlippageRate;
+    QSet<QString> seenStrategies;
+    for (const QVariant &value : strategies) {
+        const QVariantMap selected = value.toMap();
+        const QString id = selected.value(QStringLiteral("strategyId")).toString().trimmed();
+        if (id.isEmpty()) return reject(QStringLiteral("策略 ID 不能为空"));
+        StrategyMatrixEntry entry;
+        entry.strategyId = id;
+        entry.profileLabel = selected.value(QStringLiteral("profileLabel"))
+                                 .toString().trimmed();
+        const QVariantMap parameters =
+            selected.value(QStringLiteral("parameters")).toMap();
+        if (id.startsWith(QStringLiteral("custom_"))) {
+            const int version = selected.value(QStringLiteral("version")).toInt();
+            const CustomStrategyDefinition *definition = nullptr;
+            for (const CustomStrategyDefinition &candidate : m_customStrategyDefinitions) {
+                if (candidate.strategyId == id
+                    && (version <= 0 || candidate.version == version)) {
+                    definition = &candidate;
+                    break;
+                }
+            }
+            if (!definition)
+                return reject(QStringLiteral("自定义策略版本不存在：%1").arg(id));
+            QString error;
+            const auto plan = m_customStrategyCompiler.compile(
+                *definition, parameters, &error);
+            if (!plan) return reject(error);
+            if (raw && !CustomBacktestStrategy(
+                    *plan, CustomBacktestInputMode::RawTicks)
+                    .supportsProvidedRawTicks()) {
+                return reject(QStringLiteral("自定义策略不支持原始 Tick：%1")
+                                  .arg(id));
+            }
+            entry.custom = true;
+            entry.customPlan = *plan;
+            entry.definitionSnapshot = *definition;
+            entry.version = plan->version;
+            entry.parameters = plan->normalizedParameters;
+        } else {
+            QString error;
+            if (!m_backtestStrategyRegistry.normalizeParameters(
+                    id, parameters, &entry.parameters, &error)
+                || !m_backtestStrategyRegistry.supportsDataMode(
+                    id, raw ? QStringLiteral("raw_ticks")
+                            : QStringLiteral("candles"))) {
+                return reject(error.isEmpty()
+                    ? QStringLiteral("策略不支持所选数据模式：%1").arg(id) : error);
+            }
+        }
+        const QString key = id + QLatin1Char(':')
+            + QString::number(entry.version) + QLatin1Char(':')
+            + strategyMatrixParameterFingerprint(entry.parameters);
+        if (seenStrategies.contains(key))
+            return reject(QStringLiteral("策略与参数组合重复：%1").arg(id));
+        seenStrategies.insert(key);
+        request.strategies.append(std::move(entry));
+    }
+    if (request.strategies.isEmpty())
+        return reject(QStringLiteral("请至少选择一个策略"));
+
+    QSet<QString> seenSymbols;
+    for (const QString &selectedSymbol : symbols) {
+        const QString symbol = selectedSymbol.trimmed().toUpper();
+        if (symbol.isEmpty() || seenSymbols.contains(symbol)) continue;
+        seenSymbols.insert(symbol);
+        if (raw) {
+            if (symbol.size() != 6
+                || !std::all_of(symbol.cbegin(), symbol.cend(),
+                    [](QChar ch) { return ch.isDigit(); })) {
+                return reject(QStringLiteral("股票代码必须为六位数字：%1").arg(symbol));
+            }
+            LocalHistoryDataset dataset;
+            dataset.instrument = findInstrument(symbol);
+            if (dataset.instrument.symbol.isEmpty()) {
+                dataset.instrument = {symbol, symbol, Market::AShare,
+                    symbol.startsWith(QLatin1Char('6'))
+                        ? QStringLiteral("XSHG") : QStringLiteral("XSHE")};
+            }
+            dataset.periodSeconds = 0;
+            dataset.source = QStringLiteral("raw_trade_ticks_v1");
+            request.datasets.append(dataset);
+            continue;
+        }
+        const LocalHistoryDataset *found = nullptr;
+        for (const LocalHistoryDataset &dataset
+             : m_workspaceInstrumentSelections.localHistoryCatalog()) {
+            if (dataset.instrument.symbol == symbol
+                && dataset.periodSeconds == periodSeconds
+                && dataset.isBacktestEligible()) {
+                found = &dataset;
+                break;
+            }
+        }
+        if (!found)
+            return reject(QStringLiteral("没有可回测的本地 K 线：%1 · %2")
+                .arg(symbol, frequency));
+        request.datasets.append(*found);
+    }
+    if (request.datasets.isEmpty())
+        return reject(QStringLiteral("请至少选择一只股票"));
+    if (request.strategies.size() * request.datasets.size() > 200)
+        return reject(QStringLiteral("单次矩阵最多 200 个任务"));
+    if (raw && qint64(request.strategies.size()) * request.datasets.size()
+                   > RawMatrixMaxTasks)
+        return reject(QStringLiteral("原始 Tick 矩阵首版最多 %1 个任务")
+                          .arg(RawMatrixMaxTasks));
+
+    qint64 rawTickWork = 0;
+    for (const LocalHistoryDataset &dataset : request.datasets) {
+        const auto identity = raw
+            ? m_dataStore.loadRawBacktestDatasetIdentity(dataset.instrument)
+            : m_dataStore.loadBacktestDatasetIdentity(
+                  dataset.instrument, periodSeconds);
+        if (!identity || identity->isEmpty())
+            return reject(QStringLiteral("数据身份不可用：%1")
+                              .arg(dataset.instrument.symbol));
+        const BacktestDatasetIdentity frozen =
+            BacktestDataAvailabilityPlanner::trimIdentity(
+                *identity, startDate, endDate);
+        if (frozen.isEmpty())
+            return reject(QStringLiteral("日期范围内没有历史数据：%1")
+                              .arg(dataset.instrument.symbol));
+        if (raw && (frozen.firstTradingDate != startDate
+                    || frozen.lastTradingDate != endDate
+                    || !frozen.calendarCoverageKnown || frozen.gapDayCount > 0)) {
+            return reject(QStringLiteral("原始 Tick 日期窗口不连续：%1")
+                              .arg(dataset.instrument.symbol));
+        }
+        if (raw) {
+            qint64 perSymbol = 0;
+            for (const RawTickDayFingerprint &day : frozen.days)
+                perSymbol += day.rawCount;
+            if (perSymbol <= 0
+                || perSymbol > RawMatrixMaxResidentTicksPerSymbol)
+                return reject(QStringLiteral("单股逐笔窗口超过 %1 笔：%2")
+                    .arg(RawMatrixMaxResidentTicksPerSymbol)
+                    .arg(dataset.instrument.symbol));
+            rawTickWork += perSymbol * request.strategies.size();
+            if (rawTickWork > RawMatrixMaxProcessedTicks)
+                return reject(QStringLiteral("原始 Tick 矩阵首版最多处理 %1 次策略 Tick")
+                    .arg(RawMatrixMaxProcessedTicks));
+        }
+        request.frozenIdentities.append(frozen);
+    }
+
+    StrategyMatrixRunRecord run;
+    run.runId = request.runId;
+    run.createdAt = QDateTime::currentDateTimeUtc();
+    run.requestJson = strategyMatrixRequestToJson(request);
+    run.status = QStringLiteral("running");
+    run.totalTasks = request.strategies.size() * request.datasets.size();
+    QVector<StrategyMatrixTaskRecord> taskRecords;
+    taskRecords.reserve(run.totalTasks);
+    for (int datasetIndex = 0; datasetIndex < request.datasets.size(); ++datasetIndex) {
+        const auto &dataset = request.datasets.at(datasetIndex);
+        for (const StrategyMatrixEntry &strategy : request.strategies) {
+            StrategyMatrixTaskRecord task;
+            task.runId = run.runId;
+            task.taskId = strategyMatrixTaskId(run.runId, strategy, dataset);
+            task.strategyId = strategy.strategyId;
+            task.profileLabel = strategy.profileLabel;
+            task.strategyVersion = strategy.version;
+            task.parameterFingerprint = strategyMatrixParameterFingerprint(
+                strategy.parameters);
+            task.symbol = dataset.instrument.symbol;
+            task.datasetVersion = request.frozenIdentities.at(datasetIndex)
+                                      .datasetVersion;
+            task.status = QStringLiteral("pending");
+            taskRecords.append(task);
+        }
+    }
+    if (!m_dataStore.createStrategyMatrixRun(run, taskRecords))
+        return reject(QStringLiteral("矩阵批次快照保存失败"));
+
+    m_strategyMatrixRunId = request.runId;
+    m_strategyMatrixTotal = request.strategies.size() * request.datasets.size();
+    m_strategyMatrixCompleted = 0;
+    m_strategyMatrixResults.clear();
+    m_strategyMatrixError.clear();
+    m_strategyMatrixStatus = QStringLiteral("矩阵回测准备中：%1 个任务")
+        .arg(m_strategyMatrixTotal);
+    if (!m_strategyMatrixService.start(request)) {
+        m_dataStore.updateStrategyMatrixRunStatus(
+            run.runId, QStringLiteral("failed"),
+            QStringLiteral("矩阵回测服务启动失败"));
+        refreshStrategyMatrixRunHistory();
+        return reject(QStringLiteral("矩阵回测服务启动失败"));
+    }
+    LogService::instance().info(QStringLiteral("strategy_matrix"),
+        QStringLiteral("intent=%1 启动 %2，策略 %3，股票 %4，任务 %5")
+            .arg(interactionId, request.runId).arg(request.strategies.size())
+            .arg(request.datasets.size()).arg(m_strategyMatrixTotal));
+    emit strategyMatrixChanged();
+    refreshStrategyMatrixRunHistory();
+    return request.runId;
+}
+
+void TradingController::cancelStrategyMatrix()
+{
+    if (!m_strategyMatrixService.isRunning()) return;
+    LogService::instance().info(QStringLiteral("strategy_matrix"),
+        QStringLiteral("取消 %1").arg(m_strategyMatrixRunId));
+    m_strategyMatrixService.cancel();
+}
+
+void TradingController::reportStrategyMatrixInputError()
+{
+    LogService::instance().warning(QStringLiteral("ui_click"),
+        QStringLiteral("action=run_strategy_matrix rejected=invalid_parameter_json"));
+}
+
+void TradingController::logStrategyMatrixSelection(
+    const QString &kind, const QString &value, bool added)
+{
+    if (kind != QStringLiteral("strategy") && kind != QStringLiteral("symbol")
+        && kind != QStringLiteral("strategy_batch")
+        && kind != QStringLiteral("symbol_batch")
+        && kind != QStringLiteral("parameter")) return;
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("intent=%1 action=add_matrix_selection kind=%2 value=%3 added=%4")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces), kind,
+                 value.left(80), added ? QStringLiteral("1") : QStringLiteral("0")));
+}
+
+QVariantList TradingController::strategyMatrixRunHistory() const
+{
+    return m_strategyMatrixRunHistory;
+}
+
+QVariantList TradingController::strategyMatrixPreflightResults() const
+{
+    return m_strategyMatrixPreflightResults;
+}
+
+QVariantList TradingController::preflightStrategyMatrix(
+    const QStringList &symbols, const QString &frequency,
+    const QString &startDateText, const QString &endDateText)
+{
+    m_strategyMatrixPreflightResults.clear();
+    const QDate startDate = QDate::fromString(startDateText.trimmed(), Qt::ISODate);
+    const QDate endDate = QDate::fromString(endDateText.trimmed(), Qt::ISODate);
+    const bool rawMode = frequency.trimmed().compare(
+        QStringLiteral("tick"), Qt::CaseInsensitive) == 0;
+    const int periodSeconds = rawMode ? 0
+        : HistoricalDataService::periodSecondsForFrequency(frequency);
+    if (!m_storageReady || !startDate.isValid() || !endDate.isValid()
+        || startDate > endDate || (!rawMode && periodSeconds <= 0)) {
+        m_strategyMatrixPreflightResults.append(QVariantMap {
+            {QStringLiteral("symbol"), QStringLiteral("输入")},
+            {QStringLiteral("eligible"), false},
+            {QStringLiteral("message"), QStringLiteral("请检查数据库、周期和日期范围")}});
+        emit strategyMatrixChanged();
+        return m_strategyMatrixPreflightResults;
+    }
+    QSet<QString> seen;
+    for (const QString &raw : symbols) {
+        const QString symbol = raw.trimmed().toUpper();
+        if (symbol.isEmpty() || seen.contains(symbol)) continue;
+        seen.insert(symbol);
+        QVariantMap row {{QStringLiteral("symbol"), symbol},
+                         {QStringLiteral("eligible"), false}};
+        if (rawMode) {
+            Instrument instrument = findInstrument(symbol);
+            if (instrument.symbol.isEmpty()) {
+                instrument = {symbol, symbol, Market::AShare,
+                    symbol.startsWith(QLatin1Char('6'))
+                        ? QStringLiteral("XSHG") : QStringLiteral("XSHE")};
+            }
+            const auto identity = m_dataStore.loadRawBacktestDatasetIdentity(
+                instrument);
+            const BacktestDatasetIdentity trimmed = identity
+                ? BacktestDataAvailabilityPlanner::trimIdentity(
+                      *identity, startDate, endDate)
+                : BacktestDatasetIdentity{};
+            if (symbol.size() != 6 || trimmed.isEmpty()) {
+                row.insert(QStringLiteral("message"),
+                           QStringLiteral("缺少可回测的原始 Tick"));
+            } else {
+                const auto days = m_dataStore.loadAShareInstrumentDayRecords(
+                    {symbol}, startDate, endDate);
+                const auto audits = m_dataStore.loadRawTickImportDayAudits(
+                    instrument, startDate, endDate);
+                const auto quality = BacktestDataQualityGate::assess(
+                    trimmed, startDate, endDate, days, audits);
+                const bool eligible = quality.eligible
+                    && trimmed.firstTradingDate == startDate
+                    && trimmed.lastTradingDate == endDate
+                    && trimmed.calendarCoverageKnown && trimmed.gapDayCount == 0
+                    && trimmed.rawTickTotal() > 0
+                    && trimmed.rawTickTotal()
+                        <= RawMatrixMaxResidentTicksPerSymbol;
+                row.insert(QStringLiteral("eligible"), eligible);
+                row.insert(QStringLiteral("message"), eligible
+                    ? QStringLiteral("可运行：%1 日、%2 笔 Tick")
+                          .arg(trimmed.days.size()).arg(trimmed.rawTickTotal())
+                    : quality.messages.isEmpty()
+                        ? QStringLiteral("逐笔日期不连续或超过单股 100 万笔上限")
+                        : quality.messages.join(QStringLiteral("；")));
+                row.insert(QStringLiteral("datasetVersion"), trimmed.datasetVersion);
+            }
+            m_strategyMatrixPreflightResults.append(row);
+            continue;
+        }
+        const LocalHistoryDataset *dataset = nullptr;
+        for (const auto &candidate : m_workspaceInstrumentSelections.localHistoryCatalog()) {
+            if (candidate.instrument.symbol == symbol
+                && candidate.periodSeconds == periodSeconds) {
+                dataset = &candidate;
+                break;
+            }
+        }
+        if (!dataset || !dataset->isBacktestEligible()) {
+            row.insert(QStringLiteral("message"),
+                       QStringLiteral("缺少可回测的本地 K 线"));
+        } else {
+            const auto identity = m_dataStore.loadBacktestDatasetIdentity(
+                dataset->instrument, periodSeconds);
+            const BacktestDatasetIdentity trimmed = identity
+                ? BacktestDataAvailabilityPlanner::trimIdentity(
+                      *identity, startDate, endDate)
+                : BacktestDatasetIdentity{};
+            if (trimmed.isEmpty()) {
+                row.insert(QStringLiteral("message"),
+                           QStringLiteral("日期范围内没有数据身份"));
+            } else {
+                const auto days = m_dataStore.loadAShareInstrumentDayRecords(
+                    {symbol}, startDate, endDate);
+                const auto audits = m_dataStore.loadRawTickImportDayAudits(
+                    dataset->instrument, startDate, endDate);
+                const auto quality = BacktestDataQualityGate::assess(
+                    trimmed, startDate, endDate, days, audits);
+                const bool eligible = quality.eligible
+                    && trimmed.staleDayCount == 0
+                    && trimmed.derivedBarTotal() > 0;
+                row.insert(QStringLiteral("eligible"), eligible);
+                row.insert(QStringLiteral("message"), eligible
+                    ? QStringLiteral("可运行：%1 日、%2 根 K 线")
+                          .arg(trimmed.days.size()).arg(trimmed.derivedBarTotal())
+                    : quality.messages.isEmpty()
+                        ? QStringLiteral("派生 K 线不可用或缓存过期")
+                        : quality.messages.join(QStringLiteral("；")));
+                row.insert(QStringLiteral("datasetVersion"), trimmed.datasetVersion);
+            }
+        }
+        m_strategyMatrixPreflightResults.append(row);
+    }
+    if (m_strategyMatrixPreflightResults.isEmpty()) {
+        m_strategyMatrixPreflightResults.append(QVariantMap {
+            {QStringLiteral("symbol"), QStringLiteral("输入")},
+            {QStringLiteral("eligible"), false},
+            {QStringLiteral("message"), QStringLiteral("请至少选择一只股票")}});
+    }
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=preflight_strategy_matrix symbols=%1")
+            .arg(m_strategyMatrixPreflightResults.size()));
+    emit strategyMatrixChanged();
+    return m_strategyMatrixPreflightResults;
+}
+
+void TradingController::refreshStrategyMatrixRunHistory()
+{
+    m_strategyMatrixRunHistory.clear();
+    if (!m_storageReady) return;
+    for (const StrategyMatrixRunRecord &run
+         : m_dataStore.loadStrategyMatrixRuns(0)) {
+        const QString state = run.status == QStringLiteral("running")
+            ? QStringLiteral("中断，可恢复")
+            : run.status == QStringLiteral("completed")
+                ? QStringLiteral("已完成")
+                : run.status == QStringLiteral("cancelled")
+                    ? QStringLiteral("已取消，可恢复")
+                    : QStringLiteral("失败，可恢复");
+        m_strategyMatrixRunHistory.append(QVariantMap {
+            {QStringLiteral("runId"), run.runId},
+            {QStringLiteral("label"), QStringLiteral("%1 · %2 · %3 项 · %4")
+                .arg(run.createdAt.toLocalTime().toString(QStringLiteral("MM-dd HH:mm")),
+                     state).arg(run.totalTasks).arg(run.runId.left(8))},
+            {QStringLiteral("status"), run.status},
+            {QStringLiteral("totalTasks"), run.totalTasks}});
+    }
+    emit strategyMatrixChanged();
+}
+
+bool TradingController::loadStrategyMatrixRun(const QString &runId)
+{
+    if (m_strategyMatrixService.isRunning() || !m_storageReady) return false;
+    const auto run = m_dataStore.loadStrategyMatrixRun(runId.trimmed());
+    if (!run) return false;
+    const QVector<StrategyMatrixTaskRecord> tasks =
+        m_dataStore.loadStrategyMatrixTasks(run->runId);
+    if (tasks.size() != run->totalTasks) return false;
+    m_strategyMatrixRunId = run->runId;
+    m_strategyMatrixTotal = run->totalTasks;
+    m_strategyMatrixCompleted = 0;
+    m_strategyMatrixResults.clear();
+    for (const StrategyMatrixTaskRecord &task : tasks) {
+        m_strategyMatrixResults.append(matrixTaskMap(task));
+        if (task.status != QStringLiteral("pending")) ++m_strategyMatrixCompleted;
+    }
+    m_strategyMatrixError = run->error;
+    const QString state = run->status == QStringLiteral("completed")
+        ? QStringLiteral("已完成")
+        : run->status == QStringLiteral("cancelled")
+            ? QStringLiteral("已取消") : QStringLiteral("失败");
+    m_strategyMatrixStatus = run->status == QStringLiteral("running")
+        ? QStringLiteral("上次运行中断：%1/%2，可恢复")
+              .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal)
+        : QStringLiteral("历史矩阵：%1/%2 · %3")
+              .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal).arg(state);
+    emit strategyMatrixChanged();
+    return true;
+}
+
+bool TradingController::deleteStrategyMatrixRun(const QString &runId)
+{
+    const QString selectedRunId = runId.trimmed();
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=delete_strategy_matrix_run run=%1")
+            .arg(selectedRunId));
+    if (!m_storageReady || m_storageRelocationRunning || selectedRunId.isEmpty()
+        || m_strategyMatrixService.isRunning() || backtestRunning()
+        || batchBacktestRunning() || backtestArchiveLoading()
+        || backtestArchiveRawTickPageLoading()
+        || m_batchBacktestArchiveRequestGate.loading()) {
+        m_strategyMatrixError = QStringLiteral("请等待回测和归档操作结束后再删除批次");
+        emit strategyMatrixChanged();
+        return false;
+    }
+    QString error;
+    if (!m_dataStore.deleteStrategyMatrixRun(selectedRunId, &error)) {
+        m_strategyMatrixError = error;
+        emit strategyMatrixChanged();
+        return false;
+    }
+    if (m_strategyMatrixRunId == selectedRunId) {
+        m_strategyMatrixRunId.clear();
+        m_strategyMatrixResults.clear();
+        m_strategyMatrixTotal = 0;
+        m_strategyMatrixCompleted = 0;
+    }
+    m_strategyMatrixError.clear();
+    m_strategyMatrixStatus = QStringLiteral("已删除矩阵批次及其归档结果");
+    refreshStrategyMatrixRunHistory();
+    refreshBacktestArchiveList();
+    emit strategyMatrixChanged();
+    return true;
+}
+
+QString TradingController::resumeStrategyMatrixRun(const QString &runId)
+{
+    const auto reject = [this](const QString &message) {
+        m_strategyMatrixError = message;
+        emit strategyMatrixChanged();
+        return QString{};
+    };
+    if (!m_storageReady || m_strategyMatrixService.isRunning()
+        || batchBacktestRunning() || backtestRunning())
+        return reject(QStringLiteral("请先结束正在运行的回测"));
+    const auto run = m_dataStore.loadStrategyMatrixRun(runId.trimmed());
+    if (!run) return reject(QStringLiteral("矩阵批次不存在"));
+    QString parseError;
+    auto restored = strategyMatrixRequestFromJson(run->requestJson, &parseError);
+    if (!restored || restored->runId != run->runId)
+        return reject(parseError.isEmpty()
+            ? QStringLiteral("矩阵批次快照身份不匹配") : parseError);
+    StrategyMatrixRequest &request = *restored;
+    const QVector<StrategyMatrixTaskRecord> savedTasks =
+        m_dataStore.loadStrategyMatrixTasks(run->runId);
+    if (savedTasks.size() != run->totalTasks)
+        return reject(QStringLiteral("矩阵任务清单不完整，拒绝恢复"));
+
+    for (int index = 0; index < request.datasets.size(); ++index) {
+        const auto current = request.dataMode == BacktestDataMode::RawTicks
+            ? m_dataStore.loadRawBacktestDatasetIdentity(
+                  request.datasets.at(index).instrument)
+            : m_dataStore.loadBacktestDatasetIdentity(
+                  request.datasets.at(index).instrument, request.periodSeconds);
+        if (!current || current->isEmpty()
+            || BacktestDataAvailabilityPlanner::trimIdentity(
+                   *current, request.startDate, request.endDate).datasetVersion
+                   != request.frozenIdentities.at(index).datasetVersion) {
+            return reject(QStringLiteral("历史数据身份已变化：%1，请创建新批次")
+                .arg(request.datasets.at(index).instrument.symbol));
+        }
+    }
+
+    m_strategyMatrixRunId = run->runId;
+    m_strategyMatrixTotal = run->totalTasks;
+    m_strategyMatrixCompleted = 0;
+    m_strategyMatrixResults.clear();
+    for (StrategyMatrixTaskRecord task : savedTasks) {
+        if (!m_dataStore.reconcileStrategyMatrixTaskArchive(&task)
+            && task.status == QStringLiteral("succeeded")) {
+            task.status = QStringLiteral("pending");
+            task.resultId.clear();
+        }
+        if (task.status == QStringLiteral("succeeded")) {
+            request.skipTaskIds.insert(task.taskId);
+            m_strategyMatrixResults.append(matrixTaskMap(task));
+            ++m_strategyMatrixCompleted;
+        } else {
+            task.status = QStringLiteral("pending");
+            task.error.clear();
+            task.resultId.clear();
+        }
+        if (!m_dataStore.upsertStrategyMatrixTask(task))
+            return reject(QStringLiteral("矩阵任务状态保存失败"));
+    }
+    m_strategyMatrixError.clear();
+    if (m_strategyMatrixCompleted == m_strategyMatrixTotal) {
+        m_dataStore.updateStrategyMatrixRunStatus(
+            run->runId, QStringLiteral("completed"));
+        m_strategyMatrixStatus = QStringLiteral("矩阵已完成：%1/%2")
+            .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal);
+        refreshStrategyMatrixRunHistory();
+        emit strategyMatrixChanged();
+        return run->runId;
+    }
+    if (!m_dataStore.updateStrategyMatrixRunStatus(
+            run->runId, QStringLiteral("running")))
+        return reject(QStringLiteral("矩阵恢复状态保存失败"));
+    if (!m_strategyMatrixService.start(request)) {
+        m_dataStore.updateStrategyMatrixRunStatus(
+            run->runId, QStringLiteral("failed"),
+            QStringLiteral("矩阵恢复服务启动失败"));
+        return reject(QStringLiteral("矩阵恢复服务启动失败"));
+    }
+    m_strategyMatrixStatus = QStringLiteral("矩阵恢复中：%1/%2")
+        .arg(m_strategyMatrixCompleted).arg(m_strategyMatrixTotal);
+    LogService::instance().info(QStringLiteral("strategy_matrix"),
+        QStringLiteral("恢复批次 %1，跳过成功任务 %2")
+            .arg(run->runId).arg(request.skipTaskIds.size()));
+    refreshStrategyMatrixRunHistory();
+    emit strategyMatrixChanged();
+    return run->runId;
+}
+
 qulonglong TradingController::runLocalBatchBacktestRange(
     const QString &strategyId, const QVariantMap &strategyParameters,
     const QString &dataMode, const QString &frequency,
@@ -3449,7 +4264,7 @@ qulonglong TradingController::runLocalBatchBacktestRange(
         emit batchBacktestStateChanged();
         return 0;
     }
-    if (batchBacktestRunning() || backtestRunning()) {
+    if (batchBacktestRunning() || strategyMatrixRunning() || backtestRunning()) {
         m_batchBacktestError = QStringLiteral("已有单品种或批量回测正在运行");
         m_batchBacktestStatusText = QStringLiteral("批量回测未启动");
         emit batchBacktestStateChanged();
@@ -3570,6 +4385,7 @@ qulonglong TradingController::runLocalBatchBacktestRange(
     request.slippageRate = m_backtestSlippageRate;
     request.lotSize = 100;
     request.maximumActiveEngines = 20;
+    request.archiveProfitableResults = !segmentedResearch;
     request.holdoutTradingDays = holdoutTradingDays;
     request.walkForwardFoldCount = walkForwardFoldCount;
     request.segmentedResearch = segmentedResearch;
@@ -3696,6 +4512,14 @@ qulonglong TradingController::archiveBatchBacktestItem(const QString &symbol)
     m_batchBacktestArchiveError.clear();
     m_batchBacktestArchiveResultId.clear();
     emit batchBacktestStateChanged();
+    const int row = m_batchBacktestModel.indexOfSymbol(normalized);
+    if (row >= 0 && m_batchBacktestModel.get(row)
+                        .value(QStringLiteral("archived")).toBool()) {
+        m_batchBacktestArchiveError = QStringLiteral("该盈利结果已归档：%1")
+            .arg(normalized);
+        emit batchBacktestStateChanged();
+        return 0;
+    }
     if (m_batchBacktestArchiveRequestGate.loading()) {
         m_batchBacktestArchiveError = QStringLiteral(
             "已有回测归档任务正在后台执行，请等待完成");
@@ -3724,6 +4548,17 @@ qulonglong TradingController::archiveBatchBacktestItem(const QString &symbol)
     if (retained->config.datasetIdentity.isEmpty()) {
         m_batchBacktestArchiveError = QStringLiteral(
             "批量结果缺少数据集身份，拒绝归档：%1").arg(normalized);
+        emit batchBacktestStateChanged();
+        return 0;
+    }
+    if (!isProfitableBacktestForArchive(*retained)) {
+        m_batchBacktestArchiveError = retained->config.dataMode
+                == BacktestDataMode::RawTicks
+                && retained->summary.totalTrades == 0
+            ? QStringLiteral("原始 Tick 回测没有闭合交易，不归档：%1")
+                  .arg(normalized)
+            : QStringLiteral("净收益未大于 0，按盈利归档规则不保存：%1")
+                  .arg(normalized);
         emit batchBacktestStateChanged();
         return 0;
     }
@@ -3777,7 +4612,7 @@ QString TradingController::resumeBatchBacktest(const QString &runId)
         emit batchBacktestStateChanged();
         return {};
     }
-    if (batchBacktestRunning() || backtestRunning()) {
+    if (batchBacktestRunning() || strategyMatrixRunning() || backtestRunning()) {
         m_batchBacktestError = QStringLiteral("已有单品种或批量回测正在运行");
         emit batchBacktestStateChanged();
         return {};
@@ -3933,6 +4768,7 @@ qulonglong TradingController::runPortfolioBacktest(
         return 0;
     }
     if (m_portfolioBacktestService.isRunning() || batchBacktestRunning()
+        || strategyMatrixRunning()
         || backtestRunning()) {
         m_portfolioBacktestError = QStringLiteral("已有回测任务正在运行");
         m_portfolioBacktestStatusText = QStringLiteral("组合回测未启动");
@@ -4025,6 +4861,7 @@ qulonglong TradingController::runCrossSectionalBacktestForPeriod(
         return 0;
     }
     if (m_crossSectionalBacktestService.isRunning() || batchBacktestRunning()
+        || strategyMatrixRunning()
         || backtestRunning() || portfolioBacktestRunning()) {
         m_crossSectionalBacktestError = QStringLiteral("已有回测任务正在运行");
         m_crossSectionalBacktestStatusText = QStringLiteral("多股回测未启动");
@@ -5534,11 +6371,100 @@ QVariantMap TradingController::replayBacktestBar(int index) const
             break;
         }
     }
+    const BacktestPosition &open = m_displayedBacktestResult->finalPosition;
+    if (side.isEmpty() && open.quantity > 0.0
+        && open.entryTime == candle.startTime) {
+        side = QStringLiteral("买入");
+        reason = open.entryReason + QStringLiteral(" · 持仓中");
+        price = open.averagePrice;
+    }
     map.insert(QStringLiteral("hasSignal"), !side.isEmpty());
     map.insert(QStringLiteral("signalSide"), side);
     map.insert(QStringLiteral("signalReason"), reason);
     map.insert(QStringLiteral("signalPrice"), price);
     return map;
+}
+
+bool TradingController::startBacktestReplay(int barsPerSecond)
+{
+    if (m_backtestReplayPoints.isEmpty()) return false;
+    const bool resume = m_backtestReplayActive
+        && m_backtestReplayIndex < m_backtestReplayPoints.size();
+    if (!resume) {
+        m_backtestReplayActive = true;
+        m_backtestReplayIndex = 0;
+        m_backtestReplayCandleModel.clear();
+    }
+    const int speed = std::clamp(barsPerSecond, 1, 20);
+    m_backtestReplayTimer.setInterval(1000 / speed);
+    m_backtestReplayTimer.start();
+    LogService::instance().info(QStringLiteral("backtest_replay"),
+        QStringLiteral("%1 %2，速度 %3 根/秒")
+            .arg(resume ? QStringLiteral("继续") : QStringLiteral("开始"),
+                 m_selectedBacktestArchiveId).arg(speed));
+    emit backtestReplayChanged();
+    return true;
+}
+
+void TradingController::pauseBacktestReplay()
+{
+    if (!m_backtestReplayTimer.isActive()) return;
+    m_backtestReplayTimer.stop();
+    LogService::instance().info(QStringLiteral("backtest_replay"),
+        QStringLiteral("暂停 %1，进度 %2")
+            .arg(m_selectedBacktestArchiveId).arg(m_backtestReplayIndex));
+    emit backtestReplayChanged();
+}
+
+void TradingController::stepBacktestReplay()
+{
+    if (!m_backtestReplayActive || m_backtestReplayIndex >= m_backtestReplayPoints.size()) {
+        m_backtestReplayTimer.stop();
+        emit backtestReplayChanged();
+        return;
+    }
+    m_backtestReplayCandleModel.addPoint(
+        m_backtestReplayPoints.at(m_backtestReplayIndex++));
+    if (!m_backtestReplayTimer.isActive()) {
+        LogService::instance().info(QStringLiteral("ui_click"),
+            QStringLiteral("action=step_backtest_replay result=%1 progress=%2")
+                .arg(m_selectedBacktestArchiveId).arg(m_backtestReplayIndex));
+    }
+    if (m_backtestReplayIndex >= m_backtestReplayPoints.size())
+        m_backtestReplayTimer.stop();
+    emit backtestReplayChanged();
+}
+
+void TradingController::seekBacktestReplay(int revealedBars)
+{
+    if (m_backtestReplayPoints.isEmpty()) return;
+    m_backtestReplayTimer.stop();
+    m_backtestReplayActive = true;
+    m_backtestReplayIndex = std::clamp(revealedBars, 0,
+                                     int(m_backtestReplayPoints.size()));
+    m_backtestReplayCandleModel.loadPoints(
+        m_backtestReplayPoints.mid(0, m_backtestReplayIndex));
+    LogService::instance().info(QStringLiteral("backtest_replay"),
+        QStringLiteral("定位 %1，进度 %2")
+            .arg(m_selectedBacktestArchiveId).arg(m_backtestReplayIndex));
+    emit backtestReplayChanged();
+}
+
+void TradingController::closeBacktestReplay()
+{
+    m_backtestReplayTimer.stop();
+    m_backtestReplayActive = false;
+    m_backtestReplayIndex = 0;
+    m_backtestReplayCandleModel.clear();
+    emit backtestReplayChanged();
+}
+
+void TradingController::logBacktestChartAction(const QString &action)
+{
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=%1 result=%2 progress=%3")
+            .arg(action, m_selectedBacktestArchiveId)
+            .arg(m_backtestReplayIndex));
 }
 
 QVariantList TradingController::validationRuns() const
@@ -5641,9 +6567,13 @@ void TradingController::clearBacktestSampleWindow()
 
 void TradingController::clearBacktestResult()
 {
+    closeBacktestReplay();
+    m_backtestReplayPoints.clear();
+    m_candleModel.clear();
+    m_candleModel.setMaximumRows(5000);
+    m_backtestReplayCandleModel.setMaximumRows(5000);
     m_backtestArchiveLoadRequestGate.cancel();
     clearBacktestArchiveRawTickPage();
-    m_candleModel.clear();
     m_signalModel.clear();
     m_backtestTradeModel.clear();
     m_equityCurveModel.clear();
@@ -5681,17 +6611,140 @@ void TradingController::refreshBacktestArchiveList()
     if (!m_storageReady) return;
     const QString previousSelection = m_selectedBacktestArchiveId;
     m_backtestArchiveModel.loadSummaries(m_dataStore.loadBacktestArchiveSummaries());
+    m_backtestArchiveStorage = m_dataStore.backtestArchiveStorageStats();
     if (!previousSelection.isEmpty()
         && m_backtestArchiveModel.indexOfResultId(previousSelection) < 0) {
-        m_selectedBacktestArchiveId.clear();
-        m_backtestResultArchived = false;
-        m_backtestResultHistoricalSnapshot = false;
+        clearBacktestResult();
     }
     emit backtestArchiveStateChanged();
 }
 
+bool TradingController::deleteBacktestArchive(const QString &resultId)
+{
+    const QString selectedResultId = resultId.trimmed();
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=delete_backtest_archive result=%1")
+            .arg(selectedResultId));
+    if (!m_storageReady || m_storageRelocationRunning || selectedResultId.isEmpty()
+        || backtestRunning() || batchBacktestRunning()
+        || m_strategyMatrixService.isRunning() || backtestArchiveLoading()
+        || backtestArchiveRawTickPageLoading()
+        || m_batchBacktestArchiveRequestGate.loading()) {
+        m_backtestArchiveError = QStringLiteral("请等待回测和归档操作结束后再删除结果");
+        emit backtestArchiveStateChanged();
+        return false;
+    }
+    QString error;
+    if (!m_dataStore.deleteBacktestArchive(selectedResultId, &error)) {
+        m_backtestArchiveError = error;
+        emit backtestArchiveStateChanged();
+        return false;
+    }
+    if (m_selectedBacktestArchiveId == selectedResultId) clearBacktestResult();
+    m_backtestArchiveError.clear();
+    refreshBacktestArchiveList();
+    setStatusText(QStringLiteral("已删除归档结果；释放的数据库页可供后续写入复用"));
+    return true;
+}
+
+bool TradingController::compactBacktestArchiveStorage()
+{
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=compact_backtest_archive_storage"));
+    if (!m_storageReady || m_storageRelocationRunning
+        || m_backtestArchiveCompactionRunning
+        || m_realtimeLiveSessionState.requested() || liveRunning()
+        || backtestRunning()
+        || batchBacktestRunning() || strategyMatrixRunning()
+        || portfolioBacktestRunning() || crossSectionalBacktestRunning()
+        || parameterGridRunning() || customStrategyReplayRunning()
+        || historyDownloadRunning()
+        || m_tickDataImportRunning || m_tickDataBatchRunning
+        || m_aShareInstrumentDayImportRunning
+        || m_aShareIndustryImportState.value(QStringLiteral("running")).toBool()
+        || m_authorizedFactorImportState.value(QStringLiteral("running")).toBool()
+        || m_externalFactorResearchState.value(QStringLiteral("running")).toBool()
+        || m_externalFactorResearchPreflightState.value(
+               QStringLiteral("running")).toBool()
+        || m_nasDataNodeLoading || m_nasDataNodeSyncRunning
+        || m_nasBacktestPreparationRunning || snapshotLoading()
+        || localCandleSeriesLoading() || localTickSeriesLoading()
+        || liveDayCandleSeriesLoading()
+        || customStrategyPreviewLoading() || customStrategySaveLoading()
+        || rawTickAvailabilityLoading() || m_asyncRawTickAvailabilityService.isBusy()
+        || rawTickSensitivityRunning() || backtestArchiveLoading()
+        || backtestArchiveRawTickPageLoading()
+        || m_batchBacktestArchiveRequestGate.loading()) {
+        m_backtestArchiveCompactionError = QStringLiteral(
+            "请等待行情、回测、导入和数据库查询结束后再整理空间");
+        emit backtestArchiveStateChanged();
+        return false;
+    }
+    persistTradingState();
+    const QString path = m_dataStore.databasePath();
+    const QString uuid = m_dataStore.databaseUuid();
+    stopStorageServices();
+    m_storageReady = false;
+    m_backtestArchiveCompactionRunning = true;
+    m_backtestArchiveCompactionError.clear();
+    setStatusText(QStringLiteral("正在后台整理本地数据库空间"));
+    emit backtestArchiveStateChanged();
+    emit storageStateChanged();
+
+    QPointer<TradingController> guard(this);
+    QThread *worker = QThread::create([guard, path, uuid]() {
+        const SqliteCompactionResult result =
+            SqliteLocalDataStore::compactDatabaseFile(path, uuid);
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, path, result]() {
+            if (guard) guard->finishBacktestArchiveCompaction(path, result);
+        }, Qt::QueuedConnection);
+    });
+    m_backtestArchiveCompactionThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_backtestArchiveCompactionThread == worker)
+            m_backtestArchiveCompactionThread = nullptr;
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->setObjectName(QStringLiteral("PPTraderArchiveCompaction"));
+    worker->start();
+    return true;
+}
+
+void TradingController::finishBacktestArchiveCompaction(
+    const QString &databasePath, const SqliteCompactionResult &result)
+{
+    const bool reopened = restartStorageServices(databasePath);
+    if (!reopened) {
+        m_backtestArchiveCompactionError = QStringLiteral(
+            "数据库整理结束，但应用重新打开数据库失败");
+    } else if (!result.succeeded) {
+        m_backtestArchiveCompactionError = result.error;
+    } else {
+        const qint64 reclaimed = std::max<qint64>(
+            0, result.beforeBytes - result.afterBytes);
+        setStatusText(QStringLiteral("数据库整理完成，文件减少 %1 MiB")
+            .arg(double(reclaimed) / 1048576.0, 0, 'f', 2));
+    }
+    if (!m_backtestArchiveCompactionError.isEmpty())
+        setStatusText(m_backtestArchiveCompactionError);
+    const QString outcome = QStringLiteral("before=%1 after=%2 reopened=%3 error=%4")
+        .arg(result.beforeBytes).arg(result.afterBytes)
+        .arg(reopened ? 1 : 0, 0, 10)
+        .arg(m_backtestArchiveCompactionError);
+    if (m_backtestArchiveCompactionError.isEmpty())
+        LogService::instance().info(QStringLiteral("archive_maintenance"), outcome);
+    else LogService::instance().warning(QStringLiteral("archive_maintenance"), outcome);
+    m_backtestArchiveCompactionRunning = false;
+    emit backtestArchiveStateChanged();
+    emit storageStateChanged();
+}
+
 bool TradingController::loadBacktestArchive(const QString &resultId)
 {
+    LogService::instance().info(QStringLiteral("ui_click"),
+        QStringLiteral("action=view_backtest_result result=%1")
+            .arg(resultId.trimmed()));
     if (!m_storageReady || resultId.trimmed().isEmpty() || m_backtest.isRunning()
         || m_backtestPreparing || !m_asyncBacktestArchiveService.isRunning()) {
         m_backtestArchiveError = m_storageReady
@@ -5732,7 +6785,12 @@ void TradingController::finishBacktestArchiveLoad(
     m_displayedBacktestResult = record.result;
     m_displayedBacktestCompletedAt = record.completedAt;
     m_backtestSummary = record.result.summary;
-    m_candleModel.loadBacktestResult(record.result);
+    closeBacktestReplay();
+    m_backtestReplayPoints = CandleListModel::backtestPoints(record.result);
+    m_candleModel.setMaximumRows(std::max(5000, int(m_backtestReplayPoints.size())));
+    m_backtestReplayCandleModel.setMaximumRows(
+        std::max(5000, int(m_backtestReplayPoints.size())));
+    m_candleModel.loadPoints(m_backtestReplayPoints);
     m_signalModel.loadSignals(record.result.chartSignals);
     m_backtestTradeModel.loadTrades(record.result.trades);
     m_equityCurveModel.loadPoints(record.result.equityCurve);
@@ -8527,8 +9585,8 @@ bool TradingController::applyMarketSnapshotResult(const MarketSnapshotQueryResul
 void TradingController::restartLiveIfRunning()
 {
     if (!m_realtimeLiveSessionState.requested()) return;
-    m_marketData->stop();
-    m_marketData->start(buildMarketUniverse());
+    activeMarketDataProvider()->stop();
+    activeMarketDataProvider()->start(buildMarketUniverse());
 }
 
 void TradingController::setStrategyEnabled(const QString &strategyId, bool enabled)
@@ -8910,7 +9968,6 @@ void TradingController::ensureStrategyExecutionConfiguration(const QString &stra
 void TradingController::handleBacktestPoint(const CandlePoint &point)
 {
     m_candleModel.addPoint(point);
-    if (point.hasSignal) m_signalModel.addSignal(point.signal);
 }
 
 void TradingController::handleBacktestTrade(const BacktestTrade &trade)
@@ -8929,6 +9986,13 @@ void TradingController::handleBacktestFinished(const PerformanceSummary &summary
     m_backtestSummary = summary;
     m_completedBacktestTaskId = m_backtestTaskId;
     m_backtestTradeModel.loadTrades(m_backtest.result().trades);
+    closeBacktestReplay();
+    m_backtestReplayPoints = CandleListModel::backtestPoints(m_backtest.result());
+    m_candleModel.setMaximumRows(std::max(5000, int(m_backtestReplayPoints.size())));
+    m_backtestReplayCandleModel.setMaximumRows(
+        std::max(5000, int(m_backtestReplayPoints.size())));
+    m_candleModel.loadPoints(m_backtestReplayPoints);
+    m_signalModel.loadSignals(m_backtest.result().chartSignals);
     m_equityCurveModel.loadPoints(m_backtest.result().equityCurve);
     BacktestArchiveRecord archive;
     archive.resultId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -8938,16 +10002,22 @@ void TradingController::handleBacktestFinished(const PerformanceSummary &summary
     m_backtestArchiveError.clear();
     m_backtestArchiveSaveError.clear();
     m_backtestResultHistoricalSnapshot = false;
-    if (m_storageReady && m_dataStore.saveBacktestArchive(archive)) {
+    const bool profitable = isProfitableBacktestForArchive(archive.result);
+    if (profitable && m_storageReady && m_dataStore.saveBacktestArchive(archive)) {
         m_selectedBacktestArchiveId = archive.resultId;
         m_backtestResultArchived = true;
         refreshBacktestArchiveList();
     } else {
         m_selectedBacktestArchiveId.clear();
         m_backtestResultArchived = false;
-        m_backtestArchiveSaveError = m_storageReady
-            ? QStringLiteral("本次结果未保存：SQLite 归档写入失败")
-            : QStringLiteral("本次结果未保存：本地数据库不可用");
+        m_backtestArchiveSaveError = !profitable
+            ? archive.result.config.dataMode == BacktestDataMode::RawTicks
+                  && archive.result.summary.totalTrades == 0
+                ? QStringLiteral("本次原始 Tick 回测没有闭合交易，不归档")
+                : QStringLiteral("本次净收益未大于 0，按规则不归档")
+            : m_storageReady
+                ? QStringLiteral("本次结果未保存：SQLite 归档写入失败")
+                : QStringLiteral("本次结果未保存：本地数据库不可用");
         emit backtestArchiveStateChanged();
     }
     m_backtestProgress = 1.0;

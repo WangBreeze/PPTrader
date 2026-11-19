@@ -110,7 +110,7 @@ void AShareIndustryImportTest::storesImmutableDatasetsAndVersionedCorrections()
 
     SqliteLocalDataStore store;
     QVERIFY(store.initialize(databasePath));
-    QCOMPARE(store.schemaVersion(), 25);
+    QCOMPARE(store.schemaVersion(), 28);
 
     AShareIndustryDataset first = original.dataset;
     bool reused = true;

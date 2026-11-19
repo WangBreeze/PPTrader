@@ -148,6 +148,7 @@ public:
     Q_INVOKABLE void panByPixels(qreal deltaX);
     Q_INVOKABLE void resetViewport();
     Q_INVOKABLE void scrollToLatest();
+    Q_INVOKABLE void showLatest(int bars);
     Q_INVOKABLE void scalePriceRange(qreal factor);
     Q_INVOKABLE void resetPriceRange();
     Q_INVOKABLE QString pointTextAt(qreal x) const;

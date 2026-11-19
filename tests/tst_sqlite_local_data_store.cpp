@@ -216,13 +216,19 @@ private slots:
     void archiveRestoresSampledRawTickEquityMetadata();
     void archivePreservesDatasetIdentity();
     void archiveTransactionRollsBackOnChildFailure();
+    void archiveLongSeriesRoundTripsAndRollsBack();
+    void archiveCompactionReclaimsPagesAndKeepsRemainingResult();
     void archiveRestoreIsStableAndDoesNotRequestNetwork();
+    void sharedMatrixCandleSnapshotKeepsSignalsAndRejectsChanges();
+    void sharedMatrixRawTickSnapshotKeepsSignalsAndRejectsChanges();
+    void migratesV27RawTickArchiveWithoutChangingInput();
     void legacyV17ArchiveRestoresWithoutInventedCandles();
     void incompleteV18CandleSnapshotIsRejected();
     void migratesLegacyDatabaseWithBackupAndStableIdentity();
     void migrationFailureRollsBackWithoutHalfSchema();
     void relocatesDatabaseByVerifiedCopyAndRejectsNetworkPath();
     void storageProfileAcceptsExplicitEnvironmentOverride();
+    void matrixRunAndTasksPersistWithFrozenIdentity();
     void aShareInstrumentDayStatusRoundTripsTransactionally();
     void rawTickParameterSensitivityRoundTripsImmutableIdentity();
     void rawTickNestedWalkForwardArchiveRequiresAndRestoresAllFolds();
@@ -242,6 +248,105 @@ void SqliteLocalDataStoreTest::storageProfileAcceptsExplicitEnvironmentOverride(
     if (previous.isNull()) qunsetenv("PPTRADER_DATABASE_PATH");
     else qputenv("PPTRADER_DATABASE_PATH", previous);
     QCOMPARE(actual, expected);
+}
+
+void SqliteLocalDataStoreTest::matrixRunAndTasksPersistWithFrozenIdentity()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("matrix-runs.db"));
+    StrategyMatrixRunRecord run;
+    run.runId = QStringLiteral("matrix-test-1");
+    run.createdAt = QDateTime::currentDateTimeUtc();
+    run.requestJson = QStringLiteral("{\"snapshotVersion\":1}");
+    run.status = QStringLiteral("running");
+    run.totalTasks = 2;
+    StrategyMatrixTaskRecord first;
+    first.runId = run.runId;
+    first.taskId = QStringLiteral("matrix-test-1:sma:v0:pA:600519");
+    first.strategyId = QStringLiteral("sma_crossover");
+    first.parameterFingerprint = QStringLiteral("A");
+    first.symbol = QStringLiteral("600519");
+    first.datasetVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    first.status = QStringLiteral("pending");
+    StrategyMatrixTaskRecord second = first;
+    second.taskId = QStringLiteral("matrix-test-1:sma:v0:pB:600519");
+    second.parameterFingerprint = QStringLiteral("B");
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QCOMPARE(store.schemaVersion(), 28);
+        QSignalSpy writeFailed(&store, &SqliteLocalDataStore::writeFailed);
+        const bool created = store.createStrategyMatrixRun(run, {first, second});
+        QVERIFY2(created, qPrintable(writeFailed.isEmpty()
+            ? QStringLiteral("未知存储错误")
+            : writeFailed.last().first().toString()));
+        QVERIFY(!store.createStrategyMatrixRun(run, {first, second}));
+        first.status = QStringLiteral("succeeded");
+        first.resultId = QStringLiteral("result-1");
+        first.totalReturnPercent = 3.5;
+        QVERIFY(store.upsertStrategyMatrixTask(first));
+        auto archive = archiveFixture(QStringLiteral("matrix-result-1"),
+            first.taskId, first.strategyId, first.strategyVersion,
+            QDateTime::currentDateTimeUtc());
+        archive.result.config.datasetIdentity.datasetVersion = first.datasetVersion;
+        QVERIFY(store.saveBacktestArchive(archive));
+        StrategyMatrixTaskRecord recovered = first;
+        recovered.status = QStringLiteral("pending");
+        recovered.resultId.clear();
+        QVERIFY(store.reconcileStrategyMatrixTaskArchive(&recovered));
+        QCOMPARE(recovered.resultId, archive.resultId);
+        QCOMPARE(recovered.totalReturnPercent,
+                 archive.result.summary.totalReturnPercent);
+        QVERIFY(store.upsertStrategyMatrixTask(recovered));
+        first = recovered;
+        StrategyMatrixTaskRecord changedIdentity = first;
+        changedIdentity.datasetVersion = QStringLiteral("dataset-changed");
+        QVERIFY(!store.upsertStrategyMatrixTask(changedIdentity));
+        QVERIFY(store.updateStrategyMatrixRunStatus(
+            run.runId, QStringLiteral("cancelled")));
+    }
+    {
+        SqliteLocalDataStore reopened;
+        QVERIFY(reopened.initialize(path));
+        const auto loadedRun = reopened.loadStrategyMatrixRun(run.runId);
+        QVERIFY(loadedRun.has_value());
+        QCOMPARE(loadedRun->requestJson, run.requestJson);
+        QCOMPARE(loadedRun->status, QStringLiteral("cancelled"));
+        QCOMPARE(loadedRun->totalTasks, 2);
+        const auto tasks = reopened.loadStrategyMatrixTasks(run.runId);
+        QCOMPARE(tasks.size(), 2);
+        QCOMPARE(tasks.at(0).taskId, first.taskId);
+        QCOMPARE(tasks.at(0).datasetVersion, first.datasetVersion);
+        QCOMPARE(tasks.at(0).resultId, first.resultId);
+        QCOMPARE(tasks.at(0).totalReturnPercent, first.totalReturnPercent);
+        QCOMPARE(tasks.at(1).status, QStringLiteral("pending"));
+        QCOMPARE(reopened.loadStrategyMatrixRuns(5).size(), 1);
+        QCOMPARE(reopened.loadStrategyMatrixRuns(0).size(), 1);
+        auto standalone = archiveFixture(QStringLiteral("standalone-result-1"),
+            QStringLiteral("standalone-task-1"), QStringLiteral("sma_crossover"),
+            0, QDateTime::currentDateTimeUtc());
+        QVERIFY(reopened.saveBacktestArchive(standalone));
+        const QVariantMap before = reopened.backtestArchiveStorageStats();
+        QCOMPARE(before.value(QStringLiteral("archiveCount")).toInt(), 2);
+        QVERIFY(before.value(QStringLiteral("databaseBytes")).toLongLong() > 0);
+        const qint64 archiveBytes = before.value(QStringLiteral("archiveBytes")).toLongLong();
+        QVERIFY(archiveBytes == -1 || archiveBytes > 0);
+        QString error;
+        QVERIFY(!reopened.deleteBacktestArchive(first.resultId, &error));
+        QCOMPARE(error, QStringLiteral("矩阵结果需随整个批次删除"));
+        QVERIFY(reopened.loadBacktestArchive(first.resultId).has_value());
+        QVERIFY(reopened.deleteBacktestArchive(standalone.resultId, &error));
+        QVERIFY(!reopened.loadBacktestArchive(standalone.resultId).has_value());
+        QCOMPARE(reopened.backtestArchiveStorageStats()
+                     .value(QStringLiteral("archiveCount")).toInt(), 1);
+        QVERIFY(reopened.deleteStrategyMatrixRun(run.runId, &error));
+        QVERIFY(!reopened.loadStrategyMatrixRun(run.runId).has_value());
+        QVERIFY(reopened.loadStrategyMatrixTasks(run.runId).isEmpty());
+        QVERIFY(!reopened.loadBacktestArchive(first.resultId).has_value());
+        QCOMPARE(reopened.backtestArchiveStorageStats()
+                     .value(QStringLiteral("archiveCount")).toInt(), 0);
+    }
 }
 
 void SqliteLocalDataStoreTest::aShareInstrumentDayStatusRoundTripsTransactionally()
@@ -324,7 +429,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     {
         SqliteLocalDataStore store;
         QVERIFY(store.initialize(path));
-        QCOMPARE(store.schemaVersion(), 25);
+        QCOMPARE(store.schemaVersion(), 28);
         QVERIFY(!store.databaseUuid().isEmpty());
         uuid = store.databaseUuid();
         backupPath = store.lastMigrationBackupPath();
@@ -340,7 +445,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
             QVERIFY(verify.open());
             QSqlQuery query(verify);
             QVERIFY(query.exec(QStringLiteral("pragma user_version")) && query.next());
-            QCOMPARE(query.value(0).toInt(), 25);
+            QCOMPARE(query.value(0).toInt(), 28);
             QVERIFY(query.exec(QStringLiteral(
                 "select migration_name from schema_migration_history where version = 1"))
                 && query.next());
@@ -479,7 +584,7 @@ void SqliteLocalDataStoreTest::migratesLegacyDatabaseWithBackupAndStableIdentity
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
     QCOMPARE(reopened.databaseUuid(), uuid);
-    QCOMPARE(reopened.schemaVersion(), 25);
+    QCOMPARE(reopened.schemaVersion(), 28);
     QVERIFY(reopened.lastMigrationBackupPath().isEmpty());
 }
 
@@ -631,7 +736,10 @@ void SqliteLocalDataStoreTest::archiveSampleWindowsSurviveReopen()
     {
         SqliteLocalDataStore writer;
         QVERIFY(writer.initialize(path));
-        QVERIFY(writer.saveBacktestArchive(record));
+        QSignalSpy writeFailed(&writer, &SqliteLocalDataStore::writeFailed);
+        QVERIFY2(writer.saveBacktestArchive(record),
+                 qPrintable(writeFailed.isEmpty() ? QStringLiteral("归档失败")
+                     : writeFailed.last().first().toString()));
     }
     SqliteLocalDataStore reader;
     QVERIFY(reader.initialize(path));
@@ -679,7 +787,7 @@ void SqliteLocalDataStoreTest::legacyArchiveDoesNotInventRequestedSampleWindow()
     {
         SqliteLocalDataStore upgraded;
         QVERIFY(upgraded.initialize(path));
-        QCOMPARE(upgraded.schemaVersion(), 25);
+        QCOMPARE(upgraded.schemaVersion(), 28);
         QVERIFY(QFileInfo::exists(upgraded.lastMigrationBackupPath()));
         const auto loaded = upgraded.loadBacktestArchive(original.resultId,
             BacktestArchiveLoadMode::CompleteInputSnapshot);
@@ -1189,6 +1297,115 @@ void SqliteLocalDataStoreTest::archiveTransactionRollsBackOnChildFailure()
     QVERIFY(!store.loadBacktestArchive(QStringLiteral("rolled-back")).has_value());
 }
 
+void SqliteLocalDataStoreTest::archiveLongSeriesRoundTripsAndRollsBack()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-batch-boundary.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+
+    auto record = archiveFixture(QStringLiteral("batched-result"),
+        QStringLiteral("batched-task"), QStringLiteral("sma_crossover"), 0,
+        QDateTime::currentDateTimeUtc());
+    auto &config = record.result.config;
+    config.requestedBars = 65;
+    config.actualBars = 65;
+    config.to = config.from.addDays(64);
+    const Candle candleTemplate = record.result.candles.first();
+    record.result.candles.clear();
+    record.result.equityCurve.clear();
+    for (int index = 0; index < 65; ++index) {
+        Candle candle = candleTemplate;
+        candle.startTime = config.from.addDays(index);
+        candle.open = 1500.0 + index;
+        candle.high = candle.open + 10.0;
+        candle.low = candle.open - 5.0;
+        candle.close = candle.open + 5.0;
+        record.result.candles.append(candle);
+        const double equity = 1000000.0 + 12500.0 * index / 64.0;
+        record.result.equityCurve.append(
+            {candle.startTime, equity, equity, 0.0, 0.0});
+    }
+    record.result.chartSignals.first().timestamp = config.to;
+    record.result.chartSignals.first().price = record.result.candles.last().close;
+    record.result.trades.first().exitTime = config.to;
+    record.result.trades.first().exitPrice = record.result.candles.last().close;
+    QVERIFY(store.saveBacktestArchive(record));
+    const auto loaded = store.loadBacktestArchive(record.resultId);
+    QVERIFY(loaded.has_value());
+    QCOMPARE(loaded->result.candles.size(), 65);
+    QCOMPARE(loaded->result.equityCurve.size(), 65);
+    QCOMPARE(loaded->result.candles.last().startTime, config.to);
+    QCOMPARE(loaded->result.chartSignals.first().timestamp, config.to);
+
+    const QString connectionName = QStringLiteral("archive_batch_sabotage_%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral(
+            "create trigger reject_later_archive_candle before insert on backtest_candles "
+            "when new.result_id='batched-rejected' and new.sequence_no=40 "
+            "begin select raise(abort, 'forced later batch failure'); end")));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    record.resultId = QStringLiteral("batched-rejected");
+    QVERIFY(!store.saveBacktestArchive(record));
+    QVERIFY(!store.loadBacktestArchive(record.resultId).has_value());
+    QCOMPARE(store.loadBacktestArchiveSummaries().size(), 1);
+}
+
+void SqliteLocalDataStoreTest::archiveCompactionReclaimsPagesAndKeepsRemainingResult()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("archive-compaction.db"));
+    QString databaseUuid;
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        databaseUuid = store.databaseUuid();
+        for (int index = 0; index < 60; ++index) {
+            const QString resultId = QStringLiteral("compact-%1").arg(index);
+            const auto record = archiveFixture(resultId,
+                QStringLiteral("compact-task-%1").arg(index),
+                QStringLiteral("sma_crossover"), 0,
+                QDateTime::currentDateTimeUtc().addSecs(index));
+            QVERIFY(store.saveBacktestArchive(record));
+        }
+        for (int index = 1; index < 60; ++index) {
+            QString error;
+            QVERIFY2(store.deleteBacktestArchive(
+                         QStringLiteral("compact-%1").arg(index), &error),
+                     qPrintable(error));
+        }
+        QCOMPARE(store.loadBacktestArchiveSummaries().size(), 1);
+        QVERIFY(store.backtestArchiveStorageStats()
+                    .value(QStringLiteral("reusableBytes")).toLongLong() > 0);
+        store.close();
+    }
+    const qint64 before = QFileInfo(path).size();
+    const auto rejected = SqliteLocalDataStore::compactDatabaseFile(
+        path, QStringLiteral("wrong-database-uuid"));
+    QVERIFY(!rejected.succeeded);
+    QCOMPARE(QFileInfo(path).size(), before);
+    const auto compacted = SqliteLocalDataStore::compactDatabaseFile(
+        path, databaseUuid);
+    QVERIFY2(compacted.succeeded, qPrintable(compacted.error));
+    QVERIFY(compacted.afterBytes < compacted.beforeBytes);
+    SqliteLocalDataStore reopened;
+    QVERIFY(reopened.initialize(path));
+    QCOMPARE(reopened.databaseUuid(), databaseUuid);
+    QCOMPARE(reopened.loadBacktestArchiveSummaries().size(), 1);
+    QVERIFY(reopened.loadBacktestArchive(QStringLiteral("compact-0")).has_value());
+    QVERIFY(reopened.verifyIntegrity());
+}
+
 void SqliteLocalDataStoreTest::archiveRestoreIsStableAndDoesNotRequestNetwork()
 {
     QTemporaryDir directory;
@@ -1216,6 +1433,237 @@ void SqliteLocalDataStoreTest::archiveRestoreIsStableAndDoesNotRequestNetwork()
     QCOMPARE(restored->result.config.strategyParameters, persistedParameters);
     QCOMPARE(restored->result.config.dataVersion,
              QStringLiteral("sha256:") + QString(64, 'b'));
+}
+
+void SqliteLocalDataStoreTest::sharedMatrixCandleSnapshotKeepsSignalsAndRejectsChanges()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("shared-candles.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    BacktestArchiveRecord owner = archiveFixture(
+        QStringLiteral("owner"), QStringLiteral("matrix-1:sma:600519"),
+        QStringLiteral("sma_crossover"), 0, QDateTime::currentDateTimeUtc());
+    QVERIFY(store.saveBacktestArchive(owner));
+
+    BacktestArchiveRecord dependent = owner;
+    dependent.resultId = QStringLiteral("dependent");
+    dependent.result.config.taskId = QStringLiteral("matrix-1:macd:600519");
+    dependent.result.config.strategyId = QStringLiteral("macd_trend");
+    dependent.sharedCandleResultId = owner.resultId;
+    dependent.result.chartSignals.first().timestamp = dependent.result.config.from;
+    dependent.result.chartSignals.first().side = SignalSide::Buy;
+    dependent.result.chartSignals.first().price = 1500.0;
+    dependent.result.chartSignals.first().reason = QStringLiteral("另一策略入场");
+    QVERIFY(store.saveBacktestArchive(dependent));
+
+    const auto restoredOwner = store.loadBacktestArchive(owner.resultId);
+    const auto restoredDependent = store.loadBacktestArchive(dependent.resultId);
+    QVERIFY(restoredOwner.has_value());
+    QVERIFY(restoredDependent.has_value());
+    QCOMPARE(restoredOwner->result.candles.size(), 2);
+    QCOMPARE(restoredDependent->result.candles.size(), 2);
+    QCOMPARE(restoredDependent->sharedCandleResultId, owner.resultId);
+    QCOMPARE(restoredOwner->result.chartSignals.first().timestamp,
+             owner.result.config.to);
+    QCOMPARE(restoredDependent->result.chartSignals.first().timestamp,
+             dependent.result.config.from);
+    QCOMPARE(restoredDependent->result.chartSignals.first().reason,
+             QStringLiteral("另一策略入场"));
+
+    BacktestArchiveRecord mismatched = dependent;
+    mismatched.resultId = QStringLiteral("mismatched");
+    mismatched.result.candles.first().source = QStringLiteral("different_source");
+    QVERIFY(!store.saveBacktestArchive(mismatched));
+    QVERIFY(!store.loadBacktestArchive(mismatched.resultId).has_value());
+
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral(
+            "select count(*) from backtest_candles where result_id='dependent'")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 0);
+        QVERIFY(query.exec(QStringLiteral(
+            "select count(*) from backtest_chart_signals where result_id='dependent'")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 1);
+        QVERIFY(query.exec(QStringLiteral(
+            "update backtest_candles set high=high+1 where result_id='owner' and sequence_no=0")));
+    }
+    QSqlDatabase::removeDatabase(connection);
+    QVERIFY(!store.loadBacktestArchive(owner.resultId).has_value());
+    QVERIFY(!store.loadBacktestArchive(dependent.resultId).has_value());
+
+    StrategyMatrixRunRecord run;
+    run.runId = QStringLiteral("matrix-1");
+    run.createdAt = QDateTime::currentDateTimeUtc();
+    run.requestJson = QStringLiteral("{\"snapshotVersion\":1}");
+    run.status = QStringLiteral("succeeded");
+    run.totalTasks = 2;
+    StrategyMatrixTaskRecord first;
+    first.runId = run.runId;
+    first.taskId = owner.result.config.taskId;
+    first.strategyId = owner.result.config.strategyId;
+    first.parameterFingerprint = QStringLiteral("test");
+    first.symbol = owner.result.config.instrument.symbol;
+    first.datasetVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    first.status = QStringLiteral("succeeded");
+    first.resultId = owner.resultId;
+    StrategyMatrixTaskRecord second = first;
+    second.taskId = dependent.result.config.taskId;
+    second.strategyId = dependent.result.config.strategyId;
+    second.resultId = dependent.resultId;
+    QSignalSpy writeFailed(&store, &SqliteLocalDataStore::writeFailed);
+    QVERIFY2(store.createStrategyMatrixRun(run, {first, second}),
+             qPrintable(writeFailed.isEmpty() ? QStringLiteral("创建批次失败")
+                 : writeFailed.last().first().toString()));
+    QString error;
+    QVERIFY(!store.deleteBacktestArchive(owner.resultId, &error));
+    QVERIFY2(store.deleteStrategyMatrixRun(run.runId, &error), qPrintable(error));
+    QVERIFY(!store.loadBacktestArchive(owner.resultId).has_value());
+    QVERIFY(!store.loadBacktestArchive(dependent.resultId).has_value());
+    QCOMPARE(store.backtestArchiveStorageStats()
+                 .value(QStringLiteral("archiveCount")).toInt(), 0);
+}
+
+void SqliteLocalDataStoreTest::sharedMatrixRawTickSnapshotKeepsSignalsAndRejectsChanges()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("shared-raw-ticks.db"));
+    SqliteLocalDataStore store;
+    QVERIFY(store.initialize(path));
+    BacktestArchiveRecord owner = rawArchiveFixture(QStringLiteral("raw-owner"), 12);
+    owner.result.config.taskId = QStringLiteral("raw-matrix:first:600519");
+    QVERIFY(store.saveBacktestArchive(owner));
+
+    BacktestArchiveRecord dependent = owner;
+    dependent.resultId = QStringLiteral("raw-dependent");
+    dependent.result.config.taskId = QStringLiteral("raw-matrix:second:600519");
+    dependent.sharedRawTickResultId = owner.resultId;
+    dependent.result.chartSignals.first().timestamp =
+        dependent.result.rawTicks.at(3).timestamp;
+    dependent.result.chartSignals.first().price =
+        dependent.result.rawTicks.at(3).price;
+    dependent.result.chartSignals.first().reason = QStringLiteral("另一策略出场");
+    QVERIFY(store.saveBacktestArchive(dependent));
+
+    const auto restored = store.loadBacktestArchive(
+        dependent.resultId, BacktestArchiveLoadMode::CompleteInputSnapshot);
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->sharedRawTickResultId, owner.resultId);
+    QCOMPARE(restored->result.rawTicks.size(), 12);
+    QCOMPARE(restored->result.chartSignals.size(), 1);
+    QCOMPARE(restored->result.chartSignals.first().reason,
+             QStringLiteral("另一策略出场"));
+    const auto page = store.loadBacktestRawTickPage(dependent.resultId, 4, 3);
+    QVERIFY(page.has_value());
+    QCOMPARE(page->totalCount, 12);
+    QCOMPARE(page->ticks.size(), 3);
+    QCOMPARE(page->ticks.first().timestamp, owner.result.rawTicks.at(4).timestamp);
+
+    BacktestArchiveRecord mismatched = dependent;
+    mismatched.resultId = QStringLiteral("raw-mismatched");
+    mismatched.result.config.dataVersion = QStringLiteral("sha256:") + QString(64, 'f');
+    QVERIFY(!store.saveBacktestArchive(mismatched));
+
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral("select count(*) from backtest_raw_ticks")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 12);
+        QVERIFY(query.exec(QStringLiteral(
+            "select count(*) from backtest_raw_ticks where result_id='raw-dependent'")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 0);
+        QVERIFY(query.exec(QStringLiteral(
+            "select count(*) from backtest_chart_signals where result_id='raw-dependent'")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 1);
+        QVERIFY(query.exec(QStringLiteral(
+            "update backtest_results set data_version='tampered' "
+            "where result_id='raw-dependent'")));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+    QVERIFY(!store.loadBacktestArchive(dependent.resultId).has_value());
+    QVERIFY(!store.loadBacktestRawTickPage(dependent.resultId, 0, 3).has_value());
+    StrategyMatrixRunRecord run;
+    run.runId = QStringLiteral("raw-matrix");
+    run.createdAt = QDateTime::currentDateTimeUtc();
+    run.requestJson = QStringLiteral("{\"snapshotVersion\":2}");
+    run.status = QStringLiteral("succeeded");
+    run.totalTasks = 2;
+    StrategyMatrixTaskRecord first;
+    first.runId = run.runId;
+    first.taskId = owner.result.config.taskId;
+    first.strategyId = owner.result.config.strategyId;
+    first.parameterFingerprint = QStringLiteral("first");
+    first.symbol = owner.result.config.instrument.symbol;
+    first.datasetVersion = QStringLiteral("sha256:") + QString(64, 'a');
+    first.status = QStringLiteral("succeeded");
+    first.resultId = owner.resultId;
+    StrategyMatrixTaskRecord second = first;
+    second.taskId = dependent.result.config.taskId;
+    second.parameterFingerprint = QStringLiteral("second");
+    second.resultId = dependent.resultId;
+    QVERIFY(store.createStrategyMatrixRun(run, {first, second}));
+    QString error;
+    QVERIFY(!store.deleteBacktestArchive(owner.resultId, &error));
+    QVERIFY2(store.deleteStrategyMatrixRun(run.runId, &error), qPrintable(error));
+    QVERIFY(!store.loadBacktestArchive(dependent.resultId).has_value());
+    QCOMPARE(store.backtestArchiveStorageStats()
+                 .value(QStringLiteral("archiveCount")).toInt(), 0);
+    QVERIFY(store.verifyIntegrity());
+}
+
+void SqliteLocalDataStoreTest::migratesV27RawTickArchiveWithoutChangingInput()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("raw-v27.db"));
+    const auto original = rawArchiveFixture(QStringLiteral("old-raw"), 12);
+    {
+        SqliteLocalDataStore store;
+        QVERIFY(store.initialize(path));
+        QVERIFY(store.saveBacktestArchive(original));
+    }
+    const QString connection = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connection);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        QVERIFY(query.exec(QStringLiteral(
+            "alter table backtest_results drop column shared_raw_tick_result_id")));
+        QVERIFY(query.exec(QStringLiteral(
+            "delete from schema_migration_history where version=28")));
+        QVERIFY(query.exec(QStringLiteral(
+            "update app_database_metadata set schema_version=27")));
+        QVERIFY(query.exec(QStringLiteral("pragma user_version=27")));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(connection);
+    SqliteLocalDataStore upgraded;
+    QVERIFY(upgraded.initialize(path));
+    QCOMPARE(upgraded.schemaVersion(), 28);
+    QVERIFY(QFileInfo::exists(upgraded.lastMigrationBackupPath()));
+    const auto restored = upgraded.loadBacktestArchive(
+        original.resultId, BacktestArchiveLoadMode::CompleteInputSnapshot);
+    QVERIFY(restored.has_value());
+    QCOMPARE(restored->result.rawTicks.size(), original.result.rawTicks.size());
+    QCOMPARE(restored->result.config.dataVersion, original.result.config.dataVersion);
+    QVERIFY(restored->sharedRawTickResultId.isEmpty());
+    QVERIFY(upgraded.verifyIntegrity());
 }
 
 void SqliteLocalDataStoreTest::legacyV17ArchiveRestoresWithoutInventedCandles()
@@ -1251,7 +1699,7 @@ void SqliteLocalDataStoreTest::legacyV17ArchiveRestoresWithoutInventedCandles()
 
     SqliteLocalDataStore reopened;
     QVERIFY(reopened.initialize(path));
-    QCOMPARE(reopened.schemaVersion(), 25);
+    QCOMPARE(reopened.schemaVersion(), 28);
     const auto restored = reopened.loadBacktestArchive(QStringLiteral("legacy-v17"));
     QVERIFY(restored.has_value());
     QVERIFY(restored->result.candles.isEmpty());
